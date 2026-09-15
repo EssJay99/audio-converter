@@ -33,6 +33,26 @@ else
     echo "==> yt-dlp helper already present"
 fi
 
+# Static ffmpeg binary so users never touch the command line.
+# (ffprobe is not needed: the app parses `ffmpeg -i` output instead.)
+if [ ! -x build_helpers/ffmpeg ]; then
+    echo "==> downloading static ffmpeg for $(uname -m)"
+    if [ "$(uname -m)" = "arm64" ]; then
+        curl -sL --max-time 180 -o build_helpers/ffmpeg.zip \
+            "https://www.osxexperts.net/ffmpeg80arm.zip"
+    else
+        curl -sL --max-time 180 -o build_helpers/ffmpeg.zip \
+            "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip"
+    fi
+    python3 -c "import zipfile; zipfile.ZipFile('build_helpers/ffmpeg.zip').extract('ffmpeg', 'build_helpers/tmp_ff')"
+    mv build_helpers/tmp_ff/ffmpeg build_helpers/ffmpeg
+    rm -rf build_helpers/tmp_ff build_helpers/ffmpeg.zip
+    chmod +x build_helpers/ffmpeg
+    file build_helpers/ffmpeg
+else
+    echo "==> ffmpeg helper already present"
+fi
+
 echo "==> running test suite before packaging"
 "$PY" -m pytest tests/ -q
 
