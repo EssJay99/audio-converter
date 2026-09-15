@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# App runtime data (the desktop DB, secret key, conversions live here)
+*.db
+*.db-wal
+*.db-shm
+.secret_key
+config.db
+
+# Build outputs (recreated by scripts/build_macos.sh)
+build/
+dist/
+build_helpers/
+
+# Test / tool caches
+.pytest_cache/
+.hypothesis/
+
+# macOS
+.DS_Store
+
+# Local scratch
+*.log

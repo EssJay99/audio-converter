@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Audio Converter</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Audio Converter</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navMenu">
+                    <div class="navbar-nav">
+                        <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
+                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category if category in ['success', 'danger', 'warning', 'info'] else 'secondary' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="row">
+            <div class="col-lg-5">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h3>Convert Audio</h3>
+                    <form method="POST" action="/convert">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="mb-3">
+                            <label for="url" class="form-label">YouTube or SoundCloud Link</label>
+                            <input type="text" class="form-control form-control-lg" id="url" name="url" required
+                                   placeholder="https://www.youtube.com/watch?v=... or https://soundcloud.com/...">
+                            <small class="form-text text-muted">Tip: paste a YouTube playlist, channel, or SoundCloud set/artist link and every track lands in its own folder. Spotify or Apple Music playlist link? It will be imported: each song is found on YouTube and saved into one folder.</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="format" class="form-label">Output Format</label>
+                            <select class="form-select form-control-lg" id="format" name="format" required>
+                                <option value="flac">FLAC (Free Lossless Audio Codec)</option>
+                                <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
+                                <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
+                                <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="organization" class="form-label">Playlist Organization</label>
+                            <select class="form-select form-control-lg" id="organization" name="organization">
+                                <option value="folder">One folder per playlist (tracks in <code>Output/PlaylistTitle/</code>)</option>
+                                <option value="flat">Save individual tracks in output folder (no subfolders)</option>
+                            </select>
+                            <small class="form-text text-muted">Controls how converted files are organized on disk.</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="output_path" class="form-label">Output Path</label>
+                            <input type="text" class="form-control form-control-lg" id="output_path" name="output_path" required
+                                   value="{{ default_output_path }}" data-path-browser
+                                   autocomplete="off" spellcheck="false">
+                            <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path. Files will be saved here.</small>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary w-100 py-2">Convert to Lossless Audio</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="col-lg-7">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h3>Formats Supported</h3>
+
+                    <div class="mb-2">
+                        <h5>FLAC (Free Lossless Audio Codec)</h5>
+                        <p class="text-muted small">Universal support, widely compatible with all audio players and devices. Ideal for archival quality.</p>
+                    </div>
+
+                    <div class="mb-2">
+                        <h5>ALAC (Apple Lossless Audio Codec)</h5>
+                        <p class="text-muted small">Best for Apple ecosystem (iTunes, QuickTime). Lossless quality with better compression than FLAC.</p>
+                    </div>
+
+                    <div class="mb-2">
+                        <h5>WAV (Uncompressed PCM)</h5>
+                        <p class="text-muted small">Truly lossless with no compression. Largest file size but perfect fidelity for archival and professional editing.</p>
+                    </div>
+
+                    <div class="mb-2">
+                        <h5>OGG Vorbis (High-Quality Lossy)</h5>
+                        <p class="text-muted small">Excellent quality with much smaller file sizes than lossless formats. Great for listening on the go.</p>
+                    </div>
+                </div>
+
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h5>How It Works</h5>
+                    <ol class="list-group list-group-numbered">
+                        <li>Paste a YouTube or SoundCloud link</li>
+                        <li>Select your preferred lossless format</li>
+                        <li>The app downloads the audio using yt-dlp (with progress)</li>
+                        <li><strong>FFmpeg converts and embeds title, artist &amp; cover art</strong></li>
+                        <li>Click Download on the completed conversion!</li>
+                    </ol>
+                </div>
+
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h5>System Requirements</h5>
+                    <p class="text-muted small">This app requires FFmpeg to be installed on your system.</p>
+                    <div class="alert alert-info mt-2">
+                        For macOS: <code>brew install ffmpeg</code><br>
+                        For Windows: Download from https://ffmpeg.org<br>
+                        For Linux (Ubuntu): <code>sudo apt install ffmpeg</code><br>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-3">
+            <div class="col-12">
+                {% if history %}
+                        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                            <h5>{% if show_history %}Full History{% else %}Recent Conversions{% endif %}</h5>
+
+                            {% if show_history %}
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span>Showing {{ history|length }} conversions</span>
+                                    <a href="/" class="btn btn-sm btn-outline-secondary">Back to Home</a>
+                                </div>
+                            {% endif %}
+
+                            <div class="history-toolbar d-flex flex-wrap gap-2 align-items-center mb-2">
+                                <input type="search" id="historySearch" class="form-control form-control-sm history-search"
+                                       placeholder="Search conversions…" aria-label="Search conversions" autocomplete="off">
+                                <select id="historyStatus" class="form-select form-select-sm history-status" aria-label="Filter by status">
+                                    <option value="all">All statuses</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="downloading">Downloading</option>
+                                    <option value="converting">Converting</option>
+                                    <option value="completed">Completed</option>
+                                    <option value="skipped">Skipped</option>
+                                    <option value="failed">Failed</option>
+                                </select>
+                                <select id="historyFolder" class="form-select form-select-sm history-folder" aria-label="Filter by folder">
+                                    <option value="all">All folders</option>
+                                </select>
+                                <select id="historySort" class="form-select form-select-sm history-sort" aria-label="Sort conversions">
+                                    <option value="newest">Newest first</option>
+                                    <option value="oldest">Oldest first</option>
+                                    <option value="name">Name A–Z</option>
+                                </select>
+                                <span id="historyCount" class="text-muted small ms-auto" aria-live="polite"></span>
+                                <span id="storageInfo" class="text-muted small" title="Disk space used by converted files"></span>
+                                <div class="btn-group btn-group-sm" role="group" aria-label="History pages">
+                                    <button type="button" id="historyPrev" class="btn btn-outline-secondary">&#8249; Prev</button>
+                                    <button type="button" id="historyNext" class="btn btn-outline-secondary">Next &#8250;</button>
+                                </div>
+                                <button type="button" id="queuePause" class="btn btn-sm btn-outline-secondary" title="Pause or resume all downloads">Pause all</button>
+                                <button type="button" id="verifyFiles" class="btn btn-sm btn-outline-secondary" title="Check every downloaded file for corruption and re-queue the bad ones">Verify files</button>
+                            </div>
+
+                            <div class="table-responsive">
+                                <table class="table table-hover history-table">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th>Status</th>
+                                            <th>Format</th>
+                                            <th>URL</th>
+                                            <th>File / Saved to</th>
+                                            <th>Date</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="historyBody" class="fade-in">
+                                        {% for item in history %}
+                                        {% if item.is_playlist %}
+                                            <tr id="row-{{ item.id }}" class="playlist-row" data-folder="{{ item.output_path }}">
+                                                    <td class="row-status">
+                                                        <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
+                                                        <div class="progress mt-1 row-progress" style="height:4px;">
+                                                            <div class="progress-bar row-progress-bar bg-primary" role="progressbar"
+                                                                 style="width: {{ item.progress }}%" aria-valuenow="{{ item.progress }}"></div>
+                                                        </div>
+                                                        <div class="playlist-summary" data-playlist-summary data-count="{{ item.item_count }}" data-progress="{{ item.progress }}">
+                                                            {% if item.item_count %}{{ item.progress }}% &middot; {{ item.item_count }} track(s){% else %}Reading playlist&hellip;{% endif %}
+                                                        </div>
+                                                    </td>
+                                                    <td>{{ item.format }}</td>
+                                                    <td><a href="{{ item.url }}" target="_blank" rel="noopener" title="Open playlist">
+                                                        {{ item.playlist_title or item.url[:40] }}{% if not item.playlist_title and item.url|length > 40 %}...{% endif %}</a>{% if item.import_source %} <span class="badge bg-info text-dark" title="Tracks were found on YouTube from this {{ item.import_source|capitalize }} playlist">Imported from {{ item.import_source|capitalize }}</span>{% endif %}</td>
+                                                    <td class="row-file">
+                                                        <div class="d-flex flex-wrap gap-1 align-items-center file-actions">
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary expand-playlist"
+                                                                    data-expand-playlist="{{ item.id }}" title="Show tracks">
+                                                                <span class="expand-caret" aria-hidden="true">&#9654;</span> <span class="expand-label">{{ item.item_count if item.item_count else 'Tracks' }}</span>
+                                                            </button>
+                                                            {% if item.status == 'completed' %}
+                                                                <button type="button" class="btn btn-sm btn-primary play-btn"
+                                                                        data-play-all="{{ item.id }}" title="Play all tracks in the app">&#9654; Play all</button>
+                                                            {% endif %}
+                                                        {% if item.status in ['pending', 'downloading', 'converting'] %}
+                                                            <button type="button" class="btn btn-sm btn-outline-warning skip-btn"
+                                                                    data-skip="{{ item.id }}" title="Skip the remaining tracks">Skip</button>
+                                                        {% endif %}
+                                                        {% if item.import_misses and item.import_misses != '[]' %}
+                                                            <button type="button" class="btn btn-sm btn-outline-info retry-misses-btn"
+                                                                    data-retry-misses="{{ item.id }}" title="Search again for the tracks that could not be matched">Retry unmatched</button>
+                                                        {% endif %}
+                                                        {% if item.output_path %}
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary reveal-btn"
+                                                                    data-reveal="{{ item.id }}" title="Show playlist folder">Open folder</button>
+                                                        {% endif %}
+                                                        </div>
+                                                        {% if item.output_path %}
+                                                            <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
+                                                                <span class="fw-semibold file-name">{{ item.output_path|basename }}</span>
+                                                                <span class="file-full d-block">{{ item.output_path }}</span>
+                                                            </div>
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>{{ item.created_at.strftime('%Y-%m-%d %H:%M') if item.created_at else 'N/A' }}</td>
+                                                </tr>
+                                                <tr id="children-{{ item.id }}" class="playlist-children" hidden>
+                                                    <td colspan="5"><div class="playlist-children-box"></div></td>
+                                                </tr>
+                                        {% else %}
+                                            <tr id="row-{{ item.id }}" data-folder="{{ item.output_path }}">
+                                                    <td class="row-status">
+                                                        <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
+                                                        <div class="progress mt-1 row-progress" style="height:4px;">
+                                                            <div class="progress-bar row-progress-bar bg-primary" role="progressbar"
+                                                                 style="width: {{ item.progress }}%" aria-valuenow="{{ item.progress }}"></div>
+                                                        </div>
+                                                    </td>
+                                                    <td>{{ item.format }}</td>
+                                                    <td><a href="{{ item.url }}" target="_blank" rel="noopener" title="Open link">
+                                                        {{ item.url[:40] }}{% if item.url|length > 40 %}...{% endif %}</a></td>
+                                                    <td class="row-file">
+                                                        {% if item.status == 'completed' or item.status == 'skipped' %}
+                                                            <div class="d-flex flex-wrap gap-1 align-items-center file-actions">
+                                                                <button type="button" class="btn btn-sm btn-primary play-btn"
+                                                                        data-play="{{ item.id }}" title="Play in app">&#9654;</button>
+                                                                <a class="btn btn-sm btn-success" href="/download/{{ item.id }}">Download</a>
+                                                        {% if item.output_path %}
+                                                                    <button type="button" class="btn btn-sm btn-outline-secondary copy-path-btn"
+                                                                            data-copy-path="{{ item.output_path }}" title="Copy full path">Copy</button>
+                                                                    <button type="button" class="btn btn-sm btn-outline-secondary reveal-btn"
+                                                                            data-reveal="{{ item.id }}" title="Show in file manager">Open folder</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary queue-btn"
+                                                                        data-queue="{{ item.id }}" title="Add to player queue">+ Queue</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary rename-btn"
+                                                                        data-rename="{{ item.id }}" data-name="{{ item.output_path|basename }}" title="Rename file">&#9998;</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary tags-btn"
+                                                                        data-tags="{{ item.id }}" title="Edit title, artist and album">Tags</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-danger delete-btn"
+                                                                        data-delete="{{ item.id }}" title="Delete file from disk and remove from history">Delete</button>
+                                                                {% endif %}
+                                                            </div>
+                                                            {% if item.output_path %}
+                                                                <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
+                                                                    <span class="fw-semibold file-name">{{ item.output_path|basename }}</span>
+                                                                    <span class="file-full d-block">{{ item.output_path }}</span>
+                                                                </div>
+                                                            {% endif %}
+                                                    {% else %}
+                                                        {% if item.status in ['pending', 'downloading', 'converting'] %}
+                                                            <button type="button" class="btn btn-sm btn-outline-warning skip-btn"
+                                                                    data-skip="{{ item.id }}" title="Skip this track">Skip</button>
+                                                        {% elif item.status == 'failed' %}
+                                                            <button type="button" class="btn btn-sm btn-outline-info retry-btn"
+                                                                    data-retry="{{ item.id }}" title="Try this download again">Retry</button>
+                                                        {% else %}
+                                                            <span class="text-muted small">&mdash;</span>
+                                                        {% endif %}
+                                                    {% endif %}
+                                                    </td>
+                                                    <td>{{ item.created_at.strftime('%Y-%m-%d %H:%M') if item.created_at else 'N/A' }}</td>
+                                                </tr>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <hr class="mt-4">
+        <footer class="text-center text-muted small mb-3">
+            YouTube/SoundCloud to Lossless Audio Converter &bull; Built with Flask &amp; FFmpeg &bull; v{{ app_version }}<br>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
+    <script>
+        window.pathBrowserHome = {{ default_output_path|tojson }};
+    </script>
+    <script>
+        function refreshTable() {
+            fetch('/api/conversions?limit=10')
+                .then(response => response.json())
+                .then(items => {
+                    let anyActive = false;
+                    window.__prevStatuses = window.__prevStatuses || {};
+                    items.forEach(item => {
+                        const row = document.getElementById('row-' + item.id);
+                        if (!row) return;
+
+                        if (['pending', 'downloading', 'converting'].includes(item.status)) {
+                            anyActive = true;
+                        }
+
+                        const prev = window.__prevStatuses[item.id];
+                        if (prev && prev !== item.status &&
+                            (item.status === 'completed' || item.status === 'failed') &&
+                            typeof toast === 'function') {
+                            const label = item.filename || item.playlist_title || item.url;
+                            toast((item.status === 'completed' ? 'Finished: ' : 'Failed: ') + label,
+                                  item.status === 'completed' ? 'success' : 'danger');
+                        }
+                        window.__prevStatuses[item.id] = item.status;
+
+                        const badge = row.querySelector('.status-badge');
+                        const bar = row.querySelector('.row-progress-bar');
+                        const fileCell = row.querySelector('.row-file');
+                        const summary = row.querySelector('[data-playlist-summary]');
+
+                        if (badge && badge.textContent !== item.status) {
+                            badge.textContent = item.status;
+                            badge.className = 'badge status-badge status-' + item.status;
+                        }
+                        if (bar) {
+                            bar.style.width = item.progress + '%';
+                            bar.setAttribute('aria-valuenow', item.progress);
+                        }
+                        if (summary) {
+                            const label = row.querySelector('.expand-label');
+                            if (label && item.item_count) label.textContent = item.item_count;
+                            summary.textContent = item.item_count
+                                ? item.progress + '% &middot; ' + item.item_count + ' track(s)'
+                                : 'Reading playlist\u2026';
+                        }
+                        if ((item.status === 'completed' || item.status === 'skipped') && fileCell && !item.is_playlist && !fileCell.querySelector('a') && !fileCell.querySelector('.play-btn')) {
+                            renderSavedFileCell(fileCell, item);
+                        }
+                        if (item.status === 'failed' && fileCell && !fileCell.querySelector('span')) {
+                            if (item.error) {
+                                fileCell.innerHTML = '<span class="text-danger small" title="' + item.error.replace(/"/g, '&quot;') + '">Error</span>';
+                            }
+                        }
+                    });
+                    if (anyActive) {
+                        setTimeout(refreshTable, 2000);
+                    }
+                    if (typeof applyHistoryFilter === 'function') {
+                        applyHistoryFilter();
+                    }
+                })
+                .catch(() => setTimeout(refreshTable, 4000));
+        }
+
+        document.addEventListener('DOMContentLoaded', refreshTable);
+    </script>
+
+    {% include '_player.html' %}
+
+    <div class="modal fade" id="tagsModal" tabindex="-1" aria-labelledby="tagsModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="tagsModalLabel">Edit tags</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="tagsTitle" class="form-label">Title</label>
+                        <input type="text" class="form-control" id="tagsTitle" autocomplete="off">
+                    </div>
+                    <div class="mb-3">
+                        <label for="tagsArtist" class="form-label">Artist</label>
+                        <input type="text" class="form-control" id="tagsArtist" autocomplete="off">
+                    </div>
+                    <div class="mb-3">
+                        <label for="tagsAlbum" class="form-label">Album</label>
+                        <input type="text" class="form-control" id="tagsAlbum" autocomplete="off">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="tagsSave">Save tags</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

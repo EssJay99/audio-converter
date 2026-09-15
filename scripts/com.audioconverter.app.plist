@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Start Audio Converter automatically at login (macOS).
+     Install: 1. Copy dist/AudioConverter to /Applications
+              2. cp scripts/com.audioconverter.app.plist ~/Library/LaunchAgents/
+              3. launchctl load ~/Library/LaunchAgents/com.audioconverter.app.plist
+     Remove:   launchctl unload ~/Library/LaunchAgents/com.audioconverter.app.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.audioconverter.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/AudioConverter/AudioConverter</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

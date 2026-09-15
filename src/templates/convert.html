@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Convert Audio - Audio Converter</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Audio Converter</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navMenu">
+                    <div class="navbar-nav">
+                        <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
+                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <div class="header">
+            <h1>Convert Audio</h1>
+            <p>Paste a YouTube or SoundCloud link and download it as high-quality lossless audio</p>
+        </div>
+
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h3>Conversion Form</h3>
+
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                        {% if messages %}
+                            {% for category, message in messages %}
+                                <div class="alert alert-{{ category if category in ['success', 'danger', 'warning', 'info'] else 'secondary' }} alert-dismissible fade show" role="alert">
+                                    {{ message }}
+                                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                                </div>
+                            {% endfor %}
+                        {% endif %}
+                    {% endwith %}
+
+                    <form method="POST" action="/convert">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="mb-3">
+                            <label for="url" class="form-label">YouTube or SoundCloud Link</label>
+                            <input type="text" class="form-control form-control-lg" id="url" name="url" required
+                                   placeholder="https://www.youtube.com/watch?v=... or https://soundcloud.com/...">
+                            <small class="form-text text-muted">Tip: paste a YouTube playlist, channel, or SoundCloud set/artist link and every track lands in its own folder. Spotify or Apple Music playlist link? It will be imported: each song is found on YouTube and saved into one folder.</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="format" class="form-label">Output Format</label>
+                            <select class="form-select form-control-lg" id="format" name="format" required>
+                                <option value="flac">FLAC (Free Lossless Audio Codec)</option>
+                                <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
+                                <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
+                                <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="organization" class="form-label">Playlist Organization</label>
+                            <select class="form-select form-control-lg" id="organization" name="organization">
+                                <option value="folder">One folder per playlist (tracks in <code>Output/PlaylistTitle/</code>)</option>
+                                <option value="flat">Save individual tracks in output folder (no subfolders)</option>
+                            </select>
+                            <small class="form-text text-muted">Controls how converted files are organized on disk.</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="output_path" class="form-label">Output Path</label>
+                            <input type="text" class="form-control form-control-lg" id="output_path" name="output_path" required
+                                   value="{{ default_output_path }}" data-path-browser
+                                   autocomplete="off" spellcheck="false">
+                            <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path. This is where your converted audio will be saved.</small>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary w-100 py-2">Queue Conversion</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h5>Supported URL Types</h5>
+
+            <h6>YouTube</h6>
+            <ul class="list-group list-group-flush mb-3">
+                <li class="list-group-item"><code>https://www.youtube.com/watch?v=VIDEO_ID</code></li>
+                <li class="list-group-item"><code>https://www.youtube.com/shorts/VIDEO_ID</code></li>
+                <li class="list-group-item"><code>https://youtu.be/SHORT_ID</code></li>
+            </ul>
+
+            <h6>SoundCloud</h6>
+            <ul class="list-group list-group-flush mb-3">
+                <li class="list-group-item"><code>https://soundcloud.com/ARTIST-NAME</code></li>
+                <li class="list-group-item"><code>https://soundcloud.com/ARTIST-NAME/SONG-TITLE</code></li>
+            </ul>
+
+            <h6>Playlist import (tracks are found on YouTube)</h6>
+            <ul class="list-group list-group-flush">
+                <li class="list-group-item"><code>https://open.spotify.com/playlist/PLAYLIST_ID</code></li>
+                <li class="list-group-item"><code>https://music.apple.com/.../playlist/.../PLAYLIST_ID</code></li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
+    <script>
+        window.pathBrowserHome = {{ default_output_path|tojson }};
+    </script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const form = document.querySelector('form[action="/convert"]');
+            const submit = form ? form.querySelector('button[type="submit"]') : null;
+            if (form && submit) {
+                form.addEventListener('submit', function () {
+                    submit.disabled = true;
+                    submit.textContent = 'Queued... checking status on Home';
+                });
+            }
+        });
+    </script>
+
+    {% include '_player.html' %}
+</body>
+</html>

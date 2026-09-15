@@ -1,0 +1,43 @@
+<aside id="appPlayer" class="app-player d-none" aria-label="Audio player">
+    <audio id="appPlayerAudio" preload="metadata"></audio>
+
+    <div class="app-player-controls">
+        <button type="button" id="appPlayerPlay" class="app-player-btn app-player-toggle" title="Play / pause" aria-label="Play / pause">&#9654;</button>
+        <button type="button" id="appPlayerPrev" class="app-player-btn" title="Previous track" aria-label="Previous track">&#9198;</button>
+        <button type="button" id="appPlayerNext" class="app-player-btn" title="Next track" aria-label="Next track">&#9197;</button>
+        <button type="button" id="appPlayerShuffle" class="app-player-btn" title="Shuffle upcoming tracks" aria-label="Shuffle">&#8646;</button>
+        <button type="button" id="appPlayerRepeat" class="app-player-btn app-player-repeat" title="Repeat mode: off" aria-label="Repeat mode">Repeat: Off</button>
+    </div>
+
+    <img id="appPlayerCover" class="app-player-cover d-none" alt="" aria-hidden="true">
+
+    <div class="app-player-seek">
+        <div class="app-player-timebar">
+            <span id="appPlayerTime" class="app-player-time">0:00</span>
+            <input type="range" id="appPlayerSeek" class="app-player-range" min="0" max="1000" value="0"
+                   aria-label="Seek" step="1">
+            <span id="appPlayerDur" class="app-player-time">0:00</span>
+        </div>
+        <div class="app-player-meta">
+            <strong id="appPlayerTitle" class="app-player-title">Not playing</strong>
+            <span id="appPlayerArtist" class="app-player-artist d-none"></span>
+            <span id="appPlayerTag" class="app-player-tag d-none"></span>
+            <span id="appPlayerContext" class="app-player-context d-none"></span>
+        </div>
+    </div>
+
+    <div class="app-player-side">
+        <span class="app-player-vol-icon" aria-hidden="true">&#128266;</span>
+        <input type="range" id="appPlayerVolume" class="app-player-range app-player-volume" min="0" max="100" value="80"
+               aria-label="Volume" title="Volume">
+        <button type="button" id="appPlayerQueueBtn" class="app-player-btn app-player-queue-btn" title="Upcoming tracks">
+            Queue <span class="app-queue-count" id="appPlayerQueueCount">0</span>
+        </button>
+        <button type="button" id="appPlayerClose" class="app-player-btn app-player-close" title="Hide player" aria-label="Hide player">&times;</button>
+    </div>
+</aside>
+
+<div id="appPlayerQueueBox" class="app-player-queue d-none">
+    <div class="app-player-queue-head">Upcoming tracks <button type="button" id="appPlayerQueueClear" class="btn btn-sm btn-link">Clear</button></div>
+    <ul id="appPlayerQueueList" class="app-player-queue-list"></ul>
+</div>

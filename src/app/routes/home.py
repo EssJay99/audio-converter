@@ -1,0 +1,355 @@
+import os
+import sys
+import threading
+import time
+
+from flask import Blueprint, render_template, request, jsonify
+from app.models import ConversionHistory, UserSettings
+from app.routes.convert import _serialize
+from app import db, APP_VERSION
+
+bp = Blueprint('home', __name__)
+
+
+def get_default_output_path():
+    user_settings = UserSettings.query.first()
+    if user_settings and user_settings.output_path:
+        return user_settings.output_path
+    return os.path.join(os.path.expanduser('~'), 'Audio-Converter', 'output')
+
+
+@bp.route('/')
+def index():
+    history = db.session.query(ConversionHistory).order_by(
+        ConversionHistory.created_at.desc()
+    ).limit(10).all()
+
+    return render_template(
+        'index.html',
+        history=history,
+        default_output_path=get_default_output_path(),
+        request_path=request.path,
+        show_history=False,
+        app_version=APP_VERSION,
+    )
+
+
+@bp.route('/about')
+def about():
+    return render_template('about.html', request_path=request.path)
+
+
+@bp.route('/contact')
+def contact():
+    return render_template('contact.html', request_path=request.path)
+
+
+@bp.route('/history')
+def history():
+    history = db.session.query(ConversionHistory).order_by(
+        ConversionHistory.created_at.desc()
+    ).all()
+
+    return render_template(
+        'index.html',
+        history=history,
+        default_output_path=get_default_output_path(),
+        request_path=request.path,
+        show_history=True,
+        app_version=APP_VERSION,
+    )
+
+
+@bp.route('/api/conversions')
+def api_conversions():
+    limit = request.args.get('limit', 20, type=int)
+    if limit > 100:
+        limit = 100
+
+    history = db.session.query(ConversionHistory).order_by(
+        ConversionHistory.created_at.desc()
+    ).limit(limit).all()
+
+    return jsonify([_serialize(item) for item in history])
+
+
+@bp.route('/api/playlist/<int:parent_id>')
+def api_playlist(parent_id):
+    """Return the per-track rows that make up a playlist conversion."""
+    children = db.session.query(ConversionHistory).filter_by(
+        parent_id=parent_id
+    ).order_by(ConversionHistory.item_index.asc()).limit(500).all()
+
+    return jsonify({
+        'parent_id': parent_id,
+        'total': len(children),
+        'items': [_serialize(item) for item in children],
+    })
+
+
+def _expand_user_path(path):
+    """Expand ~ and environment vars, returning '' if the result is unusable."""
+    if not path:
+        return ''
+    expanded = os.path.expandvars(os.path.expanduser(path.strip()))
+    return expanded if os.path.isabs(expanded) else ''
+
+
+@bp.route('/api/directories')
+def api_directories():
+    """Return directories for the searchable path dropdown.
+
+    Query params:
+      q      the path being typed / navigated (defaults to the user's home)
+      depth  how deep to pre-expand (the '>' paths). Default 2, max 3.
+
+    Response shape:
+      {
+        "directories": ["/path/one", "/path/two"],
+        "valid": true,          # is the current q a usable directory?
+        "open_dirs": [...]      # dirs at 'depth' to seed the next expansion
+      }
+    """
+    q = request.args.get('q', '')
+    depth = request.args.get('depth', 2, type=int)
+    depth = max(1, min(depth, 3))
+
+    base = _expand_user_path(q) or os.path.expanduser('~')
+
+    directories = []
+    valid = False
+
+    try:
+        if os.path.isdir(base):
+            valid = True
+            entries = sorted(os.listdir(base))
+            for name in entries:
+                if name.startswith('.'):
+                    continue
+                child = os.path.join(base, name)
+                if os.path.isdir(child) and not os.path.islink(child):
+                    directories.append(child)
+            if not directories:
+                # A bare file/drive root: list other top-level volumes
+                parent = os.path.dirname(base)
+                if parent and os.path.isdir(parent):
+                    for name in os.listdir(parent):
+                        child = os.path.join(parent, name)
+                        if name.startswith('.'):
+                            continue
+                        if os.path.isdir(child) and not os.path.islink(child):
+                            directories.append(child)
+                    if directories:
+                        base = parent
+    except (PermissionError, OSError):
+        pass
+
+    directories.sort()
+
+    # Pre-expand one level below `depth` so the UI can immediately show
+    # deeper folders after the user picks the next directory.
+    open_dirs = []
+    if directories:
+        seen = set()
+        for d in directories:
+            rel_depth = len([p for p in d.split(os.sep) if p])
+            if rel_depth >= depth:
+                continue
+            try:
+                for name in sorted(os.listdir(d)):
+                    if name.startswith('.'):
+                        continue
+                    child = os.path.join(d, name)
+                    if os.path.isdir(child) and not os.path.islink(child) and child not in seen:
+                        seen.add(child)
+                        open_dirs.append(child)
+            except (PermissionError, OSError):
+                continue
+        open_dirs.sort()
+
+    return jsonify({
+        'base': base,
+        'valid': valid,
+        'directories': directories,
+        'open_dirs': open_dirs,
+        'home': os.path.expanduser('~'),
+    })
+
+
+# Directories we never descend into during full-machine search: hidden
+# folders, code/vendor trees, OS internals.
+SEARCH_STOP_DIRS = {
+    '.git', '.svn', '.hg', '__pycache__', 'node_modules', 'venv', '.venv',
+    'Library', 'System', 'usr', 'bin', 'sbin', 'private', 'cores', 'tmp',
+    'dev', 'proc', 'sys', 'etc', 'var',
+}
+
+
+def get_search_roots():
+    """Top-level directories to search for the whole-machine folder search.
+
+    Deliberately limited to user-relevant locations: the current user's home
+    dir (where downloads/music/docs live), external drives, and common shared
+    mount points. Scanning every physical root in the OS would mean walking
+    system dirs and *every* user account, which is slow and rarely useful.
+    """
+    roots = [os.path.expanduser('~')]
+    if sys.platform == 'win32':
+        import string
+        for letter in string.ascii_uppercase:
+            drive = letter + ':\\'
+            if os.path.exists(drive):
+                roots.append(drive)
+    else:
+        for candidate in ['/Volumes', '/media', '/mnt', '/Applications',
+                          '/Users/Shared']:
+            if os.path.isdir(candidate) and candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
+# Directories that made a whole-machine search stall. Discovered at runtime:
+# if a search times out with its worker thread still alive, the last directory
+# the walk entered is remembered here (with a size cap) so subsequent searches
+# skip it instead of hanging again and again.
+BLOCKED_DIRS = []
+BLOCKED_DIRS_CAP = 50
+
+
+def _scan_for_matches(query, roots, max_results, time_budget, collect, last_dir):
+    """Walk `roots`, streaming scored matches into `collect` as it goes.
+
+    Uses explicit recursion (not os.walk) so we know *exactly* which directory
+    the walk was inside when it ran out of time -- that path goes on the
+    blocklist so later searches skip it. `collect` is called incrementally so
+    results already gathered are never lost to a later stall.
+    """
+    q = query.strip().lower()
+    if len(q) < 2:
+        return
+    deadline = time.monotonic() + time_budget
+    seen = set()
+
+    def walk(dirpath):
+        # Record where we are *before* listing children: if this scandir
+        # hangs, this is the exact path to skip on future searches.
+        last_dir[0] = dirpath
+        if time.monotonic() > deadline:
+            return False
+        try:
+            with os.scandir(dirpath) as it:
+                entries = list(it)
+        except OSError:
+            return True  # unreadable dir: just skip it
+
+        subdirs = [
+            e for e in entries
+            if e.is_dir(follow_symlinks=False)
+            and not e.name.startswith('.')
+            and e.name not in SEARCH_STOP_DIRS
+            and e.path not in BLOCKED_DIRS
+            and e.path not in seen
+        ]
+        for entry in sorted(subdirs, key=lambda e: e.name):
+            if time.monotonic() > deadline:
+                return False
+            seen.add(entry.path)
+            low = entry.name.lower()
+            if q in low:
+                if low == q:
+                    score = 0
+                elif low.startswith(q):
+                    score = 1
+                else:
+                    score = 2
+                if not collect(score, entry.path):
+                    return False
+            if not walk(entry.path):
+                return False
+        return True
+
+    for root in roots:
+        root = os.path.expanduser(root)
+        if not os.path.isdir(root):
+            continue
+        if root not in seen:
+            seen.add(root)
+            if not walk(root):
+                return
+
+
+def search_directories(query, roots=None, max_results=200, time_budget=3.0):
+    """Find folders whose name matches `query` anywhere under `roots`.
+
+    The walk runs on a daemon thread and streams matches as it finds them, so
+    a directory that blocks the filesystem (network volume, cloud-sync folder)
+    can never hang the request or lose the results found before it. Dirs that
+    stall the walk are remembered and skipped on later searches.
+    """
+    if len(query.strip()) < 2:
+        return []
+
+    roots = roots if roots is not None else get_search_roots()
+    found = []
+    done = threading.Event()
+    last_dir = [None]
+
+    def collect(score, path):
+        found.append((score, len(path), path))
+        if len(found) >= max_results:
+            done.set()
+            return False
+        return True
+
+    def walker():
+        _scan_for_matches(query, roots, max_results, time_budget, collect, last_dir)
+        done.set()
+
+    thread = threading.Thread(target=walker, daemon=True)
+    thread.start()
+
+    started = time.monotonic()
+    while not done.wait(0.05) and time.monotonic() - started < time_budget:
+        pass
+
+    if thread.is_alive() and last_dir[0]:
+        # The worker is stuck (almost certainly blocked on a directory I/O).
+        # Remember exactly where so the next search skips that path.
+        stuck = last_dir[0]
+        if stuck not in BLOCKED_DIRS:
+            BLOCKED_DIRS.append(stuck)
+        if len(BLOCKED_DIRS) > BLOCKED_DIRS_CAP:
+            del BLOCKED_DIRS[:len(BLOCKED_DIRS) - BLOCKED_DIRS_CAP]
+
+    found.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [path for _, _, path in found[:max_results]]
+
+
+@bp.route('/api/directory-search')
+def api_directory_search():
+    """Folder search across the whole machine.
+
+    Query params:
+      q   search term (minimum 2 characters)
+
+    Response:
+      {
+        "query": "...",
+        "directories": ["/full/path", ...],   // ranked matches
+        "elapsed": 0.42,
+        "truncated": true                     // hit the result cap
+      }
+    """
+    start = time.monotonic()
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify({'query': q, 'directories': [], 'elapsed': 0.0,
+                        'truncated': False})
+
+    dirs = search_directories(q)
+    return jsonify({
+        'query': q,
+        'directories': dirs,
+        'elapsed': round(time.monotonic() - start, 2),
+        'truncated': len(dirs) >= 200,
+    })

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>500 - Internal Server Error</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <style>
+        body { padding-top: 40px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .container { max-width: 600px; text-align: center; margin-top: 50px; }
+        .error-code { font-size: 120px; color: #6c757d; }
+        .btn-primary { font-size: 1.2rem; padding: 0.75rem 3rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-code">500</div>
+        <h2>{{ message or "Internal Server Error" }}</h2>
+        <p class="lead text-muted">Something went wrong. Please try again later.</p>
+        <a href="/" class="btn btn-primary mt-3">Go Home</a>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+</body>
+</html>

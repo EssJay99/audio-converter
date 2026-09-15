@@ -1,0 +1,57 @@
+#!/bin/bash
+# Build a distributable macOS bundle for the Audio Converter desktop app.
+#
+# Usage:  bash scripts/build_macos.sh
+# Output: dist/AudioConverter/AudioConverter
+#
+# Install:  1. `brew install ffmpeg` (once; conversions need it)
+#           2. Copy dist/AudioConverter to /Applications
+#           3. Double-click AudioConverter (first launch: right-click > Open
+#              to clear Gatekeeper, as the bundle is not notarized)
+#           4. Optional login start: copy scripts/com.audioconverter.app.plist
+#              to ~/Library/LaunchAgents and run `launchctl load` on it.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "error: $PY not found; create the venv first" >&2
+    exit 1
+fi
+
+mkdir -p build_helpers
+
+# Standalone yt-dlp binary (no Python needed at runtime).
+if [ ! -x build_helpers/yt-dlp ]; then
+    echo "==> downloading yt-dlp_macos"
+    curl -sL --max-time 120 -o build_helpers/yt-dlp \
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+    chmod +x build_helpers/yt-dlp
+else
+    echo "==> yt-dlp helper already present"
+fi
+
+echo "==> running test suite before packaging"
+"$PY" -m pytest tests/ -q
+
+echo "==> building with PyInstaller"
+"$PY" -m PyInstaller audio-converter.spec \
+    --noconfirm --clean --distpath "$ROOT/dist" --workpath "$ROOT/build"
+
+BIN="$ROOT/dist/AudioConverter/AudioConverter"
+if [ ! -x "$BIN" ]; then
+    echo "error: bundle binary missing at $BIN" >&2
+    exit 1
+fi
+
+echo "==> smoke-testing the bundle (no window opened)"
+SELFTEST_DB="$(mktemp -u /tmp/audio-converter-selftest-XXXXXX.db)"
+AUDIO_CONVERTER_DB_PATH="$SELFTEST_DB" \
+AUDIO_CONVERTER_SECRET_KEY="selftest" \
+    "$BIN" --self-test
+rm -f "$SELFTEST_DB"* 2>/dev/null || true
+
+echo "==> build OK: $BIN"
+echo "    Copy dist/AudioConverter to /Applications to install."

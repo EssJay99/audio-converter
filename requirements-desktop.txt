@@ -1,0 +1,15 @@
+# Runtime dependencies for the pywebview desktop launcher (src/desktop.py)
+#
+# Each platform needs a different native backend:
+#   macOS  -> Cocoa/WKWebView  (pyobjc frameworks, the pywebview 'cocoa' backend)
+#   Windows-> EdgeChromium/WebView2 runtime (Win11 / most Win10 ship it) via pythonnet
+#   Linux  -> WebKitGTK 4.1    (pygobject); also needs: sudo apt install gir1.2-webkit2-4.1
+pywebview>=5.1
+
+pyobjc-framework-Cocoa>=10 ; sys_platform == "darwin"
+pyobjc-framework-WebKit>=10 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10 ; sys_platform == "darwin"
+
+pythonnet>=3.0 ; sys_platform == "win32"
+
+pygobject>=3.50 ; sys_platform == "linux"

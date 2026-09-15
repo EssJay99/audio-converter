@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contact - Audio Converter</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Audio Converter</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navMenu">
+                    <div class="navbar-nav">
+                        <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
+                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <h1>Contact &amp; Support</h1>
+
+        <div class="card p-4 shadow-sm border-0 rounded">
+            <h3>This is a local tool</h3>
+            <p class="lead">This audio converter runs entirely on your computer. There's no cloud service or remote server involved &mdash; everything happens locally.</p>
+            <p>If you need help, please check the troubleshooting section below.</p>
+        </div>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h3>Troubleshooting</h3>
+
+            <div class="accordion" id="troubleshootingAccordion">
+
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingFFmpeg">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseFFmpeg" aria-expanded="false" aria-controls="collapseFFmpeg">
+                            FFmpeg not found or failed
+                        </button>
+                    </h2>
+                    <div id="collapseFFmpeg" class="accordion-collapse collapse" aria-labelledby="headingFFmpeg"
+                         data-bs-parent="#troubleshootingAccordion">
+                        <div class="accordion-body">
+                            FFmpeg must be installed and in your system PATH.<br>
+                            For macOS: <code>brew install ffmpeg</code><br>
+                            For Windows: Download from https://ffmpeg.org<br>
+                            For Linux (Ubuntu): <code>sudo apt install ffmpeg</code><br>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingYoutube">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseYoutube" aria-expanded="false" aria-controls="collapseYoutube">
+                            YouTube download failed
+                        </button>
+                    </h2>
+                    <div id="collapseYoutube" class="accordion-collapse collapse" aria-labelledby="headingYoutube"
+                         data-bs-parent="#troubleshootingAccordion">
+                        <div class="accordion-body">
+                            The video may have been removed or is private.<br>
+                            YouTube changes frequently &mdash; update yt-dlp: <code>pip install --upgrade yt-dlp</code><br>
+                            Try a different video to confirm the tool works.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingSoundcloud">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseSoundcloud" aria-expanded="false" aria-controls="collapseSoundcloud">
+                            SoundCloud download failed
+                        </button>
+                    </h2>
+                    <div id="collapseSoundcloud" class="accordion-collapse collapse" aria-labelledby="headingSoundcloud"
+                         data-bs-parent="#troubleshootingAccordion">
+                        <div class="accordion-body">
+                            The track may be private or removed.<br>
+                            Update yt-dlp to fix compatibility issues: <code>pip install --upgrade yt-dlp</code><br>
+                            Make sure you're using the full track URL (not just the artist page).
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingPermission">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapsePermission" aria-expanded="false" aria-controls="collapsePermission">
+                            Permission denied / File not found
+                        </button>
+                    </h2>
+                    <div id="collapsePermission" class="accordion-collapse collapse" aria-labelledby="headingPermission"
+                         data-bs-parent="#troubleshootingAccordion">
+                        <div class="accordion-body">
+                            Check the output path in Settings &mdash; it must exist and be writable.<br>
+                            Make sure there are no spaces or special characters in the path if possible.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <h2 class="accordion-header" id="headingTimeout">
+                        <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                data-bs-target="#collapseTimeout" aria-expanded="false" aria-controls="collapseTimeout">
+                            Conversion timed out
+                        </button>
+                    </h2>
+                    <div id="collapseTimeout" class="accordion-collapse collapse" aria-labelledby="headingTimeout"
+                         data-bs-parent="#troubleshootingAccordion">
+                        <div class="accordion-body">
+                            Large files take time to download and convert.<br>
+                            The app has a 5-minute timeout for downloads.<br>
+                            Try shorter videos or check your internet connection.
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <a href="/" class="btn btn-primary mt-3">Back to Home</a>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+</body>
+</html>

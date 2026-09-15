@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Settings - Audio Converter</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Audio Converter</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navMenu">
+                    <div class="navbar-nav">
+                        <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
+                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <h1>Settings</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category if category in ['success', 'danger', 'warning', 'info'] else 'secondary' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST" action="/settings">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="row">
+                <div class="col-md-12">
+                    <div class="card p-4 shadow-sm border-0 rounded">
+                        <h3>Default Output Path</h3>
+                        <div class="mb-3">
+                            <label for="output_path" class="form-label">Output Path</label>
+                            <input type="text" class="form-control form-control-lg" id="output_path" name="output_path"
+                                   value="{{ output_path }}" data-path-browser required
+                                   autocomplete="off" spellcheck="false">
+                            <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path.
+                                This will be used as the default location for all conversions.</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Format Settings</h3>
+                <p class="text-muted small">These options apply to newly converted files.</p>
+
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label for="wav_sample_rate" class="form-label">WAV Sample Rate</label>
+                        <select class="form-select" id="wav_sample_rate" name="wav_sample_rate">
+                            <option value="auto" {% if wav_sample_rate == 'auto' %}selected{% endif %}>Keep original</option>
+                            <option value="44100" {% if wav_sample_rate == '44100' %}selected{% endif %}>44.1 kHz (CD)</option>
+                            <option value="48000" {% if wav_sample_rate == '48000' %}selected{% endif %}>48 kHz</option>
+                            <option value="96000" {% if wav_sample_rate == '96000' %}selected{% endif %}>96 kHz</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="wav_bit_depth" class="form-label">WAV Bit Depth</label>
+                        <select class="form-select" id="wav_bit_depth" name="wav_bit_depth">
+                            <option value="16" {% if wav_bit_depth == '16' %}selected{% endif %}>16-bit (CD)</option>
+                            <option value="24" {% if wav_bit_depth == '24' %}selected{% endif %}>24-bit</option>
+                            <option value="32" {% if wav_bit_depth == '32' %}selected{% endif %}>32-bit</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="flac_compression" class="form-label">FLAC Compression Level (0-8)</label>
+                        <input type="number" class="form-control" id="flac_compression" name="flac_compression"
+                               min="0" max="8" value="{{ flac_compression }}">
+                        <small class="form-text text-muted">0 = fastest, 8 = smallest file. Quality is identical either way.</small>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="ogg_quality" class="form-label">OGG Vorbis Quality (-1 to 10)</label>
+                        <input type="number" class="form-control" id="ogg_quality" name="ogg_quality"
+                               min="-1" max="10" value="{{ ogg_quality }}">
+                        <small class="form-text text-muted">10 is highest quality. 8 is near-transparent.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Privacy</h3>
+                <p class="text-muted small">When on, pasted links are stripped of tracking identifiers and downloads avoid cookies, caches, and watch-history reporting. Turn it off only if a stubborn video refuses to download — some age-restricted or login-walled videos need a regular browser-like session.</p>
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="privacy_mode" name="privacy_mode" value="on"
+                           {% if privacy_mode %}checked{% endif %}>
+                    <label class="form-check-label" for="privacy_mode">Privacy-hardened downloads</label>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Duplicate Prevention</h3>
+                <p class="text-muted small">Before converting a track, the app checks whether a file with the same name already exists in the output folder. If it does, the track is skipped instead of being downloaded again.</p>
+                <div class="form-check form-switch mb-1">
+                    <input class="form-check-input" type="checkbox" id="skip_existing" name="skip_existing" value="on"
+                           {% if skip_existing %}checked{% endif %}>
+                    <label class="form-check-label" for="skip_existing">Skip tracks that already exist in the output folder</label>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Downloads</h3>
+                <p class="text-muted small">How failed downloads are retried, how long a single track may take, and optional network routing.</p>
+                <div class="mb-3">
+                    <span class="form-label d-block">Download speed</span>
+                    <div class="btn-group" role="group" aria-label="Download speed presets">
+                        <input type="radio" class="btn-check" name="speed_preset" id="speedGentle" value="1"
+                               {% if worker_count == 1 %}checked{% endif %}>
+                        <label class="btn btn-outline-primary" for="speedGentle" title="One track at a time. Kindest to slow connections.">Gentle</label>
+                        <input type="radio" class="btn-check" name="speed_preset" id="speedBalanced" value="3"
+                               {% if worker_count == 3 %}checked{% endif %}>
+                        <label class="btn btn-outline-primary" for="speedBalanced" title="Three tracks at once. Good for most people.">Balanced</label>
+                        <input type="radio" class="btn-check" name="speed_preset" id="speedFast" value="6"
+                               {% if worker_count == 6 %}checked{% endif %}>
+                        <label class="btn btn-outline-primary" for="speedFast" title="Six tracks at once. Fastest on good connections.">Fast</label>
+                    </div>
+                    <small class="form-text text-muted d-block">Pick a preset, or set an exact number below (1–8). Applies instantly — no restart needed.</small>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="worker_count" class="form-label">Simultaneous tracks</label>
+                        <input type="number" class="form-control" id="worker_count" name="worker_count"
+                               min="1" max="8" value="{{ worker_count }}">
+                        <small class="form-text text-muted">1–8. Matches the preset above when saved.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="retry_count" class="form-label">Retry attempts</label>
+                        <input type="number" class="form-control" id="retry_count" name="retry_count"
+                               min="0" max="10" value="{{ retry_count }}">
+                        <small class="form-text text-muted">0 = never retry.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="job_timeout" class="form-label">Track timeout (sec)</label>
+                        <input type="number" class="form-control" id="job_timeout" name="job_timeout"
+                               min="30" max="3600" step="30" value="{{ job_timeout }}">
+                        <small class="form-text text-muted">Give up on one stuck track after this long.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="bandwidth_limit" class="form-label">Speed limit (KB/s)</label>
+                        <input type="number" class="form-control" id="bandwidth_limit" name="bandwidth_limit"
+                               min="0" max="100000" value="{{ bandwidth_limit }}">
+                        <small class="form-text text-muted">0 = unlimited. Good for overnight runs.</small>
+                    </div>
+                    <div class="col-12">
+                        <label for="proxy" class="form-label">Proxy (optional)</label>
+                        <input type="text" class="form-control" id="proxy" name="proxy"
+                               value="{{ proxy }}" placeholder="socks5://127.0.0.1:9050"
+                               autocomplete="off" spellcheck="false">
+                        <small class="form-text text-muted">Route downloads through a proxy (e.g. Tor at the address above) so streaming sites see the proxy's address instead of yours. Leave blank for a direct connection.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Tidal Login <span class="badge bg-secondary fw-normal">optional</span></h3>
+                <p class="text-muted small">Connect Tidal to import Tidal playlists directly. Unlike Spotify and Apple Music, Tidal serves an empty page to anonymous readers, so a login is genuinely required: create a free app at <code>developer.tidal.com</code>, add this redirect URL to it, then paste the client ID here and save. The secret is optional — without it the app logs in via PKCE instead.</p>
+                <p class="small"><span class="text-muted">Redirect URL to register:</span> <code id="tidalRedirect">{{ request.host_url }}api/tidal/callback</code></p>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label for="tidal_client_id" class="form-label">Client ID</label>
+                        <input type="text" class="form-control" id="tidal_client_id" name="tidal_client_id"
+                               value="{{ tidal_client_id }}" autocomplete="off" spellcheck="false">
+                    </div>
+                    <div class="col-md-6">
+                        <label for="tidal_client_secret" class="form-label">Client secret</label>
+                        <input type="password" class="form-control" id="tidal_client_secret" name="tidal_client_secret"
+                               placeholder="{% if tidal_client_secret %}Saved — leave blank to keep{% endif %}" autocomplete="off">
+                    </div>
+                </div>
+                <div class="d-flex gap-2 align-items-center mt-3">
+                    {% if tidal_connected %}
+                        <span class="badge bg-success">Tidal connected</span>
+                        <a href="/api/tidal/logout" class="btn btn-sm btn-outline-secondary">Disconnect</a>
+                    {% elif tidal_client_id %}
+                        <a href="/api/tidal/login" class="btn btn-sm btn-primary">Connect Tidal</a>
+                        <small class="text-muted">Save first if you just edited the ID or secret.</small>
+                    {% else %}
+                        <small class="text-muted">Add your client ID and secret above, save, then connect.</small>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="d-flex gap-2 mt-3 align-items-center flex-wrap">
+                <button type="submit" class="btn btn-secondary">Save Settings</button>
+                <a href="/" class="btn btn-outline-primary">Back to Home</a>
+                <span class="text-muted small ms-auto">v{{ app_version }}</span>
+                <button type="button" id="updateCheck" class="btn btn-sm btn-outline-secondary">Check for updates</button>
+            </div>
+        </form>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h3>Helpers</h3>
+            <p class="text-muted small">External tools the app shells out to. yt-dlp goes stale every few months as sites change; updating it fixes most sudden download failures.</p>
+            <ul class="list-group list-group-flush mb-2">
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>FFmpeg <span id="helperFfmpeg" class="text-muted small"></span></span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span>yt-dlp <span id="helperYtdlp" class="text-muted small"></span></span>
+                    <span class="d-flex gap-2">
+                        <button type="button" id="helpersCheck" class="btn btn-sm btn-outline-secondary">Check versions</button>
+                        <button type="button" id="helpersUpdate" class="btn btn-sm btn-outline-secondary d-none">Update yt-dlp</button>
+                    </span>
+                </li>
+            </ul>
+            <small id="helpersNote" class="text-muted"></small>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
+    <script>
+        window.pathBrowserHome = {{ output_path|tojson }};
+    </script>
+    <script>
+        // Keep the speed presets and the exact worker count in sync.
+        document.addEventListener('DOMContentLoaded', function () {
+            const number = document.getElementById('worker_count');
+            const presets = Array.from(document.querySelectorAll('input[name="speed_preset"]'));
+            if (!number || !presets.length) return;
+            presets.forEach((radio) => {
+                radio.addEventListener('change', () => { number.value = radio.value; });
+            });
+            const matchPreset = () => {
+                let matched = false;
+                presets.forEach((radio) => {
+                    radio.checked = radio.value === number.value;
+                    if (radio.checked) matched = true;
+                });
+                if (!matched) presets.forEach((radio) => { radio.checked = false; });
+            };
+            number.addEventListener('input', matchPreset);
+            matchPreset();
+        });
+        document.getElementById('updateCheck').addEventListener('click', function () {
+            const btn = this;
+            btn.disabled = true;
+            fetch('/api/update-check')
+                .then((r) => r.json())
+                .then((data) => {
+                    toast(data.message || 'Update check done.',
+                          data.update_available ? 'success' : 'info');
+                    if (data.update_available && data.url) {
+                        if (confirm(data.message + ' Open the download page?')) {
+                            window.open(data.url, '_blank', 'noopener');
+                        }
+                    }
+                })
+                .catch(() => toast('Could not check for updates.', 'danger'))
+                .finally(() => { btn.disabled = false; });
+        });
+        const refreshHelpers = () => {
+            fetch('/api/helpers')
+                .then((r) => r.json())
+                .then((data) => {
+                    document.getElementById('helperFfmpeg').textContent =
+                        data.ffmpeg ? data.ffmpeg.split(',')[0] : 'not found';
+                    const y = data.ytdlp || {};
+                    document.getElementById('helperYtdlp').textContent =
+                        y.current ? y.current + (y.update_available ? ' — update available' : ' — latest') : 'not found';
+                    document.getElementById('helpersUpdate').classList.toggle('d-none', !y.update_available);
+                    document.getElementById('helpersNote').textContent =
+                        y.update_available ? 'A newer yt-dlp release exists. Updating it fixes most sudden download failures.' : '';
+                })
+                .catch(() => {});
+        };
+        document.getElementById('helpersCheck').addEventListener('click', refreshHelpers);
+        document.getElementById('helpersUpdate').addEventListener('click', function () {
+            const btn = this;
+            btn.disabled = true;
+            const token = document.querySelector('meta[name="csrf-token"]');
+            fetch('/api/helpers/update-ytdlp', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': token ? token.getAttribute('content') : '' },
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    toast(data.message || 'yt-dlp update finished.',
+                          data.ok ? 'success' : 'danger');
+                    refreshHelpers();
+                })
+                .catch(() => toast('yt-dlp update failed.', 'danger'))
+                .finally(() => { btn.disabled = false; });
+        });
+        refreshHelpers();
+    </script>
+
+    {% include '_player.html' %}
+</body>
+</html>
