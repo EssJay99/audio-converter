@@ -6,7 +6,7 @@ import logging
 from sqlalchemy import inspect, text
 
 # Bump on each packaged release; shown in the footer and used by update-check.
-APP_VERSION = '1.0.0'
+APP_VERSION = '1.0.1'
 
 
 def _resource_base():
