@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller bundle for the Audio Converter desktop app (macOS).
+"""PyInstaller bundle for the Audio Converter desktop app.
 
-Build with:  bash scripts/build_macos.sh
-Output:      dist/AudioConverter/AudioConverter  (one-dir bundle)
+Build on each OS to produce that OS's artifact (helpers are fetched by the
+per-OS build scripts before this runs):
+  macOS  : dist/AudioConverter.app  (real .app bundle, goes in the DMG)
+  Windows: dist/AudioConverter/      (AudioConverter.exe, wrapped by NSIS)
+  Linux  : dist/AudioConverter/      (AudioConverter binary, tarred)
 
-The bundle ships the standalone yt-dlp binary (see the build script) and
-serves templates/static from inside the bundle via sys._MEIPASS.
-FFmpeg is expected on the system PATH (one `brew install ffmpeg`); the app
-warns clearly when it is missing.
+The bundle ships standalone yt-dlp/ffmpeg helper binaries (see the build
+scripts) and serves templates/static from inside the bundle via
+sys._MEIPASS. FFmpeg is expected on the system PATH (one `brew install
+ffmpeg`); the app warns clearly when it is missing.
 """
 import os
+import sys
 
 try:
     SPEC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -84,3 +88,17 @@ coll = COLLECT(
     upx_exclude=[],
     name='AudioConverter',
 )
+
+if sys.platform == 'darwin':
+    # A real .app bundle for the DMG (in addition to the folder above).
+    app = BUNDLE(
+        coll,
+        name='AudioConverter.app',
+        icon=None,
+        bundle_identifier='com.audioconverter.desktop',
+        info_plist={
+            'NSHighResolutionCapable': True,
+            'CFBundleShortVersionString': '1.0.0',
+            'LSMinimumSystemVersion': '11.0',
+        },
+    )

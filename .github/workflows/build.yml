@@ -1,0 +1,94 @@
+name: build-installers
+
+# Build a ready-to-install package on each OS (PyInstaller cannot
+# cross-compile, so every platform builds natively here).
+# Run manually from the Actions tab, or push a v* tag to also publish a
+# GitHub Release with all three installers attached.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            installer: 'dist/*.dmg'
+          - os: ubuntu-22.04
+            installer: 'dist/*.tar.gz'
+          - os: windows-latest
+            installer: 'dist/*.exe'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: System dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev \
+            pkg-config gobject-introspection
+
+      - name: Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-desktop.txt
+          python -m pip install pyinstaller pytest
+
+      - name: Test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt pyinstaller
+          bash scripts/build_macos.sh
+          bash scripts/build_dmg.sh
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/build_linux.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: scripts\build_windows.bat
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ runner.os }}
+          path: ${{ matrix.installer }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" installers/* \
+            --title "Audio Converter ${{ github.ref_name }}" \
+            --notes "macOS (.dmg), Windows (Setup .exe), and Linux (.tar.gz) installers. No command line needed: open, install, double-click."

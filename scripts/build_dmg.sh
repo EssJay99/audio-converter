@@ -13,10 +13,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VERSION="$(grep -E "^APP_VERSION" src/app/__init__.py | sed "s/.*'\(.*\)'/\1/")"
-BUNDLE="$ROOT/dist/AudioConverter"
+BUNDLE="$ROOT/dist/AudioConverter.app"
 DMG="$ROOT/dist/AudioConverter-${VERSION}.dmg"
 
-if [ ! -x "$BUNDLE/AudioConverter" ]; then
+if [ ! -x "$BUNDLE/Contents/MacOS/AudioConverter" ]; then
     echo "==> bundle missing; building it first"
     bash scripts/build_macos.sh
 fi
@@ -24,7 +24,7 @@ fi
 STAGE="$(mktemp -d /tmp/audio-converter-dmg-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 
-cp -R "$BUNDLE" "$STAGE/AudioConverter"
+cp -R "$BUNDLE" "$STAGE/AudioConverter.app"
 ln -s /Applications "$STAGE/Applications"
 
 cat > "$STAGE/How to install.txt" << 'EOF'
@@ -33,7 +33,7 @@ Audio Converter — install in 30 seconds
 
 1. Drag "AudioConverter" onto "Applications".
 2. Eject this disk image.
-3. Open AudioConverter from Applications (or Spotlight).
+3. Open AudioConverter from Applications (or Spotlight) with a double-click.
 
 First launch: macOS may say the app is from an unidentified developer
 because it isn't Apple-notarized. Right-click the app once, choose Open,

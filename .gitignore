@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-build/
 venv/
 
 # App runtime data (the desktop DB, secret key, conversions live here)

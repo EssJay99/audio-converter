@@ -61,8 +61,9 @@ echo "==> building with PyInstaller"
     --noconfirm --clean --distpath "$ROOT/dist" --workpath "$ROOT/build"
 
 BIN="$ROOT/dist/AudioConverter/AudioConverter"
-if [ ! -x "$BIN" ]; then
-    echo "error: bundle binary missing at $BIN" >&2
+APP_BIN="$ROOT/dist/AudioConverter.app/Contents/MacOS/AudioConverter"
+if [ ! -x "$APP_BIN" ]; then
+    echo "error: bundle binary missing at $APP_BIN" >&2
     exit 1
 fi
 
@@ -70,8 +71,10 @@ echo "==> smoke-testing the bundle (no window opened)"
 SELFTEST_DB="$(mktemp -u /tmp/audio-converter-selftest-XXXXXX.db)"
 AUDIO_CONVERTER_DB_PATH="$SELFTEST_DB" \
 AUDIO_CONVERTER_SECRET_KEY="selftest" \
-    "$BIN" --self-test
+    "$APP_BIN" --self-test
 rm -f "$SELFTEST_DB"* 2>/dev/null || true
 
-echo "==> build OK: $BIN"
-echo "    Copy dist/AudioConverter to /Applications to install."
+echo "==> build OK:"
+echo "    folder: $BIN"
+echo "    app:    $APP_BIN"
+echo "    Run bash scripts/build_dmg.sh for the installer disk image."
