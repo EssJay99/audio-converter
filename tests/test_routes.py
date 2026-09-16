@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 import pytest
 
@@ -180,7 +181,15 @@ def test_reveal_opens_file_manager(client, completed_conversion, monkeypatch):
     resp = client.get(f'/api/reveal/{job_id}')
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
-    assert calls and calls[0][2] == path
+    assert calls, 'file manager was never opened'
+    if sys.platform == 'darwin':
+        assert calls[0][:2] == ['open', '-R']
+        assert calls[0][2] == path
+    elif sys.platform.startswith('win'):
+        assert calls[0][-1] == path
+    else:
+        # Linux reveals the containing folder.
+        assert calls[0] == ['xdg-open', os.path.dirname(path)]
 
 
 # --------------------------------------------------------------- playlists --
