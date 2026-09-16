@@ -48,6 +48,18 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-desktop.txt
           python -m pip install pyinstaller pytest
 
+      - name: FFmpeg for tests (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y ffmpeg
+
+      - name: FFmpeg for tests (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: FFmpeg for tests (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
       - name: Test suite
         run: python -m pytest tests/ -q
 
