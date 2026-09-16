@@ -1,0 +1,76 @@
+name: auto-release
+
+# Hands-free releases: once a week, if main has moved since the last
+# release, bump the patch version, tag, and let build.yml produce all three
+# installers and publish the GitHub Release. To ship immediately instead,
+# run this workflow manually or push a v* tag yourself.
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version part to bump'
+        required: false
+        default: 'patch'
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+jobs:
+  release-if-changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether a release is due
+        id: decide
+        env:
+          BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          LATEST="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo '')"
+          echo "latest=$LATEST"
+          if [ -z "$LATEST" ]; then
+            echo "due=yes"
+          elif [ -z "$(git log "${LATEST}..HEAD" --oneline)" ]; then
+            echo "No changes since $LATEST; nothing to release."
+            echo "due=no"
+          else
+            echo "due=yes"
+          fi >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version, tag, and trigger the build pipeline
+        if: steps.decide.outputs.due == 'yes'
+        env:
+          BUMP: ${{ steps.decide.outputs.bump }}
+        run: |
+          python3 - << 'EOF'
+          import os, re
+          path = 'src/app/__init__.py'
+          src = open(path).read()
+          m = re.search(r"^APP_VERSION = '(\d+)\.(\d+)\.(\d+)'", src, re.M)
+          major, minor, patch = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+          bump = os.environ.get('BUMP', 'patch')
+          if bump == 'major':
+              major, minor, patch = major + 1, 0, 0
+          elif bump == 'minor':
+              minor, patch = minor + 1, 0
+          else:
+              patch += 1
+          version = f'{major}.{minor}.{patch}'
+          open(path, 'w').write(src[:m.start()] + f"APP_VERSION = '{version}'" + src[m.end():])
+          print(f'new version: {version}')
+          EOF
+          NEW="$(grep -E "^APP_VERSION" src/app/__init__.py | sed "s/.*'\(.*\)'/\1/")"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/app/__init__.py
+          git commit -m "Release v$NEW"
+          git push origin HEAD:main
+          git tag "v$NEW"
+          git push origin "v$NEW"
