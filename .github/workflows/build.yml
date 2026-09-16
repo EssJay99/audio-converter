@@ -35,18 +35,24 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: System dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev \
-            pkg-config gobject-introspection
-
       - name: Python dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-desktop.txt
           python -m pip install pyinstaller pytest
+        if: runner.os != 'Linux'
+
+      - name: Python dependencies (Linux)
+        # pygobject needs a newer gobject stack than CI images carry to
+        # *compile*, but nothing at build/test time imports it: the desktop
+        # window falls back to the browser without it, and end users get it
+        # via their distro package (see the Linux install notes).
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pytest
+          grep -v '^pygobject' requirements-desktop.txt > /tmp/requirements-desktop-ci.txt
+          python -m pip install -r /tmp/requirements-desktop-ci.txt
 
       - name: FFmpeg for tests (Linux)
         if: runner.os == 'Linux'

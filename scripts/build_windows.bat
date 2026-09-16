@@ -35,7 +35,7 @@ if not exist "build_helpers\ffmpeg.exe" (
     echo ==^> Downloading static ffmpeg for Windows
     powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'build_helpers\ffmpeg.zip'"
     powershell -NoProfile -Command "Expand-Archive -Path 'build_helpers\ffmpeg.zip' -DestinationPath 'build_helpers\ffextract'"
-    for /f "delims=" %%F in ('dir /b /s build_helpers\ffextract\bin\ffmpeg.exe 2^>nul') do copy /y "%%F" "build_helpers\ffmpeg.exe" >nul
+    for /f "delims=" %%F in ('dir /b /s build_helpers\ffextract\ffmpeg.exe 2^>nul') do copy /y "%%F" "build_helpers\ffmpeg.exe" >nul
     rmdir /s /q build_helpers\ffextract
     del build_helpers\ffmpeg.zip
 )
