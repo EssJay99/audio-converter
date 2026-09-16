@@ -74,3 +74,12 @@ jobs:
           git push origin HEAD:main
           git tag "v$NEW"
           git push origin "v$NEW"
+          # Tags pushed with the built-in token don't trigger workflows, so
+          # kick off the build pipeline for the new tag explicitly.
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -d "{\"ref\":\"v$NEW\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build.yml/dispatches" > /dev/null
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
