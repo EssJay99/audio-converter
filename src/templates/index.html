@@ -138,15 +138,26 @@
                             <h5>{% if show_history %}Full History{% else %}Recent Conversions{% endif %}</h5>
 
                             {% if show_history %}
-                                <div class="d-flex justify-content-between mb-2">
-                                    <span>Showing {{ history|length }} conversions</span>
-                                    <a href="/" class="btn btn-sm btn-outline-secondary">Back to Home</a>
+                                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                                    <span>Showing {{ history|length }} of {{ history_total }} conversions &middot; page {{ history_page }} of {{ history_pages }}</span>
+                                    <span class="d-flex gap-2">
+                                        {% if history_page > 1 %}
+                                            <a href="/history?page={{ history_page - 1 }}" class="btn btn-sm btn-outline-secondary">&lsaquo; Prev page</a>
+                                        {% endif %}
+                                        {% if history_page < history_pages %}
+                                            <a href="/history?page={{ history_page + 1 }}" class="btn btn-sm btn-outline-secondary">Next page &rsaquo;</a>
+                                        {% endif %}
+                                        <a href="/" class="btn btn-sm btn-outline-secondary">Back to Home</a>
+                                    </span>
                                 </div>
                             {% endif %}
 
                             <div class="history-toolbar d-flex flex-wrap gap-2 align-items-center mb-2">
-                                <input type="search" id="historySearch" class="form-control form-control-sm history-search"
-                                       placeholder="Search conversions…" aria-label="Search conversions" autocomplete="off">
+                                <div class="history-search-wrap">
+                                    <input type="search" id="historySearch" class="form-control form-control-sm history-search"
+                                           placeholder="Search conversions…" aria-label="Search conversions" autocomplete="off">
+                                    <ul id="searchResults" class="search-results d-none" aria-live="polite"></ul>
+                                </div>
                                 <select id="historyStatus" class="form-select form-select-sm history-status" aria-label="Filter by status">
                                     <option value="all">All statuses</option>
                                     <option value="pending">Pending</option>
@@ -223,6 +234,8 @@
                                                         {% if item.output_path %}
                                                             <button type="button" class="btn btn-sm btn-outline-secondary reveal-btn"
                                                                     data-reveal="{{ item.id }}" title="Show playlist folder">Open folder</button>
+                                                            <button type="button" class="btn btn-sm btn-outline-danger delete-playlist-btn"
+                                                                    data-delete-playlist="{{ item.id }}" title="Delete every finished track, then the playlist">Delete all</button>
                                                         {% endif %}
                                                         </div>
                                                         {% if item.output_path %}

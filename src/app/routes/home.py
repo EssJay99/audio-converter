@@ -4,6 +4,7 @@ import threading
 import time
 
 from flask import Blueprint, render_template, request, jsonify
+from sqlalchemy import or_
 from app.models import ConversionHistory, UserSettings
 from app.routes.convert import _serialize
 from app import db, APP_VERSION
@@ -46,9 +47,21 @@ def contact():
 
 @bp.route('/history')
 def history():
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per = min(500, max(10, int(request.args.get('per', 100))))
+    except (TypeError, ValueError):
+        per = 100
+    total = db.session.query(ConversionHistory).count()
+    pages = max(1, -(-total // per))
+    page = min(page, pages)
+
     history = db.session.query(ConversionHistory).order_by(
         ConversionHistory.created_at.desc()
-    ).all()
+    ).offset((page - 1) * per).limit(per).all()
 
     return render_template(
         'index.html',
@@ -56,6 +69,9 @@ def history():
         default_output_path=get_default_output_path(),
         request_path=request.path,
         show_history=True,
+        history_page=page,
+        history_pages=pages,
+        history_total=total,
         app_version=APP_VERSION,
     )
 
@@ -71,6 +87,27 @@ def api_conversions():
     ).limit(limit).all()
 
     return jsonify([_serialize(item) for item in history])
+
+
+@bp.route('/api/search')
+def api_search():
+    """Search conversions by URL, file path, or playlist title.
+
+    Unlike the instant client-side filter (which only sees rendered rows),
+    this scans the whole database — including tracks inside playlists that
+    were never expanded. Minimum 2 characters, 25 results max.
+    """
+    q = request.args.get('q', '').strip()
+    if len(q) < 2:
+        return jsonify({'ok': True, 'query': q, 'items': []})
+    like = f'%{q}%'
+    rows = db.session.query(ConversionHistory).filter(
+        or_(ConversionHistory.url.ilike(like),
+            ConversionHistory.output_path.ilike(like),
+            ConversionHistory.playlist_title.ilike(like))
+    ).order_by(ConversionHistory.created_at.desc()).limit(25).all()
+    return jsonify({'ok': True, 'query': q,
+                    'items': [_serialize(item) for item in rows]})
 
 
 @bp.route('/api/playlist/<int:parent_id>')

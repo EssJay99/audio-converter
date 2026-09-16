@@ -2347,11 +2347,34 @@ def test_api_update_ytdlp_without_binary(client, monkeypatch):
 
 
 def test_update_check_without_feed(client, monkeypatch):
+    import app.routes.settings as settings_module
     monkeypatch.delenv('AUDIO_CONVERTER_UPDATE_FEED', raising=False)
+
+    class GoneResp:
+        status_code = 404
+
+    monkeypatch.setattr(settings_module.requests, 'get',
+                        lambda url, **kw: GoneResp())
+    # Default feed unreachable -> clean error, not a crash.
+    resp = client.get('/api/update-check')
+    assert resp.status_code == 502
+
+
+def test_update_check_github_shape(client, monkeypatch):
+    import app.routes.settings as settings_module
+    monkeypatch.delenv('AUDIO_CONVERTER_UPDATE_FEED', raising=False)
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {'tag_name': 'v99.0', 'html_url': 'https://example.com/r'}
+
+    monkeypatch.setattr(settings_module.requests, 'get',
+                        lambda url, **kw: FakeResp())
     data = client.get('/api/update-check').get_json()
-    assert data['ok'] is True
-    assert data['update_available'] is False
-    assert 'No update feed' in data['message']
+    assert data['update_available'] is True
+    assert data['latest'] == 'v99.0'
 
 
 def test_update_check_newer_and_older(client, monkeypatch):
@@ -2415,3 +2438,104 @@ def test_pool_resize_grows_and_shrinks(client):
             assert wait_for(1)
             # NOTE: the queue stays paused on purpose; no test needs live
             # workers, and this guarantees these idle threads stay idle.
+
+
+# ------------------------------------------------------- library+ ----
+
+def test_delete_playlist_removes_tracks_and_folder(client, tmp_path):
+    folder = tmp_path / 'Mix'
+    folder.mkdir()
+    one = folder / 'one.flac'
+    one.write_bytes(b'x')
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path=str(folder), status='completed',
+                                   is_playlist=True, playlist_title='Mix',
+                                   item_count=2)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add_all([
+            ConversionHistory(url='https://youtu.be/1', format='FLAC',
+                              output_path=str(one), status='completed',
+                              parent_id=pid, item_index=0),
+            ConversionHistory(url='https://youtu.be/2', format='FLAC',
+                              output_path=str(folder / 'two.flac'),
+                              status='failed', parent_id=pid, item_index=1),
+        ])
+        db.session.commit()
+
+    resp = client.post(f'/api/delete-playlist/{pid}')
+    assert resp.status_code == 200
+    assert resp.get_json() == {'ok': True, 'removed_tracks': 2,
+                               'removed_files': 1}
+    assert not one.exists()
+    assert not folder.exists()
+
+    with client.application.app_context():
+        assert db.session.get(ConversionHistory, pid) is None
+        assert ConversionHistory.query.filter_by(parent_id=pid).count() == 0
+
+
+def test_delete_playlist_blocked_while_active(client, tmp_path):
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path=str(tmp_path), status='downloading',
+                                   is_playlist=True, item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/1', format='FLAC',
+            output_path=str(tmp_path), status='downloading',
+            parent_id=pid, item_index=0))
+        db.session.commit()
+
+    resp = client.post(f'/api/delete-playlist/{pid}')
+    assert resp.status_code == 400
+
+
+def test_history_pagination(client):
+    from app.models import ConversionHistory as CH
+    with client.application.app_context():
+        for i in range(25):
+            db.session.add(CH(url=f'https://youtu.be/p{i}', format='FLAC',
+                              output_path=f'/tmp/p{i}', status='completed'))
+        db.session.commit()
+
+    page1 = client.get('/history?page=1&per=10')
+    assert page1.status_code == 200
+    assert 'page 1 of 3' in page1.data.decode('utf-8')
+
+    page3 = client.get('/history?page=3&per=10')
+    assert 'page 3 of 3' in page3.data.decode('utf-8')
+
+    clamped = client.get('/history?page=99&per=10')
+    assert 'page 3 of 3' in clamped.data.decode('utf-8')
+
+
+def test_api_search_finds_unexpanded_child(client):
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path='/tmp/p', status='downloading',
+                                   is_playlist=True, playlist_title='Mix',
+                                   item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/obscure', format='FLAC',
+            output_path='/tmp/p/Zebra Crossing Anthem.flac',
+            status='completed', parent_id=pid, item_index=0))
+        db.session.commit()
+
+    data = client.get('/api/search', query_string={'q': 'zebra'}).get_json()
+    assert data['ok'] is True
+    assert len(data['items']) == 1
+    assert data['items'][0]['parent_id'] == pid
+    assert data['items'][0]['filename'] == 'Zebra Crossing Anthem.flac'
+
+
+def test_api_search_min_length(client):
+    assert client.get('/api/search', query_string={'q': 'x'}).get_json() == {
+        'ok': True, 'query': 'x', 'items': []}

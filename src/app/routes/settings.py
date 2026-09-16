@@ -150,6 +150,22 @@ def _version_tuple(value):
         return ()
 
 
+def _default_update_feed():
+    override = os.environ.get('AUDIO_CONVERTER_UPDATE_FEED', '').strip()
+    if override:
+        return override
+    return 'https://api.github.com/EssJay99/audio-converter/releases/latest'
+
+
+def _parse_feed_payload(data):
+    """Accept our {version, url} shape and GitHub's {tag_name, html_url}."""
+    if not isinstance(data, dict):
+        return '', ''
+    version = str(data.get('version') or data.get('tag_name') or '')
+    url = str(data.get('url') or data.get('html_url') or '')
+    return version, url
+
+
 @bp.route('/api/update-check')
 def update_check():
     """Compare this build against the release feed, if one is configured.
@@ -158,7 +174,7 @@ def update_check():
     {"version": "1.2.0", "url": "https://..."} (e.g. a GitHub release).
     With no feed configured the answer says so instead of failing.
     """
-    feed = os.environ.get('AUDIO_CONVERTER_UPDATE_FEED', '').strip()
+    feed = _default_update_feed()
     if not feed:
         return jsonify({'ok': True, 'current': APP_VERSION, 'latest': None,
                         'update_available': False,
@@ -173,10 +189,10 @@ def update_check():
         data = resp.json()
     except ValueError:
         return jsonify({'ok': False, 'message': 'Update feed was unreadable'}), 502
-    latest = str(data.get('version') or '')
+    latest, url = _parse_feed_payload(data)
     if _version_tuple(latest) > _version_tuple(APP_VERSION):
         return jsonify({'ok': True, 'current': APP_VERSION, 'latest': latest,
-                        'update_available': True, 'url': data.get('url') or '',
+                        'update_available': True, 'url': url,
                         'message': f'Version {latest} is available.'})
     return jsonify({'ok': True, 'current': APP_VERSION, 'latest': latest or APP_VERSION,
                     'update_available': False,

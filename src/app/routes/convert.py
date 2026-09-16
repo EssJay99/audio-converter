@@ -1432,6 +1432,47 @@ def skip_job(conversion_id):
     return jsonify({'ok': True, 'skipped': 1})
 
 
+@bp.route('/api/delete-playlist/<int:parent_id>', methods=['POST'])
+def delete_playlist(parent_id):
+    """Delete a whole playlist: every finished track file, all child rows,
+    then the parent row. Active tracks are left alone and reported."""
+    parent = db.session.get(ConversionHistory, parent_id)
+    if not parent or not parent.is_playlist:
+        return jsonify({'ok': False, 'message': 'Playlist not found'}), 404
+
+    children = db.session.query(ConversionHistory).filter_by(
+        parent_id=parent.id).all()
+    active = [c for c in children
+              if c.status in ConversionHistory.ACTIVE_STATUSES]
+    if active:
+        return jsonify({'ok': False,
+                        'message': f'{len(active)} track(s) still converting — '
+                                   'skip or wait for them first'}), 400
+
+    removed_files = 0
+    folder = parent.output_path or ''
+    for child in children:
+        path = child.output_path or ''
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed_files += 1
+            except OSError:
+                pass
+        db.session.delete(child)
+    db.session.delete(parent)
+    db.session.commit()
+
+    # Remove the playlist folder itself when we emptied it.
+    try:
+        if folder and os.path.isdir(folder) and not os.listdir(folder):
+            os.rmdir(folder)
+    except OSError:
+        pass
+    return jsonify({'ok': True, 'removed_tracks': len(children),
+                    'removed_files': removed_files})
+
+
 @bp.route('/api/delete/<int:conversion_id>', methods=['POST'])
 def delete_job(conversion_id):
     """Delete a finished track's file from disk and drop its history row."""

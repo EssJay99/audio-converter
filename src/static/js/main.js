@@ -210,6 +210,41 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return;
     }
+    const delPlBtn = e.target.closest('[data-delete-playlist]');
+    if (delPlBtn) {
+        if (!confirm('Delete every finished track in this playlist from disk and remove the playlist?')) {
+            e.preventDefault();
+            return;
+        }
+        delPlBtn.disabled = true;
+        fetch('/api/delete-playlist/' + delPlBtn.dataset.deletePlaylist, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken() },
+        })
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.ok) {
+                    if (data.message) alert(data.message);
+                    delPlBtn.disabled = false;
+                    return;
+                }
+                const row = delPlBtn.closest('tr');
+                const box = row && row.parentElement
+                    ? row.parentElement.querySelector('#children-' + delPlBtn.dataset.deletePlaylist)
+                    : null;
+                if (box) box.remove();
+                if (row) row.remove();
+                toast('Deleted ' + data.removed_tracks + ' track(s).', 'info');
+                refreshStorageInfo();
+                if (typeof refreshTable === 'function') refreshTable();
+            })
+            .catch(() => {
+                alert('Could not delete this playlist.');
+                delPlBtn.disabled = false;
+            });
+        e.preventDefault();
+        return;
+    }
     const copyBtn = e.target.closest('[data-copy-path]');
     if (copyBtn) {
         copyTextToClipboard(copyBtn.dataset.copyPath, copyBtn);
@@ -487,6 +522,118 @@ function togglePlaylist(btn) {
     }
 }
 
+// --- Server search: finds tracks inside unexpanded playlists -------------
+
+let searchTimer = null;
+
+function initServerSearch() {
+    const input = document.getElementById('historySearch');
+    const box = document.getElementById('searchResults');
+    if (!input || !box) return;
+    input.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        const q = input.value.trim();
+        if (q.length < 2) {
+            box.innerHTML = '';
+            box.classList.add('d-none');
+            return;
+        }
+        searchTimer = setTimeout(() => runServerSearch(q), 300);
+    });
+    document.addEventListener('click', (e) => {
+        if (e.target !== input && !(e.target.closest && e.target.closest('#searchResults'))) {
+            box.classList.add('d-none');
+        }
+    });
+}
+
+function runServerSearch(q) {
+    const box = document.getElementById('searchResults');
+    if (!box) return;
+    fetch('/api/search?q=' + encodeURIComponent(q))
+        .then((r) => r.json())
+        .then((data) => {
+            box.innerHTML = '';
+            const items = (data.items || []).slice(0, 8);
+            if (!items.length) {
+                box.classList.add('d-none');
+                return;
+            }
+            items.forEach((item) => {
+                const li = document.createElement('li');
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'search-result-item';
+                const label = item.filename || item.playlist_title || item.url;
+                btn.textContent = label + ' (' + item.status + ')' +
+                    (item.parent_id ? ' · in playlist' : '');
+                btn.title = item.output_path || item.url;
+                btn.addEventListener('click', () => {
+                    box.classList.add('d-none');
+                    jumpToRow(item);
+                });
+                li.appendChild(btn);
+                box.appendChild(li);
+            });
+            box.classList.remove('d-none');
+        })
+        .catch(() => {});
+}
+
+function highlightRow(row) {
+    row.classList.add('search-hit');
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => row.classList.remove('search-hit'), 4000);
+}
+
+function jumpToRow(item) {
+    // Reset client-side filters/paging so the target can be shown.
+    historyState.q = '';
+    historyState.status = 'all';
+    historyState.folder = 'all';
+    historyState.page = 0;
+    const search = document.getElementById('historySearch');
+    if (search) search.value = '';
+    const status = document.getElementById('historyStatus');
+    if (status) status.value = 'all';
+    const folder = document.getElementById('historyFolder');
+    if (folder) folder.value = 'all';
+
+    const reveal = () => {
+        for (let page = 0; page < 50; page++) {
+            historyState.page = page;
+            applyHistoryFilter();
+            const row = document.getElementById('row-' + item.id);
+            if (row && !row.hidden) {
+                highlightRow(row);
+                return true;
+            }
+        }
+        historyState.page = 0;
+        applyHistoryFilter();
+        return false;
+    };
+
+    if (item.parent_id) {
+        const expandBtn = document.querySelector(
+            '[data-expand-playlist="' + item.parent_id + '"]');
+        const childRow = document.getElementById('children-' + item.parent_id);
+        if (expandBtn && childRow && childRow.hidden) {
+            expandBtn.click();
+        }
+        let tries = 0;
+        const waiter = setInterval(() => {
+            tries += 1;
+            if (document.getElementById('row-' + item.id) || tries > 25) {
+                clearInterval(waiter);
+                if (!reveal()) toast('Found in the database, but the row is not on this page.', 'info');
+            }
+        }, 200);
+    } else if (!reveal()) {
+        toast('Found in the database, but the row is not on this page.', 'info');
+    }
+}
+
 document.addEventListener('click', (e) => {
     const expandBtn = e.target.closest('[data-expand-playlist]');
     if (expandBtn) {
@@ -733,6 +880,7 @@ function initHistoryToolbar() {
     }
     refreshQueueButton();
     refreshStorageInfo();
+    initServerSearch();
     const verifyBtn = document.getElementById('verifyFiles');
     if (verifyBtn) {
         verifyBtn.addEventListener('click', () => {
