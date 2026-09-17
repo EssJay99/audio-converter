@@ -75,8 +75,30 @@ class ConversionHistory(db.Model):
     # JSON list of {'artist','title'} import tracks that could not be matched,
     # so misses can be retried later without re-resolving the whole playlist.
     import_misses = db.Column(db.Text, nullable=False, default='[]')
+    # Subscription this track belongs to (followed playlists/channels).
+    subscription_id = db.Column(db.Integer, db.ForeignKey('subscription.id'),
+                               nullable=True)
 
     ACTIVE_STATUSES = ('pending', 'downloading', 'converting')
 
     def __repr__(self):
         return f'<ConversionHistory {self.id}>'
+
+
+class Subscription(db.Model):
+    """A followed playlist/channel: re-checked periodically for new tracks."""
+    id = db.Column(db.Integer, primary_key=True)
+    url = db.Column(db.String(500), nullable=False)
+    format = db.Column(db.String(50), nullable=False)
+    output_path = db.Column(db.String(500), nullable=False)
+    organization = db.Column(db.String(20), nullable=False, default='folder')
+    playlist_title = db.Column(db.String(250), nullable=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey('conversion_history.id'),
+                          nullable=True)
+    interval_hours = db.Column(db.Integer, nullable=False, default=24)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    last_checked = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<Subscription {self.id}>'

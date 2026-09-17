@@ -197,6 +197,14 @@ def main():
     thread, server, url = start_server(app, port)
     print('Serving {}'.format(url), file=sys.stderr)
 
+    try:
+        from app.routes.convert import _ensure_scheduler
+        with app.app_context():
+            _ensure_scheduler()
+    except Exception as exc:
+        print(f'Scheduler failed to start ({exc}); subscriptions will not auto-check.',
+              file=sys.stderr)
+
     if args.browser:
         import webbrowser
         webbrowser.open(url)

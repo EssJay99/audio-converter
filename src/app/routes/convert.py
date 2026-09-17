@@ -76,6 +76,7 @@ def _ensure_worker():
             _workers_started = True
         else:
             _spawn_workers(_desired_workers)
+    _ensure_scheduler()
 
 
 def _spawn_workers(count):
@@ -188,8 +189,8 @@ def _worker_loop():
                                                 error=f'Retry {attempts}/{max_retries}: {result["error"]}'):
                                     _conversion_queue.put(job.id)
                             else:
-                                if _job_finish(job, status='failed', error=
-                                        f'Max retries ({max_retries}) exceeded: {result["error"]}'):
+                                if _job_finish(job, status='failed', error=_note_stale_helper(
+                                        f'Max retries ({max_retries}) exceeded: {result["error"]}')):
                                     if not job.parent_id and not job.is_playlist:
                                         _notify('Download failed',
                                                 (job.url or '')[:200])
@@ -211,9 +212,9 @@ def _worker_loop():
                                             retry_attempts=attempts,
                                             error=f'Retry {attempts}/{max_retries}: Internal error — will retry'):
                                 _conversion_queue.put(job.id)
-                        else:
-                            _job_finish(job, status='failed', error=
-                                        f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}')
+                    else:
+                        _job_finish(job, status='failed', error=_note_stale_helper(
+                                    f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
                     finally:
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
@@ -330,27 +331,162 @@ def _expand_playlist_job(job):
                 import_source=import_source, import_misses=misses_json if import_source else '[]',
                 error=import_note or None)
 
+    _append_children(job, urls, title, folder, expectations,
+                     subscription_id=None)
+
+
+def _append_children(parent, urls, title, folder, expectations=None,
+                     subscription_id=None):
+    """Create one pending child row per URL, continuing item indexes.
+
+    Shared by first-time playlist expansion and subscription re-checks so
+    both flows enqueue, count, and verify identically.
+    """
+    expectations = expectations or {}
+    top = db.session.query(ConversionHistory).filter_by(
+        parent_id=parent.id).order_by(
+        ConversionHistory.item_index.desc()).first()
+    start = (top.item_index + 1) if top else 0
+    total = start + len(urls)
+
     children = []
-    for index, url in enumerate(urls):
+    for offset, url in enumerate(urls):
         expected = expectations.get(url, {})
         children.append(ConversionHistory(
             url=url,
-            format=job.format,
+            format=parent.format,
             output_path=folder,
             status='pending',
             progress=0,
-            parent_id=job.id,
+            parent_id=parent.id,
             is_playlist=False,
             playlist_title=title,
-            item_index=index,
-            item_count=len(urls),
+            item_index=start + offset,
+            item_count=total,
             expected_title=expected.get('expected_title', ''),
             expected_duration=expected.get('expected_duration', 0),
+            subscription_id=(subscription_id if subscription_id is not None
+                             else parent.subscription_id),
         ))
     db.session.add_all(children)
+    parent.item_count = total
     db.session.commit()
     for child in children:
         _conversion_queue.put(child.id)
+    return children
+
+
+# ------------------------------------------------- subscriptions ----
+# Followed playlists/channels: a daemon re-resolves them on a schedule and
+# appends only tracks that have never been queued, so new uploads arrive
+# converted without re-downloading anything.
+
+SUBSCRIPTION_INTERVALS = (6, 12, 24, 168)
+
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+
+
+def _ensure_scheduler():
+    global _scheduler_started
+    with _scheduler_lock:
+        if not _scheduler_started:
+            t = threading.Thread(target=_scheduler_loop, daemon=True,
+                                 name='subscription-scheduler')
+            t.start()
+            _scheduler_started = True
+
+
+def _scheduler_loop():
+    from app import app as flask_app
+    while True:
+        try:
+            with flask_app.app_context():
+                _check_due_subscriptions()
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+def _due_subscriptions():
+    from app.models import Subscription
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    due = []
+    for sub in Subscription.query.filter_by(active=True).all():
+        interval = sub.interval_hours if sub.interval_hours in SUBSCRIPTION_INTERVALS else 24
+        if not sub.last_checked or now - sub.last_checked >= timedelta(hours=interval):
+            due.append(sub)
+    return due
+
+
+def _check_due_subscriptions():
+    from datetime import datetime
+    for sub in _due_subscriptions():
+        try:
+            check_subscription(sub.id)
+        except Exception:
+            pass
+        try:
+            sub.last_checked = datetime.utcnow()
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+
+def _resolve_subscription_urls(sub):
+    """Current track URLs for a subscription, via native or import listing."""
+    if _is_streaming_playlist_url(sub.url):
+        result = resolve_import_urls(sub.url)
+    else:
+        result = resolve_playlist(sub.url)
+    if not result.get('success'):
+        return result
+    return result
+
+
+def check_subscription(subscription_id):
+    """Append a subscription's new tracks as children of its parent row.
+
+    Returns {'ok': True, 'added': N} or {'ok': False, 'error': str}.
+    """
+    from app.models import Subscription
+    sub = db.session.get(Subscription, subscription_id)
+    if sub is None:
+        return {'ok': False, 'error': 'Subscription not found'}
+    parent = db.session.get(ConversionHistory, sub.parent_id) if sub.parent_id else None
+    if parent is None:
+        return {'ok': False, 'error': 'Original playlist row is gone'}
+
+    try:
+        result = _resolve_subscription_urls(sub)
+    except Exception as e:
+        return {'ok': False, 'error': f'Could not read playlist: {str(e)}'}
+    if not result.get('success'):
+        return {'ok': False, 'error': result.get('error') or 'Could not read playlist'}
+
+    known = {c.url for c in db.session.query(ConversionHistory).filter_by(
+        parent_id=parent.id).all()}
+    fresh = [u for u in result['urls'] if u not in known]
+    if not fresh:
+        return {'ok': True, 'added': 0}
+
+    folder = parent.output_path or sub.output_path
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception as e:
+        return {'ok': False, 'error': f'Cannot use folder: {str(e)}'}
+
+    expectations = {item['url']: item for item in result.get('items', [])}
+    _append_children(parent, fresh, result.get('title') or parent.playlist_title,
+                     folder, expectations, subscription_id=sub.id)
+    # Reopen the parent so its completion (and notification) fires again.
+    parent.status = 'downloading'
+    parent.error = None
+    db.session.commit()
+    _ensure_worker()
+    _refresh_playlist_parent(parent.id)
+    return {'ok': True, 'added': len(fresh)}
 
 
 def _refresh_playlist_parent(parent_id):
@@ -508,6 +644,37 @@ def _invalidate_storage():
     # Path entries may claim a deleted file still exists; drop them too so
     # the recomputed total (and file_exists flags) read fresh state.
     _stat_cache.clear()
+
+
+# Signatures of a stale yt-dlp (sites change constantly; an old helper
+# fails in recognizable ways). Matching failures hint the fix and raise a
+# banner instead of failing silently forever.
+_STALE_PATTERNS = (
+    'signature extraction failed',
+    'player response',
+    'nsig',
+    'throttling',
+    'http error 403',
+    'did not match',
+    'update yt-dlp',
+    'unsupported url',
+)
+_stale_helper_event = threading.Event()
+
+
+def _looks_stale(error_text):
+    lowered = (error_text or '').lower()
+    return any(pattern in lowered for pattern in _STALE_PATTERNS)
+
+
+def _note_stale_helper(error_text):
+    """Flag a stale helper and append the fix hint. Returns the message."""
+    message = error_text or 'Conversion failed'
+    if _looks_stale(error_text):
+        _stale_helper_event.set()
+        message += (' — looks like an outdated downloader; '
+                    'update yt-dlp in Settings › Helpers')
+    return message
 
 
 def _job_finish(job, **fields):
@@ -1450,8 +1617,118 @@ def api_update_ytdlp():
     except Exception as e:
         _cleanup(locals().get('tmp_path', ''))
         return jsonify({'ok': False, 'message': f'Update failed: {str(e)}'}), 500
+    _stale_helper_event.clear()
     return jsonify({'ok': True, 'version': latest['version'],
                     'message': f"yt-dlp updated to {latest['version']}."})
+
+
+def _running_bundle_dir():
+    """The installed .app bundle dir when running from /Applications."""
+    if not getattr(sys, 'frozen', False) or sys.platform != 'darwin':
+        return None
+    macos_dir = os.path.dirname(os.path.abspath(sys.executable))
+    if os.path.basename(macos_dir) != 'MacOS':
+        return None
+    bundle = os.path.dirname(os.path.dirname(macos_dir))
+    if not bundle.endswith('.app'):
+        return None
+    if os.path.realpath(bundle) != '/Applications/AudioConverter.app':
+        return None
+    return bundle
+
+
+def _find_dmg_asset(release):
+    """Pick the macOS disk image out of a release payload, if present."""
+    assets = release.get('assets') if isinstance(release, dict) else None
+    for asset in assets or []:
+        name = str(asset.get('name') or '')
+        url = asset.get('browser_download_url') or ''
+        if name.endswith('.dmg') and url:
+            return name, url
+    return None, None
+
+
+@bp.route('/api/update-install', methods=['POST'])
+def api_update_install():
+    """Download the latest release and install it over this app, then quit.
+
+    Deliberately narrow: only a frozen macOS bundle running from
+    /Applications. Anything else gets instructions instead of a half-done
+    install, because a failed self-replace is the one unrecoverable state.
+    """
+    from app.routes.settings import _default_update_feed
+    bundle = _running_bundle_dir()
+    if bundle is None:
+        return jsonify({'ok': False,
+                        'message': 'Automatic install works from the '
+                                   'Applications copy of the app. Download '
+                                   'the installer from the release page instead.'}), 400
+    try:
+        resp = requests.get(_default_update_feed(), timeout=20,
+                            headers={'Accept': 'application/json'})
+        release = resp.json() if resp.status_code == 200 else {}
+    except Exception:
+        release = {}
+    _name, url = _find_dmg_asset(release)
+    if not url:
+        return jsonify({'ok': False,
+                        'message': 'No macOS installer found in the latest release.'}), 502
+
+    workdir = tempfile.mkdtemp(prefix='audio-converter-update-')
+    dmg_path = os.path.join(workdir, 'update.dmg')
+    mount = os.path.join(workdir, 'mnt')
+    os.makedirs(mount, exist_ok=True)
+    try:
+        dl = requests.get(url, timeout=600,
+                          headers={'User-Agent': 'AudioConverter/1.0'})
+        if dl.status_code != 200 or not dl.content:
+            raise ValueError('download failed')
+        with open(dmg_path, 'wb') as f:
+            f.write(dl.content)
+        attached = subprocess.run(
+            ['hdiutil', 'attach', '-nobrowse', '-readonly',
+             '-mountpoint', mount, dmg_path],
+            capture_output=True, text=True, timeout=60)
+        if attached.returncode != 0:
+            raise ValueError('could not mount installer')
+        try:
+            staged = os.path.join(mount, 'AudioConverter.app')
+            if not os.path.isdir(staged):
+                raise ValueError('installer looks wrong')
+            needed = sum(os.path.getsize(os.path.join(r, f))
+                         for r, _d, fs in os.walk(staged) for f in fs)
+            if shutil.disk_usage('/Applications').free < needed * 2:
+                raise ValueError('not enough free disk space')
+            trash = bundle + '.old'
+            if os.path.exists(trash):
+                shutil.rmtree(trash, ignore_errors=True)
+            os.rename(bundle, trash)
+            try:
+                shutil.copytree(staged, bundle, symlinks=True)
+            except Exception:
+                if os.path.exists(trash):
+                    os.rename(trash, bundle)
+                raise
+            shutil.rmtree(trash, ignore_errors=True)
+        finally:
+            subprocess.run(['hdiutil', 'detach', mount, '-force'],
+                           capture_output=True, timeout=60)
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return jsonify({'ok': False, 'message': f'Install failed: {str(e)}'}), 500
+    shutil.rmtree(workdir, ignore_errors=True)
+
+    def _relaunch():
+        try:
+            subprocess.Popen(['open', os.path.join(
+                bundle, 'Contents', 'MacOS', 'AudioConverter')])
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Timer(2.0, _relaunch).start()
+    return jsonify({'ok': True,
+                    'message': 'Installed. Restarting into the new version…'})
 
 
 def is_valid_format(format_type):
@@ -1543,6 +1820,13 @@ def api_queue_status():
     """Queue state for the toolbar: paused flag plus waiting jobs."""
     return jsonify({'ok': True, 'paused': _queue_paused.is_set(),
                     'pending': _conversion_queue.qsize()})
+
+
+@bp.route('/api/health')
+def api_health():
+    """Client-visible warnings: stale downloader suspicion."""
+    return jsonify({'ok': True,
+                    'stale_helper_suspected': _stale_helper_event.is_set()})
 
 
 @bp.route('/api/skip/<int:conversion_id>')
@@ -1779,6 +2063,121 @@ def retry_job(conversion_id):
     if history.parent_id:
         _refresh_playlist_parent(history.parent_id)
     return jsonify({'ok': True, 'retried': 1})
+
+
+def _serialize_subscription(sub):
+    return {
+        'id': sub.id,
+        'url': sub.url,
+        'playlist_title': sub.playlist_title or '',
+        'parent_id': sub.parent_id,
+        'interval_hours': sub.interval_hours,
+        'active': bool(sub.active),
+        'last_checked': str(sub.last_checked) if sub.last_checked else '',
+    }
+
+
+@bp.route('/api/subscribe/<int:parent_id>', methods=['POST'])
+def subscribe_playlist(parent_id):
+    """Follow a playlist: re-check it on a schedule for new tracks."""
+    from app.models import Subscription
+    parent = db.session.get(ConversionHistory, parent_id)
+    if not parent or not parent.is_playlist:
+        return jsonify({'ok': False, 'message': 'Playlist not found'}), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        interval = int(payload.get('interval_hours', 24))
+    except (TypeError, ValueError):
+        interval = 24
+    if interval not in SUBSCRIPTION_INTERVALS:
+        interval = 24
+
+    existing = db.session.query(Subscription).filter_by(
+        parent_id=parent.id).first()
+    if existing:
+        existing.active = True
+        existing.interval_hours = interval
+        db.session.commit()
+        return jsonify({'ok': True, 'id': existing.id,
+                        'message': 'Already following this playlist.'})
+
+    sub = Subscription(
+        url=parent.url,
+        format=parent.format,
+        output_path=parent.output_path,
+        organization=parent.playlist_organization or 'folder',
+        playlist_title=parent.playlist_title,
+        parent_id=parent.id,
+        interval_hours=interval,
+    )
+    db.session.add(sub)
+    db.session.commit()
+    parent.subscription_id = sub.id
+    db.session.commit()
+    _ensure_scheduler()
+    return jsonify({'ok': True, 'id': sub.id,
+                    'message': 'Following playlist for new tracks.'})
+
+
+@bp.route('/api/subscriptions')
+def api_subscriptions():
+    """List followed playlists."""
+    from app.models import Subscription
+    subs = db.session.query(Subscription).order_by(
+        Subscription.created_at.desc()).all()
+    return jsonify({'ok': True,
+                    'items': [_serialize_subscription(s) for s in subs]})
+
+
+@bp.route('/api/subscriptions/<int:sub_id>/check', methods=['POST'])
+def api_subscription_check(sub_id):
+    """Run a subscription check right now instead of waiting for schedule."""
+    result = check_subscription(sub_id)
+    if not result.get('ok'):
+        return jsonify({**result, 'added': 0}), 400
+    return jsonify(result)
+
+
+@bp.route('/api/subscriptions/<int:sub_id>/toggle', methods=['POST'])
+def api_subscription_toggle(sub_id):
+    """Pause or resume a subscription without deleting it."""
+    from app.models import Subscription
+    sub = db.session.get(Subscription, sub_id)
+    if not sub:
+        return jsonify({'ok': False, 'message': 'Subscription not found'}), 404
+    sub.active = not sub.active
+    db.session.commit()
+    return jsonify({'ok': True, 'active': bool(sub.active)})
+
+
+@bp.route('/api/subscriptions/<int:sub_id>/interval', methods=['POST'])
+def api_subscription_interval(sub_id):
+    """Change how often a subscription is re-checked."""
+    from app.models import Subscription
+    sub = db.session.get(Subscription, sub_id)
+    if not sub:
+        return jsonify({'ok': False, 'message': 'Subscription not found'}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        interval = int(payload.get('interval_hours', 24))
+    except (TypeError, ValueError):
+        interval = 24
+    sub.interval_hours = interval if interval in SUBSCRIPTION_INTERVALS else 24
+    db.session.commit()
+    return jsonify({'ok': True, 'interval_hours': sub.interval_hours})
+
+
+@bp.route('/api/subscriptions/<int:sub_id>/delete', methods=['POST'])
+def api_subscription_delete(sub_id):
+    """Stop following a playlist (history is kept)."""
+    from app.models import Subscription
+    sub = db.session.get(Subscription, sub_id)
+    if not sub:
+        return jsonify({'ok': False, 'message': 'Subscription not found'}), 404
+    db.session.delete(sub)
+    db.session.commit()
+    return jsonify({'ok': True})
 
 
 @bp.route('/api/retry-misses/<int:parent_id>', methods=['POST'])

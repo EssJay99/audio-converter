@@ -133,6 +133,12 @@
 
         <div class="row mt-3">
             <div class="col-12">
+                <div id="healthBanner" class="alert alert-warning alert-dismissible d-none" role="alert">
+                    <strong>Downloads keep failing.</strong>
+                    <span id="healthBannerText">This looks like an outdated downloader.</span>
+                    <a href="/settings" class="alert-link">Update yt-dlp in Settings › Helpers</a>.
+                    <button type="button" class="btn-close" data-hide-health aria-label="Dismiss"></button>
+                </div>
                 {% if history %}
                         <div class="card p-4 shadow-sm border-0 rounded mt-3">
                             <h5>{% if show_history %}Full History{% else %}Recent Conversions{% endif %}</h5>
@@ -237,6 +243,8 @@
                                                             {% if item.status == 'completed' %}
                                                             <a class="btn btn-sm btn-outline-secondary"
                                                                href="/api/playlist/{{ item.id }}/m3u" title="Download a playlist file for other players">M3U</a>
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary subscribe-btn"
+                                                                    data-subscribe="{{ item.id }}" title="Auto-download new tracks added to this playlist later">Follow</button>
                                                             {% endif %}
                                                             <button type="button" class="btn btn-sm btn-outline-danger delete-playlist-btn"
                                                                     data-delete-playlist="{{ item.id }}" title="Delete every finished track, then the playlist">Delete all</button>
@@ -314,6 +322,25 @@
                             </div>
                         </div>
                 {% endif %}
+            </div>
+        </div>
+
+        <div class="row mt-3" id="subsRow">
+            <div class="col-12">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h5>Followed Playlists</h5>
+                    <p class="text-muted small mb-2">Checked automatically for new tracks. New uploads arrive converted, without re-downloading anything.</p>
+                    <div id="subsList"><span class="text-muted small">No followed playlists yet — hit Follow on any finished playlist.</span></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-3" id="statsRow">
+            <div class="col-12">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h5>Library Stats</h5>
+                    <div id="statsBody"><span class="text-muted small">Loading…</span></div>
+                </div>
             </div>
         </div>
 

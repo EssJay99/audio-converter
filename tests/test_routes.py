@@ -2825,9 +2825,20 @@ def _load_desktop():
 
 
 def test_find_free_port_prefers_stable_default():
+    import socket
     desktop = _load_desktop()
-    port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
-    assert port == desktop.DEFAULT_PORT
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((desktop.DEFAULT_HOST, desktop.DEFAULT_PORT))
+        probe.listen(1)
+        taken = True
+    except OSError:
+        taken = False
+    try:
+        port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
+        assert (port != desktop.DEFAULT_PORT) if taken else (port == desktop.DEFAULT_PORT)
+    finally:
+        probe.close()
 
 
 def test_find_free_port_falls_back_when_taken():
@@ -3183,3 +3194,216 @@ def test_settings_tray_round_trip(client):
         # Checkbox omitted -> tray icon off.
         assert UserSettings.query.first().tray_icon is False
     assert b'id="tray_icon"' in client.get('/settings').data
+
+
+# ------------------------------------------------------- subscriptions ----
+
+def _make_parent(client, **overrides):
+    from app.models import Subscription
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://www.youtube.com/playlist?list=PLx',
+            format='FLAC', output_path='/tmp/sub', status='completed',
+            is_playlist=True, playlist_title='Sub Mix', item_count=1,
+            **overrides)
+        db.session.add(parent)
+        db.session.commit()
+        return parent.id
+
+
+def test_subscribe_creates_and_links(client):
+    from app.models import Subscription
+    pid = _make_parent(client)
+    resp = client.post(f'/api/subscribe/{pid}', json={'interval_hours': 12})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['ok'] is True
+
+    with client.application.app_context():
+        sub = Subscription.query.first()
+        assert sub is not None
+        assert sub.interval_hours == 12
+        assert sub.active is True
+        assert db.session.get(ConversionHistory, pid).subscription_id == sub.id
+
+
+def test_subscribe_idempotent_and_validates_interval(client):
+    from app.models import Subscription
+    pid = _make_parent(client)
+    client.post(f'/api/subscribe/{pid}', json={'interval_hours': 999})
+    second = client.post(f'/api/subscribe/{pid}', json={}).get_json()
+    assert second['ok'] is True
+
+    with client.application.app_context():
+        subs = Subscription.query.all()
+        assert len(subs) == 1
+        assert subs[0].interval_hours == 24
+
+
+def test_subscription_toggle_delete_interval(client):
+    from app.models import Subscription
+    pid = _make_parent(client)
+    sid = client.post(f'/api/subscribe/{pid}', json={}).get_json()['id']
+
+    assert client.post(f'/api/subscriptions/{sid}/toggle').get_json() == {
+        'ok': True, 'active': False}
+    assert client.post(f'/api/subscriptions/{sid}/interval',
+                       json={'interval_hours': 6}).get_json() == {
+        'ok': True, 'interval_hours': 6}
+    assert client.post(f'/api/subscriptions/{sid}/interval',
+                       json={'interval_hours': 13}).get_json()['interval_hours'] == 24
+    assert client.post(f'/api/subscriptions/{sid}/delete').get_json() == {
+        'ok': True}
+    with client.application.app_context():
+        assert Subscription.query.count() == 0
+        # History is kept.
+        assert db.session.get(ConversionHistory, pid) is not None
+
+
+def test_check_appends_only_new_tracks(client, tmp_path, monkeypatch):
+    from app.models import Subscription
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    monkeypatch.setattr(convert_module, 'resolve_playlist', lambda url: {
+        'success': True, 'title': 'Sub Mix',
+        'urls': ['https://youtu.be/old', 'https://youtu.be/new']})
+
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://www.youtube.com/playlist?list=PLx',
+            format='FLAC', output_path=str(tmp_path), status='completed',
+            is_playlist=True, playlist_title='Sub Mix', item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/old', format='FLAC',
+            output_path=str(tmp_path / 'old.flac'), status='completed',
+            parent_id=pid, item_index=0, item_count=1))
+        sub = Subscription(url=parent.url, format='FLAC',
+                           output_path=str(tmp_path), parent_id=pid)
+        db.session.add(sub)
+        db.session.commit()
+        sid = sub.id
+
+    resp = client.post(f'/api/subscriptions/{sid}/check')
+    assert resp.status_code == 200
+    assert resp.get_json()['added'] == 1
+
+    with client.application.app_context():
+        kids = ConversionHistory.query.filter_by(
+            parent_id=pid).order_by(ConversionHistory.item_index).all()
+        assert [k.url for k in kids] == ['https://youtu.be/old',
+                                         'https://youtu.be/new']
+        assert kids[1].item_index == 1
+        assert kids[1].subscription_id == sid
+        parent = db.session.get(ConversionHistory, pid)
+        assert parent.item_count == 2
+        assert parent.status == 'downloading'
+
+
+def test_due_subscriptions_respects_interval_and_active(client):
+    from app.models import Subscription
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    with client.application.app_context():
+        db.session.add_all([
+            Subscription(url='https://a', format='FLAC', output_path='/tmp/a',
+                         active=True,
+                         last_checked=now - timedelta(hours=30)),
+            Subscription(url='https://b', format='FLAC', output_path='/tmp/b',
+                         active=True, interval_hours=6,
+                         last_checked=now - timedelta(hours=1)),
+            Subscription(url='https://c', format='FLAC', output_path='/tmp/c',
+                         active=False,
+                         last_checked=now - timedelta(days=9)),
+        ])
+        db.session.commit()
+        due = convert_module._due_subscriptions()
+        assert [s.url for s in due] == ['https://a']
+
+
+# ------------------------------------------------------- self-healing ----
+
+@pytest.mark.parametrize('error,expected', [
+    ('yt-dlp failed: signature extraction failed', True),
+    ('HTTP Error 403: Forbidden', True),
+    ('Video unavailable', False),
+    ('Not enough free disk space', False),
+    ('', False),
+])
+def test_looks_stale(error, expected):
+    assert convert_module._looks_stale(error) is expected
+
+
+def test_stale_flag_and_health(client, monkeypatch):
+    assert client.get('/api/health').get_json()['stale_helper_suspected'] is False
+    out = convert_module._note_stale_helper('signature extraction failed badly')
+    assert 'Settings' in out
+    assert client.get('/api/health').get_json()['stale_helper_suspected'] is True
+    convert_module._stale_helper_event.clear()
+
+
+# ------------------------------------------------------- stats ----
+
+def test_api_stats_counts(client, tmp_path):
+    import subprocess as _sp
+    two = tmp_path / 'two.flac'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=2', '-c:a', 'flac',
+             str(two)], check=True)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/1', format='FLAC', output_path=str(two),
+            status='completed', progress=100))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/2', format='WAV', output_path='/tmp/gone.wav',
+            status='failed'))
+        db.session.commit()
+
+    data = client.get('/api/stats').get_json()
+    assert data['ok'] is True
+    assert data['tracks'] == 1
+    assert data['files'] == 1
+    assert data['by_status']['completed'] == 1
+    assert data['by_status']['failed'] == 1
+    assert data['by_format']['FLAC'] == 1
+    assert data['playtime_tracks'] == 1
+    assert data['recent_7d'] == 2
+
+
+# ------------------------------------------------------- updater ----
+
+def test_update_install_blocked_when_not_frozen(client):
+    resp = client.post('/api/update-install')
+    assert resp.status_code == 400
+    assert 'Applications' in resp.get_json()['message']
+
+
+def test_find_dmg_asset():
+    release = {'assets': [
+        {'name': 'notes.txt', 'browser_download_url': 'https://x/notes'},
+        {'name': 'AudioConverter-1.0.0.dmg',
+         'browser_download_url': 'https://x/app.dmg'},
+    ]}
+    assert convert_module._find_dmg_asset(release) == (
+        'AudioConverter-1.0.0.dmg', 'https://x/app.dmg')
+    assert convert_module._find_dmg_asset({}) == (None, None)
+
+
+def test_running_bundle_dir_unfrozen():
+    assert convert_module._running_bundle_dir() is None
+
+
+def test_home_has_subs_stats_health_markers(client):
+    page = _home_with_history(client)
+    for marker in (b'id="subsList"', b'id="statsBody"',
+                   b'id="healthBanner"'):
+        assert marker in page.data
+
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/list', format='FLAC',
+            output_path='/tmp/p', status='completed',
+            is_playlist=True, playlist_title='Mix', item_count=1))
+        db.session.commit()
+    assert b'data-subscribe' in client.get('/').data

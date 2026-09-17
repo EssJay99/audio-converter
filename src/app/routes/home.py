@@ -110,6 +110,72 @@ def api_search():
                     'items': [_serialize(item) for item in rows]})
 
 
+DURATION_PROBE_CAP = 500
+
+
+@bp.route('/api/stats')
+def api_stats():
+    """Library dashboard numbers: counts, size, playtime, top playlists."""
+    from datetime import datetime, timedelta
+    from app.routes.convert import _cached_metadata, _cached_stat
+
+    rows = db.session.query(ConversionHistory).all()
+    by_status, by_format = {}, {}
+    total_bytes, total_files = 0, 0
+    for row in rows:
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+        by_format[row.format] = by_format.get(row.format, 0) + 1
+        path = row.output_path or ''
+        if row.status in ('completed', 'skipped') and path:
+            exists, size = _cached_stat(path, ttl=60.0)
+            if exists:
+                total_bytes += size
+                total_files += 1
+
+    # Playtime: probe durations (cached by file mtime after the first pass),
+    # capped so huge libraries stay responsive.
+    duration_files = 0
+    total_seconds = 0.0
+    probed = 0
+    for row in rows:
+        if probed >= DURATION_PROBE_CAP:
+            break
+        path = row.output_path or ''
+        if row.status not in ('completed', 'skipped') or not path:
+            continue
+        if not os.path.isfile(path):
+            continue
+        meta = _cached_metadata(path)
+        if meta.get('duration'):
+            total_seconds += meta['duration']
+            duration_files += 1
+        probed += 1
+
+    parents = db.session.query(ConversionHistory).filter_by(
+        is_playlist=True).order_by(
+        ConversionHistory.item_count.desc()).limit(5).all()
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    recent = db.session.query(ConversionHistory).filter(
+        ConversionHistory.created_at >= week_ago).count()
+
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    return jsonify({
+        'ok': True,
+        'tracks': by_status.get('completed', 0) + by_status.get('skipped', 0),
+        'bytes': total_bytes,
+        'files': total_files,
+        'playtime': f'{hours}h {minutes}m' if hours else f'{minutes}m',
+        'playtime_tracks': duration_files,
+        'by_status': by_status,
+        'by_format': by_format,
+        'recent_7d': recent,
+        'top_playlists': [{'title': p.playlist_title or p.url[:40],
+                           'tracks': p.item_count,
+                           'status': p.status} for p in parents],
+    })
+
+
 @bp.route('/api/playlist/<int:parent_id>/m3u')
 def api_playlist_m3u(parent_id):
     """Download a playlist as an .m3u file pointing at the converted tracks."""

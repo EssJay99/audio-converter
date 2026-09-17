@@ -438,6 +438,36 @@ footer {
     outline-offset: -2px;
 }
 
+/* Library stats tiles */
+.stat-tile {
+    background: #f6f8fa;
+    border-radius: 0.4rem;
+    padding: 0.7rem 0.9rem;
+}
+
+.stat-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.stat-label {
+    font-size: 0.78rem;
+    color: #6c757d;
+}
+
+.stat-sub {
+    font-weight: 400;
+}
+
+body.dark-mode .stat-tile {
+    background: #1a212d;
+}
+
+body.dark-mode .stat-label {
+    color: #9aa7b8;
+}
+
 /* Toast notifications */
 .toast-box {
     position: fixed;

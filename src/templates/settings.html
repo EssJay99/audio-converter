@@ -290,10 +290,23 @@
                 .then((data) => {
                     toast(data.message || 'Update check done.',
                           data.update_available ? 'success' : 'info');
-                    if (data.update_available && data.url) {
-                        if (confirm(data.message + ' Open the download page?')) {
-                            window.open(data.url, '_blank', 'noopener');
-                        }
+                    if (!data.update_available) return;
+                    const token = document.querySelector('meta[name="csrf-token"]');
+                    const headers = { 'X-CSRFToken': token ? token.getAttribute('content') : '' };
+                    if (confirm('Install version ' + data.latest + ' now? Only works from the Applications copy on macOS.')) {
+                        toast('Installing update in the background…', 'info');
+                        fetch('/api/update-install', { method: 'POST', headers: headers })
+                            .then((r) => r.json())
+                            .then((inst) => {
+                                toast(inst.message || 'Install finished.',
+                                      inst.ok ? 'success' : 'danger');
+                                if (!inst.ok && data.url && confirm(data.message + ' Open the download page instead?')) {
+                                    window.open(data.url, '_blank', 'noopener');
+                                }
+                            })
+                            .catch(() => toast('Install failed.', 'danger'));
+                    } else if (data.url && confirm(data.message + ' Open the download page?')) {
+                        window.open(data.url, '_blank', 'noopener');
                     }
                 })
                 .catch(() => toast('Could not check for updates.', 'danger'))

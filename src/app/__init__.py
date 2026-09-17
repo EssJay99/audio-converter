@@ -82,6 +82,7 @@ _SCHEMA_MIGRATIONS = {
         ('expected_duration', 'FLOAT DEFAULT 0'),
         ('expected_title', 'VARCHAR(250) DEFAULT ""'),
         ('import_misses', 'TEXT DEFAULT "[]"'),
+        ('subscription_id', 'INTEGER'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),

@@ -177,6 +177,23 @@ function toast(message, kind) {
 }
 
 document.addEventListener('click', (e) => {
+    const subBtn = e.target.closest('[data-subscribe]');
+    if (subBtn) {
+        subBtn.disabled = true;
+        postJSON('/api/subscribe/' + subBtn.dataset.subscribe, {})
+            .then((data) => {
+                toast(data.message || (data.ok ? 'Following playlist.' : 'Could not follow.'),
+                      data.ok ? 'success' : 'danger');
+                subBtn.disabled = false;
+                loadSubscriptions();
+            })
+            .catch(() => {
+                alert('Could not follow this playlist.');
+                subBtn.disabled = false;
+            });
+        e.preventDefault();
+        return;
+    }
     const skipBtn = e.target.closest('[data-skip]');
     if (skipBtn) {
         skipBtn.disabled = true;
@@ -633,6 +650,163 @@ function jumpToRow(item) {
         toast('Found in the database, but the row is not on this page.', 'info');
     }
 }
+
+// --- Subscriptions: follow playlists for new tracks ------------------------
+
+function postJSON(url, payload) {
+    return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+        body: JSON.stringify(payload || {}),
+    }).then((r) => r.json());
+}
+
+function loadSubscriptions() {
+    const list = document.getElementById('subsList');
+    if (!list) return;
+    fetch('/api/subscriptions')
+        .then((r) => r.json())
+        .then((data) => {
+            const items = data.items || [];
+            list.innerHTML = '';
+            if (!items.length) {
+                list.innerHTML = '<span class="text-muted small">No followed playlists yet — hit Follow on any finished playlist.</span>';
+                return;
+            }
+            items.forEach((sub) => {
+                const row = document.createElement('div');
+                row.className = 'd-flex flex-wrap gap-2 align-items-center mb-2 sub-row';
+                const name = document.createElement('strong');
+                name.textContent = sub.playlist_title || sub.url;
+                name.title = sub.url;
+                row.appendChild(name);
+                const meta = document.createElement('span');
+                meta.className = 'text-muted small';
+                meta.textContent = (sub.active ? 'Active' : 'Paused') +
+                    ' · every ' + sub.interval_hours + 'h' +
+                    (sub.last_checked ? ' · checked ' + sub.last_checked.slice(0, 16) : '');
+                row.appendChild(meta);
+                const freq = document.createElement('select');
+                freq.className = 'form-select form-select-sm';
+                freq.style.width = 'auto';
+                freq.title = 'Check frequency';
+                [6, 12, 24, 168].forEach((hours) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(hours);
+                    opt.textContent = hours >= 168 ? 'Weekly' : 'Every ' + hours + 'h';
+                    if (hours === sub.interval_hours) opt.selected = true;
+                    freq.appendChild(opt);
+                });
+                freq.addEventListener('change', () => {
+                    postJSON('/api/subscriptions/' + sub.id + '/interval',
+                             { interval_hours: Number(freq.value) })
+                        .then(() => loadSubscriptions())
+                        .catch(() => alert('Could not change frequency.'));
+                });
+                row.appendChild(freq);
+                const mkBtn = (label, title, fn) => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'btn btn-sm btn-outline-secondary';
+                    btn.textContent = label;
+                    btn.title = title;
+                    btn.addEventListener('click', fn);
+                    row.appendChild(btn);
+                    return btn;
+                };
+                mkBtn('Check now', 'Look for new tracks right now', () => {
+                    postJSON('/api/subscriptions/' + sub.id + '/check', {})
+                        .then((res) => {
+                            toast(res.ok ? 'Found ' + res.added + ' new track(s).' : (res.error || 'Check failed.'),
+                                  res.ok ? 'success' : 'danger');
+                            loadSubscriptions();
+                            if (typeof refreshTable === 'function') refreshTable();
+                        })
+                        .catch(() => alert('Could not check this playlist.'));
+                });
+                mkBtn(sub.active ? 'Pause' : 'Resume', 'Pause or resume automatic checks', () => {
+                    postJSON('/api/subscriptions/' + sub.id + '/toggle', {})
+                        .then(loadSubscriptions)
+                        .catch(() => alert('Could not change this subscription.'));
+                });
+                mkBtn('Unfollow', 'Stop checking (history is kept)', () => {
+                    if (!confirm('Stop following this playlist? Your downloaded tracks stay.')) return;
+                    postJSON('/api/subscriptions/' + sub.id + '/delete', {})
+                        .then(loadSubscriptions)
+                        .catch(() => alert('Could not remove this subscription.'));
+                });
+                list.appendChild(row);
+            });
+        })
+        .catch(() => {});
+}
+
+document.addEventListener('DOMContentLoaded', loadSubscriptions);
+
+// --- Health banner: stale downloader suspicion -----------------------------
+
+function initHealthBanner() {
+    const banner = document.getElementById('healthBanner');
+    if (!banner) return;
+    fetch('/api/health')
+        .then((r) => r.json())
+        .then((data) => {
+            if (data.stale_helper_suspected) banner.classList.remove('d-none');
+        })
+        .catch(() => {});
+    document.addEventListener('click', (e) => {
+        if (e.target.closest && e.target.closest('[data-hide-health]')) {
+            banner.classList.add('d-none');
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', initHealthBanner);
+
+// --- Library stats ---------------------------------------------------------
+
+function loadStats() {
+    const body = document.getElementById('statsBody');
+    if (!body) return;
+    const esc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    fetch('/api/stats')
+        .then((r) => r.json())
+        .then((data) => {
+            if (!data.ok) {
+                body.innerHTML = '<span class="text-muted small">Stats unavailable.</span>';
+                return;
+            }
+            const tile = (label, value) =>
+                '<div class="col-6 col-md-3 mb-2"><div class="stat-tile">' +
+                '<div class="stat-value">' + esc(value) + '</div>' +
+                '<div class="stat-label">' + esc(label) + '</div></div></div>';
+            let html = '<div class="row">';
+            html += tile('Tracks', data.tracks);
+            html += '<div class="col-6 col-md-3 mb-2"><div class="stat-tile">' +
+                '<div class="stat-value">' + esc(data.playtime) + '</div>' +
+                '<div class="stat-label">Playtime <span class="stat-sub">across ' +
+                data.playtime_tracks + ' tracks</span></div></div></div>';
+            html += tile('Files', data.files);
+            html += tile('New this week', data.recent_7d);
+            html += '</div>';
+            const formats = Object.keys(data.by_format || {}).sort().map(
+                (f) => esc(f) + ' (' + data.by_format[f] + ')').join(' · ');
+            if (formats) html += '<div class="small text-muted">Formats: ' + formats + '</div>';
+            const tops = data.top_playlists || [];
+            if (tops.length) {
+                html += '<div class="small text-muted mt-1">Biggest playlists: ' +
+                    tops.map((p) => esc(p.title) + ' (' + p.tracks + ')').join(' · ') + '</div>';
+            }
+            body.innerHTML = html;
+        })
+        .catch(() => {
+            body.innerHTML = '<span class="text-muted small">Stats unavailable.</span>';
+        });
+}
+
+document.addEventListener('DOMContentLoaded', loadStats);
 
 document.addEventListener('click', (e) => {
     const expandBtn = e.target.closest('[data-expand-playlist]');
