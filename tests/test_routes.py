@@ -2809,3 +2809,41 @@ def test_background_verify_lifecycle(client, tmp_path):
     with client.application.app_context():
         pending = ConversionHistory.query.filter_by(status='pending').count()
         assert pending == 3
+
+
+# ------------------------------------------------------- desktop ----
+# NOTE: desktop.py is imported as top-level module `desktop`, not `app.*`.
+# These tests load it by path so the launcher stays covered.
+
+def _load_desktop():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), '..', 'src', 'desktop.py')
+    spec = importlib.util.spec_from_file_location('desktop_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_find_free_port_prefers_stable_default():
+    desktop = _load_desktop()
+    port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
+    assert port == desktop.DEFAULT_PORT
+
+
+def test_find_free_port_falls_back_when_taken():
+    import socket
+    desktop = _load_desktop()
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind((desktop.DEFAULT_HOST, 0))
+        taken = holder.getsockname()[1]
+        holder.listen(1)
+        assert desktop.find_free_port(preferred=taken) != taken
+    finally:
+        holder.close()
+
+
+def test_close_guard_enabled():
+    with open(os.path.join(os.path.dirname(__file__), '..', 'src',
+                           'desktop.py')) as fh:
+        assert 'confirm_close=True' in fh.read()

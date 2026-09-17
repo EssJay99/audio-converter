@@ -28,6 +28,10 @@ import urllib.request
 
 APP_NAME = 'AudioConverter'
 DEFAULT_HOST = '127.0.0.1'
+# Stable default port so browser-persisted state (player queue, volume,
+# dark mode) survives app restarts: localStorage is scoped to the origin,
+# which includes the port. Falls back to a free port when taken.
+DEFAULT_PORT = 57600
 
 
 def get_data_dir():
@@ -42,11 +46,20 @@ def get_data_dir():
     return os.path.join(base, APP_NAME)
 
 
-def find_free_port():
-    """Ask the OS for a free TCP port on 127.0.0.1."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((DEFAULT_HOST, 0))
-        return s.getsockname()[1]
+def find_free_port(preferred=None):
+    """Ask the OS for a free TCP port on 127.0.0.1.
+
+    Tries `preferred` first so restarts keep serving the same origin;
+    falls back to any free port when it is taken.
+    """
+    for candidate in ([preferred] if preferred else []) + [0]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((DEFAULT_HOST, candidate))
+                return s.getsockname()[1]
+            except OSError:
+                continue
+    raise RuntimeError('Could not find a free TCP port')
 
 
 def start_server(app, port, host=DEFAULT_HOST):
@@ -156,7 +169,7 @@ def main():
             os.path.isdir(app.template_folder)))
         return
 
-    port = args.port or int(os.environ.get('PORT') or 0) or find_free_port()
+    port = args.port or int(os.environ.get('PORT') or 0) or find_free_port(DEFAULT_PORT)
     thread, server, url = start_server(app, port)
     print('Serving {}'.format(url), file=sys.stderr)
 
@@ -188,7 +201,9 @@ def main():
         width=1120,
         height=760,
         min_size=(900, 600),
-        confirm_close=False,
+        # Closing the window stops downloads, so confirm first instead of
+        # silently killing in-progress conversions.
+        confirm_close=True,
     )
     window.expose(_pick_directory)
     webview.start()
