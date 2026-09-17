@@ -9,6 +9,7 @@ import sys
 import time
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
@@ -645,7 +646,7 @@ def api_track(conversion_id):
     return jsonify({
         'ok': True,
         'item': _serialize(history),
-        'meta': _probe_metadata(history.output_path),
+        'meta': _cached_metadata(history.output_path),
     })
 
 
@@ -1751,20 +1752,27 @@ def retry_misses(parent_id):
 
 @bp.route('/api/verify-files', methods=['POST'])
 def api_verify_files():
-    """Verify all downloaded files for integrity.
-    
-    Checks each completed/skipped conversion's output file via ffprobe.
-    If a file is corrupted or invalid, it is deleted and the job is
-    re-queued for re-download. Returns counts of checked/repaired/errors.
+    """Start a background integrity scan of all downloaded files.
+
+    Decoding a whole library takes minutes, so this returns immediately and
+    the scan runs on a daemon thread; poll /api/verify-status for progress.
+    Corrupted files are deleted and re-queued for re-download as found.
     """
-    results = verify_all_files()
-    return jsonify({
-        'ok': True,
-        'checked': results['checked'],
-        'repaired': results['repaired'],
-        'errors': results['errors'],
-        'message': f'Checked {results["checked"]} files, repaired {results["repaired"]}, {results["errors"]} errors.',
-    })
+    with _verify_lock:
+        if _verify_state['running']:
+            return jsonify({'ok': True, 'started': False,
+                            'message': 'A verification scan is already running.',
+                            **{k: _verify_state[k] for k in ('checked', 'total')}})
+        # Mark running synchronously so status polls never observe a stale
+        # idle state between this response and the thread's first update.
+        _verify_state.update({'running': True, 'checked': 0, 'total': 0,
+                              'repaired': 0, 'errors': 0, 'done': False,
+                              'message': ''})
+    thread = threading.Thread(target=_verify_in_background, daemon=True,
+                              name='verify-worker')
+    thread.start()
+    return jsonify({'ok': True, 'started': True,
+                    'message': 'Verification started in the background.'})
 
 
 # ------------------------------------------------------ playlist helpers ----
@@ -2223,10 +2231,8 @@ def resolve_import_urls(url, max_tracks=IMPORT_MAX_TRACKS):
     resolved = resolve_streaming_playlist(url, max_tracks=max_tracks)
     if not resolved.get('success'):
         return resolved
-    urls = []
-    items = []
-    misses = []
-    for track in resolved['tracks']:
+
+    def _resolve_one(track):
         expected_title = (f"{track['artist']} - {track['title']}"
                           if track.get('artist') else track['title'])
         try:
@@ -2235,6 +2241,16 @@ def resolve_import_urls(url, max_tracks=IMPORT_MAX_TRACKS):
             expected_duration = 0.0
         found = search_track_url(expected_title,
                                  expected_duration=expected_duration or None)
+        return track, expected_title, expected_duration, found
+
+    # Searches are network-bound and independent: run a handful at once so a
+    # 50-track import resolves in seconds, not minutes. map() preserves
+    # track order for the folder listing.
+    tracks = resolved['tracks']
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        outcomes = list(pool.map(_resolve_one, tracks))
+    urls, items, misses = [], [], []
+    for track, expected_title, expected_duration, found in outcomes:
         if found:
             urls.append(found)
             items.append({'url': found, 'expected_title': expected_title,
@@ -2355,6 +2371,28 @@ def _probe_duration(path):
     return duration
 
 
+# Metadata cache, validated by file mtime: tags only change when the file
+# does, so repeated player/tag lookups never re-spawn ffmpeg.
+_meta_cache = {}
+
+
+def _cached_metadata(path):
+    """Cheap repeat reads of a file's tags; re-probes after any rewrite."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {'title': '', 'artist': '', 'album': '', 'duration': 0}
+    entry = _meta_cache.get(path)
+    if entry is not None and entry[0] == mtime:
+        return entry[1]
+    meta = _probe_metadata(path)
+    _meta_cache[path] = (mtime, meta)
+    if len(_meta_cache) > 500:
+        for key in list(_meta_cache)[:100]:
+            _meta_cache.pop(key, None)
+    return meta
+
+
 def _parse_iso8601_duration(value):
     """Parse an ISO-8601 duration like 'PT3M33S' into seconds (0 on failure)."""
     try:
@@ -2443,15 +2481,17 @@ def verify_job_file(job):
     return True, 'File deleted and job re-queued for re-download'
 
 
-def verify_all_files():
+def verify_all_files(progress=None):
     """Scan all conversions and verify/repair corrupted files.
     Returns a dict with counts of checked, fixed, and failed jobs."""
-    with app.app_context():
+    from app import app as flask_app
+    with flask_app.app_context():
         from app.models import ConversionHistory
         jobs = ConversionHistory.query.filter(
-            ConversionHistory.status.in_('completed', 'skipped')
+            ConversionHistory.status.in_(['completed', 'skipped'])
         ).all()
         results = {'checked': 0, 'repaired': 0, 'errors': 0}
+        total = len(jobs)
         for job in jobs:
             results['checked'] += 1
             try:
@@ -2462,4 +2502,55 @@ def verify_all_files():
                     results['errors'] += 1
             except Exception as e:
                 results['errors'] += 1
+            if progress:
+                try:
+                    progress(results['checked'], total)
+                except Exception:
+                    pass
         return results
+
+
+# Library verification runs in the background: a full decode pass over a
+# big library takes minutes, which must never block an HTTP request.
+_verify_state = {'running': False, 'checked': 0, 'total': 0, 'repaired': 0,
+                 'errors': 0, 'done': True, 'message': ''}
+_verify_lock = threading.Lock()
+
+
+def _verify_in_background():
+    from app import app as flask_app
+    try:
+        with flask_app.app_context():
+            from app.models import ConversionHistory
+            jobs = ConversionHistory.query.filter(
+                ConversionHistory.status.in_(['completed', 'skipped'])
+            ).all()
+            with _verify_lock:
+                _verify_state.update({'running': True, 'checked': 0,
+                                      'total': len(jobs), 'repaired': 0,
+                                      'errors': 0, 'done': False, 'message': ''})
+            for job in jobs:
+                try:
+                    ok, msg = verify_job_file(job)
+                    key = 'repaired' if ok else 'errors'
+                except Exception:
+                    key = 'errors'
+                with _verify_lock:
+                    _verify_state['checked'] += 1
+                    _verify_state[key] += 1
+    except Exception as exc:
+        with _verify_lock:
+            _verify_state['message'] = f'Scan failed: {str(exc)}'
+    finally:
+        with _verify_lock:
+            _verify_state.update({'running': False, 'done': True})
+            if not _verify_state['message']:
+                _verify_state['message'] = 'Checked {checked} file(s), repaired {repaired}.'.format(
+                    **_verify_state)
+
+
+@bp.route('/api/verify-status')
+def api_verify_status():
+    """Progress of the background integrity scan."""
+    with _verify_lock:
+        return jsonify({'ok': True, **_verify_state})

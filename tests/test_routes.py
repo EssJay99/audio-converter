@@ -2724,3 +2724,88 @@ def test_convert_audio_file_with_thread_cap(tmp_path):
         str(src), 'flac', out, {'title': 'T'}, None)
     assert result == {'success': True}
     assert convert_module._is_valid_audio(out)
+
+
+# ------------------------------------------------------- perf fixes ----
+
+def test_m3u_probes_each_file_once(client, tmp_path, monkeypatch):
+    calls = []
+    one = tmp_path / 'one.flac'
+    one.write_bytes(b'fLaC')
+    two = tmp_path / 'two.flac'
+    two.write_bytes(b'fLaC')
+
+    def fake_info(path):
+        calls.append(path)
+        return 120.0, {'title': 'T', 'artist': 'A', 'album': '', 'date': ''}
+
+    monkeypatch.setattr(convert_module, '_ffmpeg_file_info', fake_info)
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path=str(tmp_path), status='completed',
+                                   is_playlist=True, playlist_title='Mix',
+                                   item_count=2)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add_all([
+            ConversionHistory(url='https://youtu.be/1', format='FLAC',
+                              output_path=str(one), status='completed',
+                              parent_id=pid, item_index=0),
+            ConversionHistory(url='https://youtu.be/2', format='FLAC',
+                              output_path=str(two), status='completed',
+                              parent_id=pid, item_index=1),
+        ])
+        db.session.commit()
+
+    resp = client.get(f'/api/playlist/{pid}/m3u')
+    assert resp.status_code == 200
+    assert sorted(calls) == sorted([str(one), str(two)])
+
+
+def test_track_meta_cached_until_rewrite(client, completed_conversion, monkeypatch):
+    job_id, path = completed_conversion
+    calls = []
+    orig = convert_module._probe_metadata
+    monkeypatch.setattr(convert_module, '_probe_metadata',
+                        lambda p: (calls.append(p), orig(p))[1])
+
+    assert client.get(f'/api/track/{job_id}').status_code == 200
+    assert client.get(f'/api/track/{job_id}').status_code == 200
+    assert len(calls) == 1
+
+    # Touching the file (new mtime) re-probes on the next read.
+    import time as _time
+    _time.sleep(0.05)
+    os.utime(path, None)
+    assert client.get(f'/api/track/{job_id}').status_code == 200
+    assert len(calls) == 2
+
+
+def test_background_verify_lifecycle(client, tmp_path):
+    gone = tmp_path / 'gone.flac'  # missing file: fails fast, no decoding
+    with client.application.app_context():
+        for i in range(3):
+            db.session.add(ConversionHistory(
+                url=f'https://youtu.be/v{i}', format='FLAC',
+                output_path=str(gone), status='completed', progress=100))
+        db.session.commit()
+
+    started = client.post('/api/verify-files').get_json()
+    assert started['ok'] is True
+    assert started['started'] is True
+
+    import time as _time
+    deadline = _time.time() + 15
+    state = {}
+    while _time.time() < deadline:
+        state = client.get('/api/verify-status').get_json()
+        if state.get('done'):
+            break
+        _time.sleep(0.2)
+    assert state.get('done') is True
+    assert state.get('checked') == 3
+
+    with client.application.app_context():
+        pending = ConversionHistory.query.filter_by(status='pending').count()
+        assert pending == 3

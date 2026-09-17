@@ -125,11 +125,10 @@ def api_playlist_m3u(parent_id):
         path = child.output_path or ''
         if child.status not in ('completed', 'skipped') or not os.path.isfile(path):
             continue
-        from app.routes.convert import _probe_duration, _probe_metadata
-        duration = _probe_duration(path)
-        meta = _probe_metadata(path)
-        title = meta.get('title') or os.path.splitext(os.path.basename(path))[0]
-        artist = meta.get('artist') or ''
+        from app.routes.convert import _ffmpeg_file_info
+        duration, tags = _ffmpeg_file_info(path)
+        title = tags.get('title') or os.path.splitext(os.path.basename(path))[0]
+        artist = tags.get('artist') or ''
         lines.append(f'#EXTINF:{int(duration) if duration > 0 else -1},'
                      f'{artist + " - " if artist else ""}{title}')
         lines.append(path)

@@ -895,6 +895,23 @@ function initHistoryToolbar() {
     initServerSearch();
     const verifyBtn = document.getElementById('verifyFiles');
     if (verifyBtn) {
+        const pollVerify = () => {
+            fetch('/api/verify-status')
+                .then((r) => r.json())
+                .then((data) => {
+                    if (data.running) {
+                        verifyBtn.textContent = 'Verifying ' + data.checked + '/' + data.total + '…';
+                        setTimeout(pollVerify, 2000);
+                    } else {
+                        verifyBtn.textContent = 'Verify files';
+                        verifyBtn.disabled = false;
+                        toast(data.message || 'Verification finished.',
+                              data.ok ? 'success' : 'danger');
+                        if (typeof refreshTable === 'function') refreshTable();
+                    }
+                })
+                .catch(() => { verifyBtn.textContent = 'Verify files'; verifyBtn.disabled = false; });
+        };
         verifyBtn.addEventListener('click', () => {
             if (!confirm('Check every downloaded file for corruption and re-download the bad ones?')) return;
             verifyBtn.disabled = true;
@@ -904,12 +921,17 @@ function initHistoryToolbar() {
             })
                 .then((r) => r.json())
                 .then((data) => {
-                    toast(data.message || 'Verification finished.',
-                          data.ok ? 'success' : 'danger');
-                    if (typeof refreshTable === 'function') refreshTable();
+                    if (!data.ok) {
+                        toast(data.message || 'Verification failed.', 'danger');
+                        verifyBtn.disabled = false;
+                        return;
+                    }
+                    if (!data.started) {
+                        toast(data.message || 'A scan is already running.', 'info');
+                    }
+                    pollVerify();
                 })
-                .catch(() => toast('Verification failed.', 'danger'))
-                .finally(() => { verifyBtn.disabled = false; });
+                .catch(() => { toast('Verification failed.', 'danger'); verifyBtn.disabled = false; });
         });
     }
     applyHistoryFilter();
