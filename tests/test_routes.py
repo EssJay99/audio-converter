@@ -2644,3 +2644,83 @@ def test_player_has_option_controls(client):
                    b'app-player-eq-slider', b'id="appPlayerShuffle"',
                    b'id="appPlayerRepeat"', b'id="appPlayerCover"'):
         assert marker in page.data
+
+
+# ------------------------------------------------------- performance ----
+
+def test_job_progress_throttles_commits(client, monkeypatch):
+    calls = []
+    orig = convert_module._job_update
+    monkeypatch.setattr(convert_module, '_job_update',
+                        lambda job, **kw: (calls.append(kw.get('progress')), orig(job, **kw)))
+
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='FLAC',
+                                output_path='/tmp/x', status='downloading')
+        db.session.add(job)
+        db.session.commit()
+
+        for _ in range(10):
+            convert_module._job_progress(job, 42)
+        assert calls == [42]
+
+        convert_module._job_progress(job, 44)
+        assert calls == [42, 44]
+
+
+def test_stat_cache_ttl_and_invalidate(tmp_path):
+    target = tmp_path / 'f.flac'
+    target.write_bytes(b'x')
+
+    path = str(target)
+    assert convert_module._cached_stat(path) == (True, 1)
+    target.unlink()
+    # Still cached as existing until invalidated or the TTL passes.
+    assert convert_module._cached_stat(path)[0] is True
+    assert convert_module._cached_stat(path, ttl=0)[0] is False
+    convert_module._invalidate_stat(path)
+
+
+def test_storage_cache_invalidation(client, tmp_path):
+    one = tmp_path / 'one.flac'
+    one.write_bytes(b'12345')
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='FLAC',
+                                output_path=str(one), status='completed',
+                                progress=100)
+        db.session.add(job)
+        db.session.commit()
+
+        first = client.get('/api/storage').get_json()
+        assert first['bytes'] == 5
+
+        one.unlink()
+        # Cached total is stale-but-fast until something invalidates it.
+        assert client.get('/api/storage').get_json()['bytes'] == 5
+
+        convert_module._invalidate_storage()
+        assert client.get('/api/storage').get_json()['bytes'] == 0
+
+
+def test_schema_indexes_created(client):
+    from sqlalchemy import inspect
+    from app import db
+    with client.application.app_context():
+        from app import _setup_db
+        _setup_db()
+        names = {i['name'] for i in inspect(db.engine).get_indexes('conversion_history')}
+    for column in ('status', 'parent_id', 'created_at', 'url'):
+        assert f'idx_conversion_history_{column}' in names
+
+
+def test_convert_audio_file_with_thread_cap(tmp_path):
+    import subprocess as _sp
+    src = tmp_path / 'in.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    out = str(tmp_path / 'out.flac')
+    result = convert_module.convert_audio_file(
+        str(src), 'flac', out, {'title': 'T'}, None)
+    assert result == {'success': True}
+    assert convert_module._is_valid_audio(out)

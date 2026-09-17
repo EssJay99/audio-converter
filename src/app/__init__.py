@@ -100,6 +100,13 @@ _SCHEMA_MIGRATIONS = {
 }
 
 
+# Indexes for the hot query paths (status scans, playlist children,
+# newest-first listing). Created idempotently alongside the migrations.
+_SCHEMA_INDEXES = {
+    'conversion_history': ['status', 'parent_id', 'created_at', 'url'],
+}
+
+
 def _setup_db():
     """Create missing tables/columns so both fresh and old DBs work."""
     from app.models import db
@@ -127,6 +134,22 @@ def _setup_db():
                 logger.info('Added %s.%s column', table, name)
             except Exception as exc:
                 logger.warning('Could not add %s.%s: %s', table, name, exc)
+    for table, columns in _SCHEMA_INDEXES.items():
+        try:
+            existing = {i['name'] for i in inspect(db.engine).get_indexes(table)}
+        except Exception:
+            continue
+        for column in columns:
+            name = f'idx_{table}_{column}'
+            if name in existing:
+                continue
+            try:
+                with db.engine.begin() as conn:
+                    conn.execute(text(
+                        f'CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})'))
+                logger.info('Added index %s', name)
+            except Exception as exc:
+                logger.warning('Could not add index %s: %s', name, exc)
 
 
 @app.errorhandler(404)

@@ -165,10 +165,13 @@ def _worker_loop():
                         if result.get('duplicate'):
                             _job_finish(job, status='skipped', progress=100, error='Already exists on disk',
                                         output_path=result['filepath'])
+                            _invalidate_stat(result['filepath'])
                         elif result['success']:
                             if not _job_finish(job, status='completed', progress=100,
                                                error=None, output_path=result['filepath']):
                                 _cleanup(result['filepath'])
+                            else:
+                                _invalidate_stat(result['filepath'])
                         else:
                             # Download/conversion failed — check retry budget,
                             # unless the failure can never succeed on retry.
@@ -380,6 +383,69 @@ def _job_update(job, **fields):
     for key, value in fields.items():
         setattr(job, key, value)
     db.session.commit()
+    if fields.get('status') in ('completed', 'failed', 'skipped'):
+        _progress_cache.pop(getattr(job, 'id', None), None)
+
+
+# Last committed (percent, monotonic time) per job, so concurrent downloads
+# don't fsync the database on every single progress tick.
+_progress_cache = {}
+
+
+def _job_progress(job, pct):
+    """Record download progress, committing at most every 2s or 2 points.
+
+    yt-dlp emits a progress line per percent per worker; committing each one
+    would serialize all workers on the database lock and starve the UI.
+    """
+    now = time.monotonic()
+    last = _progress_cache.get(job.id)
+    if last is not None:
+        last_pct, last_time = last
+        if pct < last_pct + 2 and now - last_time < 2.0:
+            return
+    _progress_cache[job.id] = (pct, now)
+    _job_update(job, progress=int(pct))
+
+
+# Filesystem stat cache: staleness-tolerant existence/size lookups so list
+# and polling endpoints never block on slow (cloud-synced, network) paths.
+_stat_cache = {}
+
+
+def _cached_stat(path, ttl=30.0):
+    """(exists, size) for `path`, rechecked at most once per `ttl` seconds."""
+    now = time.monotonic()
+    entry = _stat_cache.get(path)
+    if entry is not None and now - entry[2] < ttl:
+        return entry[0], entry[1]
+    try:
+        exists = os.path.isfile(path)
+        size = os.path.getsize(path) if exists else 0
+    except OSError:
+        exists, size = False, 0
+    _stat_cache[path] = (exists, size, now)
+    # Bound memory: drop the oldest entries past a comfortable size.
+    if len(_stat_cache) > 2000:
+        oldest = sorted(_stat_cache, key=lambda k: _stat_cache[k][2])[:500]
+        for key in oldest:
+            _stat_cache.pop(key, None)
+    return exists, size
+
+
+def _invalidate_stat(path):
+    _stat_cache.pop(path, None)
+    _invalidate_storage()
+
+
+_storage_cache = {'time': 0.0, 'total': 0, 'files': 0}
+
+
+def _invalidate_storage():
+    _storage_cache['time'] = 0.0
+    # Path entries may claim a deleted file still exists; drop them too so
+    # the recomputed total (and file_exists flags) read fresh state.
+    _stat_cache.clear()
 
 
 def _job_finish(job, **fields):
@@ -616,11 +682,14 @@ def rename_file(conversion_id):
         return jsonify({'ok': False,
                         'message': 'A file with that name already exists'}), 400
     try:
+        old_path = history.output_path
         os.rename(history.output_path, target)
     except OSError as e:
         return jsonify({'ok': False, 'message': f'Could not rename: {str(e)}'}), 500
     history.output_path = target
     db.session.commit()
+    _invalidate_stat(old_path)
+    _invalidate_stat(target)
     return jsonify({'ok': True, 'filename': os.path.basename(target),
                     'output_path': target})
 
@@ -945,6 +1014,9 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
         if value:
             args += ['-metadata', f'{key}={value}']
 
+    # Cap encoder threads so parallel conversions share the CPU with the UI
+    # instead of starving it.
+    args += ['-threads', '2']
     args.append(output_file)
     result = subprocess.run(args, capture_output=True, text=True, timeout=180)
 
@@ -1153,7 +1225,7 @@ def download_audio(url, temp_audio, job=None):
                 pct_match = re.search(r'(\d+(?:\.\d+)?)%', line)
                 if pct_match and job:
                     pct = min(90, 5 + float(pct_match.group(1)) * 0.85)
-                    _job_update(job, progress=int(pct))
+                    _job_progress(job, pct)
         proc.wait(timeout=300)
     except KeyboardInterrupt:
         proc.kill()
@@ -1335,6 +1407,9 @@ def _serialize(item):
         missed = len(json.loads(item.import_misses or '[]'))
     except (ValueError, TypeError):
         missed = 0
+    file_exists = False
+    if saved_path:
+        file_exists, _size = _cached_stat(saved_path)
     return {
         'id': item.id,
         'url': item.url[:100] + ('...' if len(item.url) > 100 else ''),
@@ -1345,7 +1420,7 @@ def _serialize(item):
         # The full path the finished file was saved to, its file name, and
         # whether that file still exists on disk (it may have been moved).
         'filename': os.path.basename(saved_path) if saved_path else '',
-        'file_exists': bool(saved_path and os.path.isfile(saved_path)),
+        'file_exists': file_exists,
         # Playlist grouping. Parent rows have is_playlist=True and no file;
         # child rows point at their parent and carry their track index.
         'parent_id': item.parent_id,
@@ -1475,6 +1550,7 @@ def delete_playlist(parent_id):
             try:
                 os.remove(path)
                 removed_files += 1
+                _invalidate_stat(path)
             except OSError:
                 pass
         db.session.delete(child)
@@ -1510,6 +1586,7 @@ def delete_job(conversion_id):
         try:
             os.remove(path)
             removed = True
+            _invalidate_stat(path)
         except OSError as e:
             return jsonify({'ok': False,
                             'message': f'Could not delete file: {str(e)}'}), 500
@@ -1533,19 +1610,30 @@ def _readable_bytes(num):
 
 @bp.route('/api/storage')
 def api_storage():
-    """Total disk space used by converted files still on disk."""
+    """Total disk space used by converted files still on disk.
+
+    Recomputed at most once a minute; file deletions, renames, and finished
+    downloads invalidate the cached total immediately.
+    """
+    now = time.monotonic()
+    if now - _storage_cache['time'] < 60.0 and _storage_cache['time'] > 0:
+        total = _storage_cache['total']
+        count = _storage_cache['files']
+        return jsonify({'ok': True, 'bytes': total, 'files': count,
+                        'readable': _readable_bytes(total)})
     total = 0
     count = 0
     rows = db.session.query(ConversionHistory).filter(
         ConversionHistory.status.in_(['completed', 'skipped'])).all()
     for row in rows:
         path = row.output_path or ''
-        if path and os.path.isfile(path):
-            try:
-                total += os.path.getsize(path)
-                count += 1
-            except OSError:
-                pass
+        if not path:
+            continue
+        exists, size = _cached_stat(path, ttl=60.0)
+        if exists:
+            total += size
+            count += 1
+    _storage_cache.update({'time': now, 'total': total, 'files': count})
     return jsonify({'ok': True, 'bytes': total, 'files': count,
                     'readable': _readable_bytes(total)})
 
@@ -2341,6 +2429,7 @@ def verify_job_file(job):
     # File is corrupted or invalid
     try:
         os.remove(path)
+        _invalidate_stat(path)
     except Exception:
         pass
     # Reset the job to pending so it can be re-downloaded

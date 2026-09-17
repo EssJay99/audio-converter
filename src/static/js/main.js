@@ -649,6 +649,11 @@ document.addEventListener('click', (e) => {
 
 const historyState = { q: '', status: 'all', folder: 'all', sort: 'newest', page: 0, perPage: 15 };
 
+// Signature of the last applied filter state. Live badge/progress updates
+// bypass applyHistoryFilter (they patch rows in place), so when nothing
+// structural changed we skip all DOM writes to avoid layout churn.
+let historyLastSig = null;
+
 function historyTopRows() {
     const body = document.getElementById('historyBody');
     if (!body) return [];
@@ -719,6 +724,13 @@ function applyHistoryFilter() {
         if (child) body.appendChild(child);
     });
     const visible = ordered.filter(historyRowMatches);
+    const sig = [
+        historyState.sort, historyState.q, historyState.status,
+        historyState.folder, historyState.page,
+        visible.map((tr) => tr.id).join(','),
+    ].join('|');
+    if (sig === historyLastSig) return;
+    historyLastSig = sig;
     const pages = Math.max(1, Math.ceil(visible.length / historyState.perPage));
     if (historyState.page >= pages) historyState.page = pages - 1;
     if (historyState.page < 0) historyState.page = 0;
