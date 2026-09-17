@@ -33,6 +33,9 @@ class UserSettings(db.Model):
     tidal_access_token = db.Column(db.String(2000), nullable=False, default='')
     tidal_refresh_token = db.Column(db.String(2000), nullable=False, default='')
     tidal_expires_at = db.Column(db.Integer, nullable=False, default=0)
+    # Desktop niceties.
+    desktop_notifications = db.Column(db.Boolean, nullable=False, default=True)
+    close_behavior = db.Column(db.String(10), nullable=False, default='ask')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
 

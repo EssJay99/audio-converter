@@ -108,6 +108,24 @@ def _pick_directory():
     return None
 
 
+def should_confirm_close(behavior):
+    """Whether closing the window should ask first. Anything but an
+    explicit 'quit' choice confirms, so downloads are never lost silently."""
+    return behavior != 'quit'
+
+
+def _close_behavior():
+    """The user's close choice from Settings ('ask' unless set to 'quit')."""
+    try:
+        from app.models import UserSettings
+        settings = UserSettings.query.first()
+        if settings and settings.close_behavior:
+            return settings.close_behavior
+    except Exception:
+        pass
+    return 'ask'
+
+
 def main():
     parser = argparse.ArgumentParser(description='Launch the Audio Converter desktop app.')
     parser.add_argument('--port', type=int, default=None,
@@ -156,6 +174,7 @@ def main():
     with app.app_context():
         from app import _setup_db
         _setup_db()
+        confirm_close = should_confirm_close(_close_behavior())
 
     from app.routes.convert import check_ffmpeg
     if not check_ffmpeg():
@@ -201,9 +220,9 @@ def main():
         width=1120,
         height=760,
         min_size=(900, 600),
-        # Closing the window stops downloads, so confirm first instead of
-        # silently killing in-progress conversions.
-        confirm_close=True,
+        # Closing the window stops downloads; ask first unless the user
+        # chose instant quit in Settings.
+        confirm_close=confirm_close,
     )
     window.expose(_pick_directory)
     webview.start()

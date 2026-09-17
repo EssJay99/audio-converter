@@ -96,6 +96,8 @@ _SCHEMA_MIGRATIONS = {
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_refresh_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_expires_at', 'INTEGER DEFAULT 0'),
+        ('desktop_notifications', 'BOOLEAN DEFAULT 1'),
+        ('close_behavior', 'VARCHAR(10) DEFAULT "ask"'),
     ],
 }
 
@@ -105,6 +107,31 @@ _SCHEMA_MIGRATIONS = {
 _SCHEMA_INDEXES = {
     'conversion_history': ['status', 'parent_id', 'created_at', 'url'],
 }
+
+
+def _backup_database(db_path, keep=5):
+    """Copy the database aside before migrations touch it. Keeps `keep`."""
+    import datetime
+    import shutil
+    try:
+        if not db_path or db_path == ':memory:' or not os.path.isfile(db_path):
+            return None
+        backup_dir = os.path.join(os.path.dirname(db_path), 'backups')
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        dest = os.path.join(backup_dir, f'config-{stamp}.db')
+        shutil.copy2(db_path, dest)
+        existing = sorted(f for f in os.listdir(backup_dir) if f.endswith('.db'))
+        for stale in existing[:-keep]:
+            try:
+                os.remove(os.path.join(backup_dir, stale))
+            except OSError:
+                pass
+        logger.info('Backed up database to %s', dest)
+        return dest
+    except Exception as exc:
+        logger.warning('Could not back up database: %s', exc)
+        return None
 
 
 def _setup_db():
@@ -119,6 +146,25 @@ def _setup_db():
             conn.execute(text('PRAGMA journal_mode=WAL'))
     except Exception as exc:
         logger.warning('Could not enable WAL mode: %s', exc)
+    # Figure out up front whether any migration is pending so at most one
+    # backup is taken per startup, before anything is altered.
+    try:
+        pending = False
+        for table, columns in _SCHEMA_MIGRATIONS.items():
+            try:
+                have = {c['name'] for c in inspect(db.engine).get_columns(table)}
+            except Exception:
+                continue
+            if any(name not in have for name, _ddl in columns):
+                pending = True
+                break
+        if pending:
+            try:
+                _backup_database(db.engine.url.database)
+            except Exception as exc:
+                logger.warning('Pre-migration backup failed: %s', exc)
+    except Exception as exc:
+        logger.warning('Could not check pending migrations: %s', exc)
     for table, columns in _SCHEMA_MIGRATIONS.items():
         try:
             existing = {c['name'] for c in inspect(db.engine).get_columns(table)}

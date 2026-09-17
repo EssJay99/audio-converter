@@ -173,6 +173,9 @@ def _worker_loop():
                                 _cleanup(result['filepath'])
                             else:
                                 _invalidate_stat(result['filepath'])
+                                if not job.parent_id and not job.is_playlist:
+                                    _notify('Download finished',
+                                            os.path.basename(result['filepath']))
                         else:
                             # Download/conversion failed — check retry budget,
                             # unless the failure can never succeed on retry.
@@ -185,8 +188,11 @@ def _worker_loop():
                                                 error=f'Retry {attempts}/{max_retries}: {result["error"]}'):
                                     _conversion_queue.put(job.id)
                             else:
-                                _job_finish(job, status='failed', error=
-                                            f'Max retries ({max_retries}) exceeded: {result["error"]}')
+                                if _job_finish(job, status='failed', error=
+                                        f'Max retries ({max_retries}) exceeded: {result["error"]}'):
+                                    if not job.parent_id and not job.is_playlist:
+                                        _notify('Download failed',
+                                                (job.url or '')[:200])
                     except TimeoutError as te:
                         # Job exceeded overall time budget — treat as permanent failure
                         _job_finish(job, status='failed', error=f'Timeout: {str(te)}')
@@ -352,6 +358,7 @@ def _refresh_playlist_parent(parent_id):
     parent = db.session.get(ConversionHistory, parent_id)
     if parent is None:
         return
+    was_terminal = parent.status in ('completed', 'failed')
 
     children = db.session.query(ConversionHistory).filter_by(parent_id=parent_id).all()
     total = len(children) or parent.item_count or 1
@@ -378,6 +385,60 @@ def _refresh_playlist_parent(parent_id):
                 parts.append(f'{user_skipped} skipped')
             parent.error = '; '.join(parts) if parts else None
     db.session.commit()
+    if not was_terminal and parent.status in ('completed', 'failed'):
+        title = parent.playlist_title or 'Playlist'
+        if parent.status == 'failed':
+            _notify('Playlist failed', title)
+        elif parent.error:
+            _notify('Playlist finished', f'{title} — {parent.error}')
+        else:
+            _notify('Playlist finished', f'{title} — all {total} tracks ready')
+
+
+def _notifications_enabled():
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            return True
+        return bool(getattr(settings, 'desktop_notifications', True))
+    except Exception:
+        return True
+
+
+def _notify(title, message):
+    """Best-effort OS notification. Never raises, never blocks the worker."""
+    try:
+        if not _notifications_enabled():
+            return
+        if sys.platform == 'darwin':
+            safe = lambda s: str(s).replace('\\', '\\\\').replace('"', '')
+            script = 'display notification "{}" with title "{}"'.format(
+                safe(message)[:300], safe(title)[:100])
+            subprocess.run(['osascript', '-e', script],
+                           capture_output=True, timeout=10)
+        elif sys.platform.startswith('win'):
+            safe = lambda s: (str(s).replace('&', '&amp;').replace('<', '&lt;')
+                              .replace('>', '&gt;')[:300])
+            ps = (
+                "[Windows.UI.Notifications.ToastNotificationManager, "
+                "Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; "
+                "$xml = '<toast><visual><binding template=\"ToastGeneric\">"
+                f"<text>{safe(title)}</text><text>{safe(message)}</text>"
+                "</binding></visual></toast>'; "
+                "$doc = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+                "$doc.LoadXml($xml); "
+                "[Windows.UI.Notifications.ToastNotificationManager]::"
+                "CreateToastNotifier('AudioConverter').Show("
+                "[Windows.UI.Notifications.ToastNotification]::new($doc))")
+            subprocess.run(['powershell', '-NoProfile', '-Command', ps],
+                           capture_output=True, timeout=15)
+        else:
+            if shutil.which('notify-send'):
+                subprocess.run(['notify-send', str(title)[:100],
+                                str(message)[:300]],
+                               capture_output=True, timeout=10)
+    except Exception:
+        pass
 
 
 def _job_update(job, **fields):
@@ -1524,6 +1585,45 @@ def skip_job(conversion_id):
     if history.parent_id:
         _refresh_playlist_parent(history.parent_id)
     return jsonify({'ok': True, 'skipped': 1})
+
+
+@bp.route('/api/backup')
+def backup_database():
+    """Download a timestamped copy of the library database."""
+    from flask import after_this_request
+    import sqlite3
+    try:
+        db_path = db.engine.url.database
+    except Exception:
+        db_path = None
+    if not db_path or db_path == ':memory:' or not os.path.isfile(db_path):
+        return jsonify({'ok': False, 'message': 'No local database found'}), 404
+    fd, tmp_path = tempfile.mkstemp(prefix='audio-converter-backup-',
+                                    suffix='.db')
+    os.close(fd)
+    try:
+        src = sqlite3.connect(db_path, timeout=15)
+        dst = sqlite3.connect(tmp_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+    except Exception as e:
+        _cleanup(tmp_path)
+        return jsonify({'ok': False, 'message': f'Backup failed: {str(e)}'}), 500
+
+    @after_this_request
+    def _remove_temp(response):
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return response
+
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    return send_file(tmp_path, as_attachment=True,
+                     download_name=f'audio-converter-backup-{stamp}.db')
 
 
 @bp.route('/api/delete-playlist/<int:parent_id>', methods=['POST'])

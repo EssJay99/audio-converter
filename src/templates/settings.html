@@ -110,6 +110,28 @@
             </div>
 
             <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Desktop</h3>
+                <p class="text-muted small">How the app behaves on your computer.</p>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="desktop_notifications" name="desktop_notifications" value="on"
+                           {% if desktop_notifications %}checked{% endif %}>
+                    <label class="form-check-label" for="desktop_notifications">System notifications when downloads finish or fail</label>
+                </div>
+                <div class="mb-3" style="max-width: 20rem;">
+                    <label for="close_behavior" class="form-label">When closing the app window</label>
+                    <select class="form-select" id="close_behavior" name="close_behavior">
+                        <option value="ask" {% if close_behavior == 'ask' %}selected{% endif %}>Ask first (never lose a download by accident)</option>
+                        <option value="quit" {% if close_behavior == 'quit' %}selected{% endif %}>Quit immediately</option>
+                    </select>
+                </div>
+                <div class="mb-1">
+                    <span class="form-label d-block">Library backup</span>
+                    <a href="/api/backup" class="btn btn-sm btn-outline-secondary">Download database backup</a>
+                    <small class="form-text text-muted d-block mt-1">Your whole conversion history in one file. A backup is also saved automatically before any database upgrade (kept: last 5).</small>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
                 <h3>Duplicate Prevention</h3>
                 <p class="text-muted small">Before converting a track, the app checks whether a file with the same name already exists in the output folder. If it does, the track is skipped instead of being downloaded again.</p>
                 <div class="form-check form-switch mb-1">

@@ -7,7 +7,7 @@ import requests
 bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression')
-BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode',)
+BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -52,6 +52,8 @@ def get_settings_dict():
         'tidal_client_id': '',
         'tidal_client_secret': '',
         'tidal_connected': False,
+        'desktop_notifications': True,
+        'close_behavior': 'ask',
     }
     user_settings = UserSettings.query.first()
     if user_settings:
@@ -75,6 +77,7 @@ def get_settings_dict():
         defaults['tidal_client_id'] = getattr(user_settings, 'tidal_client_id', None) or ''
         defaults['tidal_client_secret'] = getattr(user_settings, 'tidal_client_secret', None) or ''
         defaults['tidal_connected'] = bool(getattr(user_settings, 'tidal_access_token', None))
+        defaults['close_behavior'] = getattr(user_settings, 'close_behavior', None) or 'ask'
     return defaults
 
 
@@ -95,6 +98,9 @@ def save_settings():
     data['worker_count'] = _int_from_form(request, 'worker_count', 3, 1, 8)
     data['tidal_client_id'] = request.form.get('tidal_client_id', '').strip()
     data['tidal_client_secret'] = request.form.get('tidal_client_secret', '').strip()
+    data['close_behavior'] = request.form.get('close_behavior', 'ask').strip()
+    if data['close_behavior'] not in ('ask', 'quit'):
+        data['close_behavior'] = 'ask'
 
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')
@@ -120,6 +126,7 @@ def save_settings():
         user_settings.tidal_client_id = data['tidal_client_id']
         if data['tidal_client_secret']:
             user_settings.tidal_client_secret = data['tidal_client_secret']
+        user_settings.close_behavior = data['close_behavior']
     else:
         user_settings = UserSettings(**data)
 

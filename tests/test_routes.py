@@ -2846,4 +2846,178 @@ def test_find_free_port_falls_back_when_taken():
 def test_close_guard_enabled():
     with open(os.path.join(os.path.dirname(__file__), '..', 'src',
                            'desktop.py')) as fh:
-        assert 'confirm_close=True' in fh.read()
+        source = fh.read()
+    # The window close behavior follows the Settings choice (ask by default).
+    assert 'confirm_close=confirm_close' in source
+    assert 'should_confirm_close(' in source
+    assert '_close_behavior()' in source
+
+
+# ------------------------------------------------------- notify ----
+
+def _notify_settings(client, enabled):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.desktop_notifications = enabled
+        db.session.commit()
+
+
+def test_notify_darwin_uses_osascript(client, monkeypatch):
+    import sys as _sys
+    _notify_settings(client, True)
+    calls = []
+    monkeypatch.setattr(_sys, 'platform', 'darwin')
+    monkeypatch.setattr(convert_module.subprocess, 'run',
+                        lambda *a, **k: calls.append(a[0]))
+    with client.application.app_context():
+        convert_module._notify('Done', 'Song.flac')
+    assert calls and calls[0][0] == 'osascript'
+    assert 'Song.flac' in calls[0][-1]
+
+
+def test_notify_respects_setting(client, monkeypatch):
+    _notify_settings(client, False)
+    calls = []
+    monkeypatch.setattr(convert_module.subprocess, 'run',
+                        lambda *a, **k: calls.append(a[0]))
+    with client.application.app_context():
+        convert_module._notify('Done', 'Song.flac')
+    assert calls == []
+
+
+def test_parent_completion_notifies_once(client, monkeypatch):
+    _notify_settings(client, True)
+    notes = []
+    monkeypatch.setattr(convert_module, '_notify',
+                        lambda t, m: notes.append((t, m)))
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path='/tmp/p', status='downloading',
+                                   is_playlist=True, playlist_title='Mix',
+                                   item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/1', format='FLAC',
+            output_path='/tmp/p/1.flac', status='completed',
+            parent_id=pid, item_index=0))
+        db.session.commit()
+
+        convert_module._refresh_playlist_parent(pid)
+        assert len(notes) == 1
+        assert 'Mix' in notes[0][1]
+        # Re-refreshing must not notify again.
+        convert_module._refresh_playlist_parent(pid)
+        assert len(notes) == 1
+
+
+# ------------------------------------------------------- backup ----
+
+def test_backup_download_is_valid_sqlite(client):
+    import sqlite3
+    resp = client.get('/api/backup')
+    assert resp.status_code == 200
+    assert resp.headers['Content-Disposition'].startswith('attachment')
+    path = '/tmp/opencode/backup-test.db'
+    with open(path, 'wb') as f:
+        f.write(resp.data)
+    try:
+        tables = [r[0] for r in sqlite3.connect(path).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        assert 'conversion_history' in tables
+    finally:
+        os.unlink(path)
+
+
+def test_auto_backup_before_migration(tmp_path, monkeypatch):
+    import sqlite3
+    import sys as _sys
+    target = tmp_path / 'old.db'
+    conn = sqlite3.connect(str(target))
+    conn.execute('CREATE TABLE conversion_history (id INTEGER PRIMARY KEY, url TEXT)')
+    conn.commit()
+    conn.close()
+
+    # Snapshot module state: importing a second app object below must not
+    # leak into the rest of the suite.
+    saved = {k: v for k, v in _sys.modules.items()
+             if k == 'app' or k.startswith('app.')}
+    try:
+        monkeypatch.setenv('AUDIO_CONVERTER_DB_PATH', str(target))
+        monkeypatch.setenv('AUDIO_CONVERTER_SECRET_KEY', 'backup-test')
+        for module in [m for m in list(_sys.modules) if m == 'app' or m.startswith('app.')]:
+            del _sys.modules[module]
+        import importlib
+        sys_path = os.path.join(os.path.dirname(__file__), '..', 'src')
+        if sys_path not in _sys.path:
+            _sys.path.insert(0, sys_path)
+        fresh = importlib.import_module('app')
+        with fresh.app.app_context():
+            fresh._setup_db()
+            cols = {c['name'] for c in
+                    __import__('sqlalchemy').inspect(fresh.db.engine).get_columns('conversion_history')}
+        assert 'is_playlist' in cols
+        backups = list((tmp_path / 'backups').glob('*.db'))
+        assert len(backups) == 1
+    finally:
+        try:
+            fresh.db.session.remove()
+            fresh.db.engine.dispose()
+        except Exception:
+            pass
+        for module in [m for m in list(_sys.modules) if m == 'app' or m.startswith('app.')]:
+            del _sys.modules[module]
+        _sys.modules.update(saved)
+
+
+# ------------------------------------------------------- close ----
+
+def test_should_confirm_close():
+    desktop = _load_desktop()
+    assert desktop.should_confirm_close('ask') is True
+    assert desktop.should_confirm_close('quit') is False
+    assert desktop.should_confirm_close('anything-else') is True
+
+
+def test_settings_close_behavior_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'wav_sample_rate': 'auto',
+        'wav_bit_depth': '16',
+        'ogg_quality': '8',
+        'flac_compression': '5',
+        'retry_count': '3',
+        'job_timeout': '300',
+        'bandwidth_limit': '0',
+        'worker_count': '3',
+        'close_behavior': 'quit',
+    })
+    assert resp.status_code == 302
+
+    from app.models import UserSettings
+    with client.application.app_context():
+        assert UserSettings.query.first().close_behavior == 'quit'
+
+    # Invalid values fall back to asking, never to silent quitting.
+    client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'wav_sample_rate': 'auto',
+        'wav_bit_depth': '16',
+        'ogg_quality': '8',
+        'flac_compression': '5',
+        'close_behavior': 'nuke-everything',
+    })
+    with client.application.app_context():
+        assert UserSettings.query.first().close_behavior == 'ask'
+
+
+def test_settings_shows_desktop_card(client):
+    page = client.get('/settings')
+    for marker in (b'desktop_notifications', b'close_behavior',
+                   b'api/backup', b'Library backup'):
+        assert marker in page.data
