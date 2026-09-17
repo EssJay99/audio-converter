@@ -3021,3 +3021,165 @@ def test_settings_shows_desktop_card(client):
     for marker in (b'desktop_notifications', b'close_behavior',
                    b'api/backup', b'Library backup'):
         assert marker in page.data
+
+
+# ------------------------------------------------------- tray ----
+
+def _tray_module():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), '..', 'src', 'tray_icon.py')
+    spec = importlib.util.spec_from_file_location('tray_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_tray_assets_exist():
+    base = os.path.join(os.path.dirname(__file__), '..', 'src', 'static', 'img')
+    for name in ('tray.png', 'tray.ico', 'tray.icns'):
+        assert os.path.isfile(os.path.join(base, name)), name
+
+
+def test_tray_icon_image_loads():
+    tray = _tray_module()
+    image = tray.load_icon_image()
+    assert image is not None
+    assert image.size[0] >= 64
+    assert tray.load_icon_image('/does/not/exist.png') is None
+
+
+def test_tray_menu_spec_labels():
+    tray = _tray_module()
+    paused = [e['label'] for e in tray.menu_spec(True)]
+    assert paused[0] == 'Resume downloads'
+    unpaused = [e['label'] for e in tray.menu_spec(False)]
+    assert unpaused[0] == 'Pause downloads'
+    assert [e['action'] for e in tray.menu_spec(False)] == [
+        'toggle_pause', 'open_folder', 'quit']
+
+
+def test_tray_toggle_pause_flips_event():
+    tray = _tray_module()
+    from app.routes.convert import _queue_paused
+    initial = _queue_paused.is_set()
+    try:
+        assert tray.toggle_pause() is (not initial)
+        assert _queue_paused.is_set() is (not initial)
+        assert tray.toggle_pause() is initial
+        assert _queue_paused.is_set() is initial
+        assert tray.is_paused() is initial
+    finally:
+        if _queue_paused.is_set() != initial:
+            _queue_paused.clear() if not initial else _queue_paused.set()
+
+
+def test_tray_open_output_folder(client, tmp_path, monkeypatch):
+    tray = _tray_module()
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path=str(tmp_path))
+            db.session.add(settings)
+        else:
+            settings.output_path = str(tmp_path)
+        db.session.commit()
+
+        calls = []
+        monkeypatch.setattr(tray.subprocess, 'Popen',
+                            lambda cmd, **kw: calls.append(cmd))
+        assert tray.open_output_folder() is True
+        assert calls and calls[0][-1] == str(tmp_path)
+
+        settings.output_path = str(tmp_path / 'nope')
+        db.session.commit()
+        assert tray.open_output_folder() is False
+
+
+def test_tray_quit_paths(monkeypatch):
+    tray = _tray_module()
+    destroyed = []
+    assert tray.quit_app(lambda: type('W', (), {
+        'destroy': staticmethod(lambda: destroyed.append(True))})()) == 'destroy'
+    assert destroyed == [True]
+
+    exited = []
+    monkeypatch.setattr(tray.os, '_exit', lambda code: exited.append(code))
+    tray.quit_app(lambda: (_ for _ in ()).throw(RuntimeError('nope')))
+    assert exited == [0]
+    # Restore os._exit automatically via monkeypatch teardown.
+
+
+def test_tray_build_menu_with_fake_pystray():
+    tray = _tray_module()
+
+    class FakeItem:
+        def __init__(self, text, action):
+            self.text = text
+            self.action = action
+
+    class FakeMenu(list):
+        def __init__(self, *items):
+            super().__init__(items)
+
+    class FakePyStray:
+        MenuItem = FakeItem
+        Menu = FakeMenu
+
+    calls = []
+    menu = tray.build_menu(FakePyStray, {
+        'is_paused': lambda: False,
+        'toggle_pause': lambda icon, item: calls.append('pause'),
+        'open_folder': lambda icon, item: calls.append('folder'),
+        'quit': lambda icon, item: calls.append('quit'),
+    })
+    assert len(menu) == 3
+    assert menu[0].text(menu[0]) == 'Pause downloads'
+    menu[1].action(None, None)
+    assert calls == ['folder']
+
+
+def test_tray_start_returns_none_without_backend(monkeypatch):
+    import sys as _sys
+    tray = _tray_module()
+    monkeypatch.setitem(_sys.modules, 'pystray', None)
+    assert tray.start_tray(lambda: None) is None
+
+
+def test_tray_start_happy_path():
+    tray = _tray_module()
+
+    class FakeIcon:
+        def __init__(self, *args):
+            self.args = args
+            self.detached = False
+
+        def run_detached(self):
+            self.detached = True
+
+    class FakePyStray:
+        MenuItem = lambda *a: a
+        Menu = lambda *a: list(a)
+        Icon = FakeIcon
+
+    icon = tray.start_tray(lambda: None, pystray_module=FakePyStray)
+    assert icon is not None
+    assert icon.detached is True
+    assert icon.args[0] == 'AudioConverter'
+
+
+def test_settings_tray_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'wav_sample_rate': 'auto',
+        'wav_bit_depth': '16',
+        'ogg_quality': '8',
+        'flac_compression': '5',
+    })
+    assert resp.status_code == 302
+
+    from app.models import UserSettings
+    with client.application.app_context():
+        # Checkbox omitted -> tray icon off.
+        assert UserSettings.query.first().tray_icon is False
+    assert b'id="tray_icon"' in client.get('/settings').data

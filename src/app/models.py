@@ -36,6 +36,7 @@ class UserSettings(db.Model):
     # Desktop niceties.
     desktop_notifications = db.Column(db.Boolean, nullable=False, default=True)
     close_behavior = db.Column(db.String(10), nullable=False, default='ask')
+    tray_icon = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
 

@@ -175,6 +175,11 @@ def main():
         from app import _setup_db
         _setup_db()
         confirm_close = should_confirm_close(_close_behavior())
+        from app.models import UserSettings
+        _tray_enabled = True
+        _settings = UserSettings.query.first()
+        if _settings is not None and not _settings.tray_icon:
+            _tray_enabled = False
 
     from app.routes.convert import check_ffmpeg
     if not check_ffmpeg():
@@ -213,6 +218,17 @@ def main():
     # Some backends require stdout/stderr to exist even when frozen
     if getattr(sys, 'frozen', False) and sys.platform == 'win32':
         sys.stdout = sys.stderr = open(os.devnull, 'w')
+
+    if _tray_enabled:
+        try:
+            from tray_icon import start_tray
+            _tray = start_tray(lambda: webview.windows[0] if webview.windows else None)
+            if _tray is None:
+                print('Tray unavailable on this system; continuing without it.',
+                      file=sys.stderr)
+        except Exception as exc:
+            print(f'Tray failed to start ({exc}); continuing without it.',
+                  file=sys.stderr)
 
     window = webview.create_window(
         'YouTube/SoundCloud Audio Converter',

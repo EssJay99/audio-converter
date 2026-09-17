@@ -98,6 +98,7 @@ _SCHEMA_MIGRATIONS = {
         ('tidal_expires_at', 'INTEGER DEFAULT 0'),
         ('desktop_notifications', 'BOOLEAN DEFAULT 1'),
         ('close_behavior', 'VARCHAR(10) DEFAULT "ask"'),
+        ('tray_icon', 'BOOLEAN DEFAULT 1'),
     ],
 }
 

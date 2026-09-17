@@ -52,6 +52,8 @@ a = Analysis(
         'blinker',
         'requests',
         'webview',
+        'pystray',
+        'PIL',
     ],
     hookspath=[],
     runtime_hooks=[],

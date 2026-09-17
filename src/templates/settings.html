@@ -117,6 +117,11 @@
                            {% if desktop_notifications %}checked{% endif %}>
                     <label class="form-check-label" for="desktop_notifications">System notifications when downloads finish or fail</label>
                 </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="tray_icon" name="tray_icon" value="on"
+                           {% if tray_icon %}checked{% endif %}>
+                    <label class="form-check-label" for="tray_icon">Show system tray icon (takes effect on restart)</label>
+                </div>
                 <div class="mb-3" style="max-width: 20rem;">
                     <label for="close_behavior" class="form-label">When closing the app window</label>
                     <select class="form-select" id="close_behavior" name="close_behavior">

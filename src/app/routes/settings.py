@@ -7,7 +7,8 @@ import requests
 bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression')
-BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',)
+BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
+                  'tray_icon',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -54,6 +55,7 @@ def get_settings_dict():
         'tidal_connected': False,
         'desktop_notifications': True,
         'close_behavior': 'ask',
+        'tray_icon': True,
     }
     user_settings = UserSettings.query.first()
     if user_settings:

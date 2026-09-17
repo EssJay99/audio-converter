@@ -5,6 +5,9 @@
 #   Windows-> EdgeChromium/WebView2 runtime (Win11 / most Win10 ship it) via pythonnet
 #   Linux  -> WebKitGTK 4.1    (pygobject); also needs: sudo apt install gir1.2-webkit2-4.1
 pywebview>=5.1
+# System tray icon (optional at runtime; the app runs fine without it).
+pystray>=0.19
+Pillow>=10
 
 pyobjc-framework-Cocoa>=10 ; sys_platform == "darwin"
 pyobjc-framework-WebKit>=10 ; sys_platform == "darwin"
