@@ -42,6 +42,11 @@
             shuffle: $('appPlayerShuffle'),
             repeat: $('appPlayerRepeat'),
             cover: $('appPlayerCover'),
+            speed: $('appPlayerSpeed'),
+            sleep: $('appPlayerSleep'),
+            eqBtn: $('appPlayerEQBtn'),
+            eqBox: $('appPlayerEQBox'),
+            eqReset: $('appPlayerEQReset'),
         };
 
         // Restore volume
@@ -51,8 +56,10 @@
             Player.ui.volume.value = v;
             Player.audio.volume = v / 100;
         }
+        restoreSpeed();
         restoreRepeat();
         restoreQueue();
+        restoreEQ();
 
         Player.audio.addEventListener('timeupdate', onTimeUpdate);
         Player.audio.addEventListener('loadedmetadata', onLoadedMetadata);
@@ -81,7 +88,38 @@
             localStorage.setItem('appPlayerVolume', String(v));
         });
         Player.ui.queueBtn.addEventListener('click', () => toggleQueueBox());
-        Player.ui.queueClear.addEventListener('click', () => { Player.queue = []; renderQueue(); });
+        Player.ui.queueClear.addEventListener('click', () => {
+            Player.queue = [];
+            Player.index = -1;
+            saveQueue();
+            hide();
+            renderQueue();
+        });
+        Player.ui.shuffle.addEventListener('click', () => shuffleQueue());
+        Player.ui.repeat.addEventListener('click', () => cycleRepeat());
+        Player.ui.speed.addEventListener('change', () => {
+            const rate = Number(Player.ui.speed.value) || 1;
+            Player.audio.playbackRate = rate;
+            try {
+                localStorage.setItem('appPlayerSpeed', String(rate));
+            } catch (err) { /* private mode */ }
+        });
+        Player.ui.sleep.addEventListener('change', () => {
+            setSleepTimer(Number(Player.ui.sleep.value) || 0);
+        });
+        Player.ui.eqBtn.addEventListener('click', () => {
+            Player.ui.eqBox.classList.toggle('d-none');
+        });
+        Player.ui.eqReset.addEventListener('click', () => {
+            applyEQGains([0, 0, 0, 0, 0]);
+        });
+        Array.from(document.querySelectorAll('.app-player-eq-slider')).forEach((slider) => {
+            slider.addEventListener('input', () => {
+                const gains = currentEQGains();
+                gains[Number(slider.dataset.eq)] = Number(slider.value);
+                applyEQGains(gains);
+            });
+        });
         Player.ui.queueList.addEventListener('click', (e) => {
             const rem = e.target.closest('[data-queue-remove]');
             if (rem) {
@@ -129,6 +167,7 @@
         });
         Player.index = Math.max(0, Math.min(startIndex, Player.queue.length - 1));
         Player.contextLabel = contextLabel || '';
+        saveQueue();
         renderQueue();
         loadCurrent();
         play();
@@ -142,9 +181,11 @@
         });
         if (Player.index < 0) {
             Player.index = 0;
+            saveQueue();
             loadCurrent();
             play();
         } else {
+            saveQueue();
             renderQueue();
         }
     }
@@ -156,13 +197,17 @@
         else if (qidx === Player.index) {
             if (Player.queue.length === 0) {
                 Player.index = -1;
+                saveQueue();
                 hide();
                 return;
             }
             Player.index = Math.min(Player.index, Player.queue.length - 1);
+            saveQueue();
             loadCurrent();
             play();
+            return;
         }
+        saveQueue();
         renderQueue();
     }
 
@@ -196,6 +241,8 @@
     function loadCurrent() {
         const item = Player.queue[Player.index];
         if (!item) return;
+        Player.ui.cover.classList.add('d-none');
+        Player.ui.cover.removeAttribute('src');
         fetch('/api/track/' + item.id)
             .then(function (r) { return r.json(); })
             .then(function (data) {
@@ -213,6 +260,9 @@
                 Player.ui.context.classList.toggle('d-none', !Player.contextLabel);
                 show();
                 Player.audio.src = '/audio/' + item.id;
+                Player.ui.cover.onload = () => Player.ui.cover.classList.remove('d-none');
+                Player.ui.cover.onerror = () => Player.ui.cover.classList.add('d-none');
+                Player.ui.cover.src = '/api/cover/' + item.id;
                 Player.audio.load();
                 if (!Player.audio.paused) Player.audio.pause();
                 play();
@@ -220,6 +270,106 @@
             .catch(function () {
                 Player.ui.title.textContent = 'Could not load track';
             });
+    }
+
+    // ------------------------------------------------- persistence ----
+
+    function saveQueue() {
+        try {
+            localStorage.setItem('appPlayerQueue', JSON.stringify({
+                items: Player.queue,
+                index: Player.index,
+                context: Player.contextLabel,
+                repeat: Player.repeat,
+            }));
+        } catch (err) { /* private mode */ }
+    }
+
+    function restoreQueue() {
+        let saved = null;
+        try {
+            saved = JSON.parse(localStorage.getItem('appPlayerQueue') || 'null');
+        } catch (err) { saved = null; }
+        if (!saved || !Array.isArray(saved.items) || !saved.items.length) return;
+        Player.queue = saved.items.filter((item) => item && item.id);
+        if (!Player.queue.length) return;
+        Player.index = Math.max(0, Math.min(Number(saved.index) || 0, Player.queue.length - 1));
+        Player.contextLabel = saved.context || '';
+        if (saved.repeat) Player.repeat = saved.repeat;
+        updateRepeatLabel();
+        const current = Player.queue[Player.index];
+        Player.ui.title.textContent = (current && current.display) || 'Not playing';
+        Player.ui.context.textContent = Player.contextLabel || '';
+        Player.ui.context.classList.toggle('d-none', !Player.contextLabel);
+        Player.ui.player.classList.remove('d-none');
+        renderQueue();
+    }
+
+    function restoreRepeat() {
+        try {
+            const mode = localStorage.getItem('appPlayerRepeat');
+            if (mode === 'all' || mode === 'one' || mode === 'off') {
+                Player.repeat = mode;
+            }
+        } catch (err) { /* private mode */ }
+        updateRepeatLabel();
+    }
+
+    function cycleRepeat() {
+        Player.repeat = Player.repeat === 'off' ? 'all'
+            : Player.repeat === 'all' ? 'one' : 'off';
+        try {
+            localStorage.setItem('appPlayerRepeat', Player.repeat);
+        } catch (err) { /* private mode */ }
+        updateRepeatLabel();
+        saveQueue();
+    }
+
+    function updateRepeatLabel() {
+        if (!Player.ui.repeat) return;
+        const label = Player.repeat === 'all' ? 'Repeat: All'
+            : Player.repeat === 'one' ? 'Repeat: One' : 'Repeat: Off';
+        Player.ui.repeat.textContent = label;
+        Player.ui.repeat.title = 'Repeat mode: ' + Player.repeat;
+    }
+
+    function shuffleQueue() {
+        if (Player.queue.length < 2) return;
+        const head = Player.queue.slice(0, Player.index + 1);
+        const tail = Player.queue.slice(Player.index + 1);
+        for (let i = tail.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const tmp = tail[i];
+            tail[i] = tail[j];
+            tail[j] = tmp;
+        }
+        Player.queue = head.concat(tail);
+        saveQueue();
+        renderQueue();
+    }
+
+    function restoreSpeed() {
+        try {
+            const rate = Number(localStorage.getItem('appPlayerSpeed')) || 1;
+            Player.audio.playbackRate = rate;
+            if (Player.ui.speed) Player.ui.speed.value = String(rate);
+        } catch (err) { /* private mode */ }
+    }
+
+    let sleepTimer = null;
+
+    function setSleepTimer(minutes) {
+        if (sleepTimer) {
+            clearTimeout(sleepTimer);
+            sleepTimer = null;
+        }
+        if (minutes > 0) {
+            sleepTimer = setTimeout(() => {
+                Player.audio.pause();
+                if (typeof toast === 'function') toast('Sleep timer stopped playback.', 'info');
+                if (Player.ui.sleep) Player.ui.sleep.value = '0';
+            }, minutes * 60 * 1000);
+        }
     }
 
     // -------------------------------------------------------------- controls
@@ -237,6 +387,7 @@
     }
 
     function play() {
+        ensureEQ();
         if (Player.audio.src && Player.audio.src !== location.href) {
             Player.audio.play().catch(function () {});
         }
@@ -262,8 +413,18 @@
 
     function next() {
         if (Player.queue.length === 0) return;
+        if (Player.repeat === 'one') {
+            seekTo(0);
+            play();
+            return;
+        }
         if (Player.index < Player.queue.length - 1) {
             Player.index += 1;
+            saveQueue();
+            loadCurrent();
+        } else if (Player.repeat === 'all' && Player.queue.length > 1) {
+            Player.index = 0;
+            saveQueue();
             loadCurrent();
         } else {
             Player.audio.pause();
@@ -293,6 +454,68 @@
             return;
         }
         Player.ui.queueBox.classList.toggle('d-none');
+    }
+
+    // ------------------------------------------------------------------ eq
+
+    const EQ_FREQS = [60, 230, 910, 3600, 14000];
+    let eqNodes = null;
+
+    // Routes audio through a 5-band equalizer on first play. Created lazily
+    // (and only once per page) so pages that never play stay untouched.
+    function ensureEQ() {
+        if (eqNodes || !window.AudioContext) return;
+        try {
+            const ctx = new AudioContext();
+            const src = ctx.createMediaElementSource(Player.audio);
+            let node = src;
+            const filters = EQ_FREQS.map(function (freq) {
+                const filter = ctx.createBiquadFilter();
+                filter.type = 'peaking';
+                filter.frequency.value = freq;
+                filter.Q.value = 1;
+                filter.gain.value = 0;
+                node.connect(filter);
+                node = filter;
+                return filter;
+            });
+            node.connect(ctx.destination);
+            eqNodes = { ctx: ctx, filters: filters };
+            applyEQGains(currentEQGains());
+        } catch (err) { eqNodes = null; }
+    }
+
+    function currentEQGains() {
+        const gains = [];
+        Array.from(document.querySelectorAll('.app-player-eq-slider')).forEach(function (slider) {
+            gains[Number(slider.dataset.eq)] = Number(slider.value);
+        });
+        while (gains.length < EQ_FREQS.length) gains.push(0);
+        return gains.slice(0, EQ_FREQS.length);
+    }
+
+    function applyEQGains(gains) {
+        Array.from(document.querySelectorAll('.app-player-eq-slider')).forEach(function (slider) {
+            slider.value = String(gains[Number(slider.dataset.eq)] || 0);
+        });
+        if (eqNodes) {
+            eqNodes.filters.forEach(function (filter, i) {
+                filter.gain.value = gains[i] || 0;
+            });
+        }
+        try {
+            localStorage.setItem('appPlayerEQ', JSON.stringify(gains));
+        } catch (err) { /* private mode */ }
+    }
+
+    function restoreEQ() {
+        let gains = null;
+        try {
+            gains = JSON.parse(localStorage.getItem('appPlayerEQ') || 'null');
+        } catch (err) { gains = null; }
+        if (Array.isArray(gains) && gains.length) {
+            applyEQGains(gains);
+        }
     }
 
     // --------------------------------------------------------------- buttons

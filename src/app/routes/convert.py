@@ -662,7 +662,11 @@ def edit_metadata(conversion_id):
 
 @bp.route('/api/cover/<int:conversion_id>')
 def cover_art(conversion_id):
-    """Serve a converted file's embedded cover art (cached per file)."""
+    """Serve a converted file's cover art (cached per file).
+
+    Prefers art embedded in the file; falls back to the `<track>.cover.jpg`
+    sidecar written for formats whose containers cannot hold pictures.
+    """
     history = _playable_file_or_404(conversion_id)
     if not history:
         abort(404)
@@ -685,7 +689,11 @@ def cover_art(conversion_id):
             capture_output=True, text=True, timeout=30)
         if result.returncode != 0 or not os.path.isfile(cached):
             _cleanup(cached)
-            abort(404)
+    if not os.path.isfile(cached):
+        sidecar = os.path.splitext(history.output_path)[0] + '.cover.jpg'
+        if os.path.isfile(sidecar):
+            return send_file(sidecar, mimetype='image/jpeg')
+        abort(404)
     return send_file(cached, mimetype='image/jpeg')
 
 
@@ -764,6 +772,16 @@ def download_and_convert(url, format_type, output_path, job=None):
         result = convert_audio_file(temp_audio, format_type, output_file, meta, cover_file)
         if not result.get('success'):
             return result
+
+        # FLAC/ALAC carry the art inside the file; for OGG/WAV the art is
+        # saved next to the track where players (and our own cover endpoint)
+        # look for it.
+        if cover_file and format_type not in COVER_FORMATS:
+            sidecar = os.path.splitext(output_file)[0] + '.cover.jpg'
+            try:
+                shutil.copyfile(cover_file, sidecar)
+            except OSError:
+                pass
 
         expected_duration = getattr(job, 'expected_duration', 0) if job else 0
         expected_title = getattr(job, 'expected_title', '') if job else ''

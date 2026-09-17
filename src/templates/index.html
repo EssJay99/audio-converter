@@ -234,6 +234,10 @@
                                                         {% if item.output_path %}
                                                             <button type="button" class="btn btn-sm btn-outline-secondary reveal-btn"
                                                                     data-reveal="{{ item.id }}" title="Show playlist folder">Open folder</button>
+                                                            {% if item.status == 'completed' %}
+                                                            <a class="btn btn-sm btn-outline-secondary"
+                                                               href="/api/playlist/{{ item.id }}/m3u" title="Download a playlist file for other players">M3U</a>
+                                                            {% endif %}
                                                             <button type="button" class="btn btn-sm btn-outline-danger delete-playlist-btn"
                                                                     data-delete-playlist="{{ item.id }}" title="Delete every finished track, then the playlist">Delete all</button>
                                                         {% endif %}

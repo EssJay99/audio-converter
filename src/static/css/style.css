@@ -703,6 +703,82 @@ body.dark-mode footer {
     padding: 0.25rem 0.5rem;
 }
 
+.app-player-repeat {
+    font-size: 0.72rem;
+    border: 1px solid #434d5b;
+    border-radius: 0.35rem;
+    padding: 0.25rem 0.4rem;
+    white-space: nowrap;
+}
+
+.app-player-select {
+    background: #2a3442;
+    color: #e9ecef;
+    border: 1px solid #434d5b;
+    border-radius: 0.35rem;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.25rem;
+    cursor: pointer;
+}
+
+.app-player-cover {
+    width: 44px;
+    height: 44px;
+    object-fit: cover;
+    border-radius: 0.35rem;
+    flex: 0 0 auto;
+}
+
+.app-player-eq {
+    position: fixed;
+    right: 1rem;
+    bottom: 4.1rem;
+    z-index: 1500;
+    background: #1f2733;
+    color: #e9ecef;
+    border-radius: 0.5rem;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    padding: 0.6rem 0.9rem 0.9rem;
+}
+
+.app-player-eq-head {
+    font-size: 0.85rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.app-player-eq-head .btn-link {
+    color: #7fb3e0;
+    font-size: 0.8rem;
+}
+
+.app-player-eq-sliders {
+    display: flex;
+    gap: 0.7rem;
+}
+
+.app-player-eq-sliders label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.7rem;
+    color: #aeb6c1;
+}
+
+.app-player-eq-slider {
+    writing-mode: vertical-lr;
+    direction: rtl;
+    width: 1.2rem;
+    height: 110px;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+
 .app-queue-count {
     display: inline-block;
     min-width: 1.3rem;

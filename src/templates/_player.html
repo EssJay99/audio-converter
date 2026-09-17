@@ -7,6 +7,21 @@
         <button type="button" id="appPlayerNext" class="app-player-btn" title="Next track" aria-label="Next track">&#9197;</button>
         <button type="button" id="appPlayerShuffle" class="app-player-btn" title="Shuffle upcoming tracks" aria-label="Shuffle">&#8646;</button>
         <button type="button" id="appPlayerRepeat" class="app-player-btn app-player-repeat" title="Repeat mode: off" aria-label="Repeat mode">Repeat: Off</button>
+        <select id="appPlayerSpeed" class="app-player-select" title="Playback speed" aria-label="Playback speed">
+            <option value="0.5">0.5&times;</option>
+            <option value="0.75">0.75&times;</option>
+            <option value="1" selected>1&times;</option>
+            <option value="1.25">1.25&times;</option>
+            <option value="1.5">1.5&times;</option>
+            <option value="2">2&times;</option>
+        </select>
+        <select id="appPlayerSleep" class="app-player-select" title="Sleep timer" aria-label="Sleep timer">
+            <option value="0" selected>Sleep: Off</option>
+            <option value="15">Sleep: 15 min</option>
+            <option value="30">Sleep: 30 min</option>
+            <option value="45">Sleep: 45 min</option>
+            <option value="60">Sleep: 60 min</option>
+        </select>
     </div>
 
     <img id="appPlayerCover" class="app-player-cover d-none" alt="" aria-hidden="true">
@@ -30,6 +45,7 @@
         <span class="app-player-vol-icon" aria-hidden="true">&#128266;</span>
         <input type="range" id="appPlayerVolume" class="app-player-range app-player-volume" min="0" max="100" value="80"
                aria-label="Volume" title="Volume">
+        <button type="button" id="appPlayerEQBtn" class="app-player-btn" title="Equalizer" aria-label="Equalizer">EQ</button>
         <button type="button" id="appPlayerQueueBtn" class="app-player-btn app-player-queue-btn" title="Upcoming tracks">
             Queue <span class="app-queue-count" id="appPlayerQueueCount">0</span>
         </button>
@@ -40,4 +56,15 @@
 <div id="appPlayerQueueBox" class="app-player-queue d-none">
     <div class="app-player-queue-head">Upcoming tracks <button type="button" id="appPlayerQueueClear" class="btn btn-sm btn-link">Clear</button></div>
     <ul id="appPlayerQueueList" class="app-player-queue-list"></ul>
+</div>
+
+<div id="appPlayerEQBox" class="app-player-eq d-none" aria-label="Equalizer">
+    <div class="app-player-eq-head">Equalizer <button type="button" id="appPlayerEQReset" class="btn btn-sm btn-link">Reset</button></div>
+    <div class="app-player-eq-sliders">
+        <label>60<input type="range" class="app-player-eq-slider" data-eq="0" min="-12" max="12" step="1" value="0" aria-label="60 hertz"></label>
+        <label>230<input type="range" class="app-player-eq-slider" data-eq="1" min="-12" max="12" step="1" value="0" aria-label="230 hertz"></label>
+        <label>910<input type="range" class="app-player-eq-slider" data-eq="2" min="-12" max="12" step="1" value="0" aria-label="910 hertz"></label>
+        <label>3.6k<input type="range" class="app-player-eq-slider" data-eq="3" min="-12" max="12" step="1" value="0" aria-label="3.6 kilohertz"></label>
+        <label>14k<input type="range" class="app-player-eq-slider" data-eq="4" min="-12" max="12" step="1" value="0" aria-label="14 kilohertz"></label>
+    </div>
 </div>

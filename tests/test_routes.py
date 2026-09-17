@@ -2539,3 +2539,108 @@ def test_api_search_finds_unexpanded_child(client):
 def test_api_search_min_length(client):
     assert client.get('/api/search', query_string={'q': 'x'}).get_json() == {
         'ok': True, 'query': 'x', 'items': []}
+
+
+# ------------------------------------------------------- covers+m3u ----
+
+def test_ogg_conversion_writes_cover_sidecar(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(convert_module, 'extract_metadata', lambda url: {
+        'title': 'Song', 'artist': 'A', 'duration': 120, 'thumbnail': 'http://x/y.jpg'})
+    monkeypatch.setattr(convert_module, '_should_skip_duplicates', lambda: False)
+    monkeypatch.setattr(convert_module, 'check_ffmpeg', lambda: True)
+
+    cover = tmp_path / 'art.jpg'
+    cover.write_bytes(b'fakejpeg')
+
+    def fake_download(url, temp_audio, job=None):
+        open(temp_audio, 'wb').write(b'data')
+        return {'success': True}
+
+    monkeypatch.setattr(convert_module, 'download_audio', fake_download)
+    monkeypatch.setattr(convert_module, '_fetch_thumbnail', lambda url: str(cover))
+    monkeypatch.setattr(convert_module, 'convert_audio_file',
+                        lambda *a: {'success': True})
+    monkeypatch.setattr(convert_module, '_verify_output',
+                        lambda *a, **k: (True, 'File verified'))
+
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='OGG Vorbis',
+                                output_path=str(tmp_path), status='downloading')
+        db.session.add(job)
+        db.session.commit()
+
+        result = convert_module.download_and_convert(
+            job.url, 'ogg_vorbis', str(tmp_path), job)
+
+    assert result['success'] is True
+    assert os.path.isfile(os.path.splitext(result['filepath'])[0] + '.cover.jpg')
+
+
+def test_cover_falls_back_to_sidecar(client, tmp_path):
+    track = tmp_path / 'song.ogg'
+    track.write_bytes(b'not really audio but present')
+    sidecar = tmp_path / 'song.cover.jpg'
+    sidecar.write_bytes(b'fakejpeg')
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='OGG Vorbis',
+                                output_path=str(track), status='completed',
+                                progress=100)
+        db.session.add(job)
+        db.session.commit()
+        job_id = job.id
+
+    resp = client.get(f'/api/cover/{job_id}')
+    assert resp.status_code == 200
+    assert resp.headers['Content-Type'] == 'image/jpeg'
+    assert resp.data == b'fakejpeg'
+
+
+def test_playlist_m3u_download(client, tmp_path):
+    one = tmp_path / 'one.flac'
+    one.write_bytes(b'fLaC')
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path=str(tmp_path), status='completed',
+                                   is_playlist=True, playlist_title='Mix & Match',
+                                   item_count=2)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add_all([
+            ConversionHistory(url='https://youtu.be/1', format='FLAC',
+                              output_path=str(one), status='completed',
+                              parent_id=pid, item_index=0),
+            ConversionHistory(url='https://youtu.be/2', format='FLAC',
+                              output_path=str(tmp_path / 'missing.flac'),
+                              status='pending', parent_id=pid, item_index=1),
+        ])
+        db.session.commit()
+
+    resp = client.get(f'/api/playlist/{pid}/m3u')
+    assert resp.status_code == 200
+    body = resp.data.decode('utf-8')
+    assert body.startswith('#EXTM3U\n')
+    assert str(one) in body
+    assert 'missing.flac' not in body
+    assert 'Mix & Match.m3u' in resp.headers['Content-Disposition']
+
+
+def test_playlist_m3u_empty_returns_404(client):
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path='/tmp/p', status='downloading',
+                                   is_playlist=True, item_count=0)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+
+    assert client.get(f'/api/playlist/{pid}/m3u').status_code == 404
+
+
+def test_player_has_option_controls(client):
+    page = client.get('/')
+    for marker in (b'id="appPlayerSpeed"', b'id="appPlayerSleep"',
+                   b'id="appPlayerEQBtn"', b'id="appPlayerEQBox"',
+                   b'app-player-eq-slider', b'id="appPlayerShuffle"',
+                   b'id="appPlayerRepeat"', b'id="appPlayerCover"'):
+        assert marker in page.data

@@ -3,10 +3,10 @@ import sys
 import threading
 import time
 
-from flask import Blueprint, render_template, request, jsonify
+from flask import Blueprint, render_template, request, jsonify, abort, Response
 from sqlalchemy import or_
 from app.models import ConversionHistory, UserSettings
-from app.routes.convert import _serialize
+from app.routes.convert import _serialize, sanitize_filename
 from app import db, APP_VERSION
 
 bp = Blueprint('home', __name__)
@@ -108,6 +108,36 @@ def api_search():
     ).order_by(ConversionHistory.created_at.desc()).limit(25).all()
     return jsonify({'ok': True, 'query': q,
                     'items': [_serialize(item) for item in rows]})
+
+
+@bp.route('/api/playlist/<int:parent_id>/m3u')
+def api_playlist_m3u(parent_id):
+    """Download a playlist as an .m3u file pointing at the converted tracks."""
+    parent = db.session.get(ConversionHistory, parent_id)
+    if not parent or not parent.is_playlist:
+        abort(404)
+    children = db.session.query(ConversionHistory).filter_by(
+        parent_id=parent_id
+    ).order_by(ConversionHistory.item_index.asc()).all()
+
+    lines = ['#EXTM3U']
+    for child in children:
+        path = child.output_path or ''
+        if child.status not in ('completed', 'skipped') or not os.path.isfile(path):
+            continue
+        from app.routes.convert import _probe_duration, _probe_metadata
+        duration = _probe_duration(path)
+        meta = _probe_metadata(path)
+        title = meta.get('title') or os.path.splitext(os.path.basename(path))[0]
+        artist = meta.get('artist') or ''
+        lines.append(f'#EXTINF:{int(duration) if duration > 0 else -1},'
+                     f'{artist + " - " if artist else ""}{title}')
+        lines.append(path)
+    if len(lines) == 1:
+        abort(404)
+    name = sanitize_filename(parent.playlist_title or 'playlist') + '.m3u'
+    return Response('\n'.join(lines) + '\n', mimetype='audio/x-mpegurl',
+                    headers={'Content-Disposition': f'attachment; filename="{name}"'})
 
 
 @bp.route('/api/playlist/<int:parent_id>')
