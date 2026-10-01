@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 import requests
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
-from app.models import db, ConversionHistory, UserSettings
+from app.models import db, ConversionHistory, UserSettings, effective_output_path
 
 bp = Blueprint('convert', __name__)
 
@@ -192,22 +192,17 @@ def _worker_loop():
                                     _notify('Download finished',
                                             os.path.basename(result['filepath']))
                         else:
-                            # Download/conversion failed — check retry budget,
-                            # unless the failure can never succeed on retry.
-                            error_text = result.get('error') or 'Conversion failed'
-                            permanent = 'disk space' in error_text.lower()
-                            if job.retry_attempts < max_retries and not permanent:
-                                attempts = job.retry_attempts + 1
+                            action, attempts, message = _failure_plan(
+                                job.retry_attempts, max_retries, result.get('error'))
+                            if action == 'retry':
                                 if _job_finish(job, status='pending', progress=0,
                                                 retry_attempts=attempts,
-                                                error=f'Retry {attempts}/{max_retries}: {result["error"]}'):
+                                                error=message):
                                     _conversion_queue.put(job.id)
-                            else:
-                                if _job_finish(job, status='failed', error=_note_stale_helper(
-                                        f'Max retries ({max_retries}) exceeded: {result["error"]}')):
-                                    if not job.parent_id and not job.is_playlist:
-                                        _notify('Download failed',
-                                                (job.url or '')[:200])
+                            elif _job_finish(job, status='failed', error=message):
+                                if not job.parent_id and not job.is_playlist:
+                                    _notify('Download failed',
+                                            (job.url or '')[:200])
                     except TimeoutError as te:
                         # Job exceeded overall time budget — treat as permanent failure
                         _job_finish(job, status='failed', error=f'Timeout: {str(te)}')
@@ -220,15 +215,18 @@ def _worker_loop():
                         job_elapsed = time.time() - job_start if job_start else 0
                         permanent_errors = ['invalid url', 'video unavailable', 'private video', 'audio format not supported']
                         is_permanent = any(p_err in str(e).lower() for p_err in permanent_errors) or job_elapsed >= job_timeout
-                        if job.retry_attempts < max_retries and not is_permanent:
+                        if getattr(e, 'errno', None) == 28 or _looks_like_nospace(e):
+                            _job_finish(job, status='failed',
+                                        error='Disk filled up mid-download — free space and retry this track.')
+                        elif job.retry_attempts < max_retries and not is_permanent:
                             attempts = job.retry_attempts + 1
                             if _job_finish(job, status='pending', progress=0,
                                             retry_attempts=attempts,
                                             error=f'Retry {attempts}/{max_retries}: Internal error — will retry'):
                                 _conversion_queue.put(job.id)
-                    else:
-                        _job_finish(job, status='failed', error=_note_stale_helper(
-                                    f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
+                        else:
+                            _job_finish(job, status='failed', error=_note_stale_helper(
+                                        f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
                     finally:
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
@@ -681,6 +679,40 @@ def _looks_stale(error_text):
     return any(pattern in lowered for pattern in _STALE_PATTERNS)
 
 
+def _looks_like_nospace(error):
+    """True when a failure means the disk filled up mid-download.
+
+    Retrying those is pointless: free space or delete something first.
+    """
+    text = str(error or '').lower()
+    return ('no space left on device' in text
+            or 'disk quota' in text
+            or 'enospc' in text
+            or 'no space available' in text)
+
+
+def _failure_plan(retry_attempts, max_retries, error):
+    """Decide a download failure's fate.
+
+    Returns (action, attempts, message) with action 'retry' or 'fail'.
+    A full disk never retries; stale-helper failures carry the fix hint.
+    """
+    error_text = error or 'Conversion failed'
+    if _looks_like_nospace(error_text):
+        return ('fail', retry_attempts,
+                'Disk filled up mid-download — free space and retry this track.')
+    if 'disk space' in error_text.lower():
+        # The pre-download free-space check; retrying is pointless.
+        return ('fail', retry_attempts, _note_stale_helper(error_text))
+    if retry_attempts < max_retries:
+        attempts = retry_attempts + 1
+        return ('retry', attempts,
+                f'Retry {attempts}/{max_retries}: {error_text}')
+    return ('fail', retry_attempts,
+            _note_stale_helper(
+                f'Max retries ({max_retries}) exceeded: {error_text}'))
+
+
 def _note_stale_helper(error_text):
     """Flag a stale helper and append the fix hint. Returns the message."""
     message = error_text or 'Conversion failed'
@@ -744,14 +776,17 @@ def _job_finish(job, **fields):
 
 @bp.route('/convert')
 def convert_page():
-    """Show the conversion page."""
-    user_settings = UserSettings.query.first()
-    default_output_path = get_default_output_path()
-    if user_settings:
-        default_output_path = user_settings.output_path
-    return render_template('convert.html',
+    """The standalone Convert page was merged into Home; keep the URL alive."""
+    return redirect(url_for('home.index'))
+
+
+@bp.route('/video')
+def video_page():
+    """Show the video conversion page."""
+    default_output_path = effective_output_path()
+    return render_template('video.html',
                            default_output_path=default_output_path,
-                           request_path='/convert')
+                           request_path='/video')
 
 
 @bp.route('/convert', methods=['POST'])
@@ -773,7 +808,7 @@ def convert():
         return redirect(url_for('home.index'))
 
     if not output_path:
-        output_path = get_default_output_path()
+        output_path = effective_output_path()
 
     if not is_valid_format(format_type):
         flash('Invalid format selected. Use "flac", "alac", "wav", or "ogg_vorbis"', 'error')
@@ -863,19 +898,6 @@ def convert_status():
             return jsonify(_serialize(history))
 
     return jsonify({'status': 'not_found', 'message': 'No conversion found for this URL'}), 404
-
-
-@bp.route('/convert/recent', methods=['GET'])
-def recent_conversions():
-    """Get list of recent conversions for display."""
-    limit = request.args.get('limit', 10, type=int)
-    if limit > 100:
-        limit = 100
-
-    history = db.session.query(ConversionHistory) \
-        .order_by(ConversionHistory.created_at.desc()).limit(limit).all()
-
-    return jsonify([_serialize(item) for item in history])
 
 
 @bp.route('/download/<int:conversion_id>')
@@ -1865,17 +1887,12 @@ def _latest_ytdlp_release():
     return {'version': version, 'assets': assets}
 
 
-def _version_tuple(value):
-    try:
-        return tuple(int(part) for part in
-                     str(value).strip().lstrip('v').split('.')[:4])
-    except (TypeError, ValueError):
-        return ()
 
 
 @bp.route('/api/helpers')
 def api_helpers():
     """Installed helper versions plus whether a newer yt-dlp release exists."""
+    from app import _version_tuple
     current = _ytdlp_version()
     latest = _latest_ytdlp_release()
     update_available = bool(
@@ -2052,11 +2069,6 @@ def is_valid_format(format_type):
     return format_type.lower() in VALID_FORMATS
 
 
-def get_default_output_path():
-    home = os.path.expanduser('~')
-    return os.path.join(home, 'Audio-Converter', 'output')
-
-
 def _serialize(item):
     saved_path = item.output_path if item.status in ('completed', 'skipped') else ''
     try:
@@ -2193,6 +2205,66 @@ def skip_job(conversion_id):
     if history.parent_id:
         _refresh_playlist_parent(history.parent_id)
     return jsonify({'ok': True, 'skipped': 1})
+
+
+@bp.route('/api/diagnostics')
+def api_diagnostics():
+    """Downloadable support bundle. Contains no secrets: tokens, client
+    secrets, and proxy credentials are never included (only whether a
+    proxy is configured at all)."""
+    from flask import Response
+    from app import APP_VERSION
+    settings = UserSettings.query.first()
+    rows = db.session.query(ConversionHistory).all()
+    by_status = {}
+    for row in rows:
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+    disk = {}
+    try:
+        usage = shutil.disk_usage(effective_output_path())
+        disk = {'free_bytes': usage.free, 'total_bytes': usage.total}
+    except OSError:
+        pass
+    with _pool_lock:
+        workers = _active_workers
+    bundle = {
+        'ok': True,
+        'app_version': APP_VERSION,
+        'platform': sys.platform,
+        'python': sys.version.split()[0],
+        'ffmpeg': _ffmpeg_version(),
+        'ytdlp': _ytdlp_version(),
+        'conversions_total': len(rows),
+        'by_status': by_status,
+        'disk': disk,
+        'queue': {'paused': _queue_paused.is_set(),
+                  'pending': _conversion_queue.qsize(),
+                  'workers_desired': _desired_workers,
+                  'workers_active': workers},
+        'settings': {
+            'output_path': getattr(settings, 'output_path', ''),
+            'format_defaults': {
+                'wav_sample_rate': getattr(settings, 'wav_sample_rate', ''),
+                'wav_bit_depth': getattr(settings, 'wav_bit_depth', ''),
+                'ogg_quality': getattr(settings, 'ogg_quality', ''),
+                'flac_compression': getattr(settings, 'flac_compression', ''),
+            },
+            'skip_existing': bool(getattr(settings, 'skip_existing', True)),
+            'privacy_mode': bool(getattr(settings, 'privacy_mode', True)),
+            'retry_count': getattr(settings, 'retry_count', 3),
+            'job_timeout': getattr(settings, 'job_timeout', 300),
+            'bandwidth_limit': getattr(settings, 'bandwidth_limit', 0),
+            'worker_count': getattr(settings, 'worker_count', 3),
+            'proxy_configured': bool(getattr(settings, 'proxy', '')),
+            'tidal_connected': bool(getattr(settings, 'tidal_access_token', '')),
+            'desktop_notifications': bool(getattr(settings, 'desktop_notifications', True)),
+            'close_behavior': getattr(settings, 'close_behavior', 'ask'),
+            'tray_icon': bool(getattr(settings, 'tray_icon', True)),
+        },
+    }
+    return Response(json.dumps(bundle, indent=2), mimetype='application/json',
+                    headers={'Content-Disposition':
+                             'attachment; filename="audio-converter-diagnostics.json"'})
 
 
 @bp.route('/api/backup')
@@ -3322,35 +3394,6 @@ def verify_job_file(job):
     # Re-queue the job
     _conversion_queue.put(job.id)
     return True, 'File deleted and job re-queued for re-download'
-
-
-def verify_all_files(progress=None):
-    """Scan all conversions and verify/repair corrupted files.
-    Returns a dict with counts of checked, fixed, and failed jobs."""
-    from app import app as flask_app
-    with flask_app.app_context():
-        from app.models import ConversionHistory
-        jobs = ConversionHistory.query.filter(
-            ConversionHistory.status.in_(['completed', 'skipped'])
-        ).all()
-        results = {'checked': 0, 'repaired': 0, 'errors': 0}
-        total = len(jobs)
-        for job in jobs:
-            results['checked'] += 1
-            try:
-                ok, msg = verify_job_file(job)
-                if ok:
-                    results['repaired'] += 1
-                else:
-                    results['errors'] += 1
-            except Exception as e:
-                results['errors'] += 1
-            if progress:
-                try:
-                    progress(results['checked'], total)
-                except Exception:
-                    pass
-        return results
 
 
 # Library verification runs in the background: a full decode pass over a

@@ -5,18 +5,11 @@ import time
 
 from flask import Blueprint, render_template, request, jsonify, abort, Response
 from sqlalchemy import or_
-from app.models import ConversionHistory, UserSettings
+from app.models import ConversionHistory, UserSettings, effective_output_path
 from app.routes.convert import _serialize, sanitize_filename
 from app import db, APP_VERSION
 
 bp = Blueprint('home', __name__)
-
-
-def get_default_output_path():
-    user_settings = UserSettings.query.first()
-    if user_settings and user_settings.output_path:
-        return user_settings.output_path
-    return os.path.join(os.path.expanduser('~'), 'Audio-Converter', 'output')
 
 
 @bp.route('/')
@@ -28,7 +21,7 @@ def index():
     return render_template(
         'index.html',
         history=history,
-        default_output_path=get_default_output_path(),
+        default_output_path=effective_output_path(),
         request_path=request.path,
         show_history=False,
         app_version=APP_VERSION,
@@ -75,7 +68,7 @@ def history():
     return render_template(
         'index.html',
         history=history,
-        default_output_path=get_default_output_path(),
+        default_output_path=effective_output_path(),
         request_path=request.path,
         show_history=True,
         history_page=page,

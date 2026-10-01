@@ -17,8 +17,27 @@ def test_home_page_renders(client):
 
 
 def test_convert_page_renders(client):
+    # The standalone Convert page was merged into Home; the URL redirects.
     resp = client.get('/convert')
-    assert resp.status_code == 200
+    assert resp.status_code == 302
+    assert resp.headers['Location'].endswith('/')
+
+
+def test_no_duplicate_helpers():
+    """Path defaults and version comparison each have exactly one home."""
+    import app.routes.convert as convert_module
+    import app.routes.home as home_module
+    import app.routes.settings as settings_module
+    from app import models
+    assert not hasattr(convert_module, 'get_default_output_path')
+    assert not hasattr(home_module, 'get_default_output_path')
+    assert not hasattr(settings_module, 'get_default_output_path')
+    from app import _version_tuple
+    assert settings_module._version_tuple is _version_tuple
+    assert not hasattr(convert_module, '_version_tuple')
+    assert _version_tuple('v1.2.3') == (1, 2, 3)
+    assert _version_tuple('nope') == ()
+    assert callable(models.effective_output_path)
 
 
 def test_settings_page_renders_with_defaults(client):
@@ -2830,18 +2849,20 @@ def _load_desktop():
 def test_find_free_port_prefers_stable_default():
     import socket
     desktop = _load_desktop()
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind((desktop.DEFAULT_HOST, desktop.DEFAULT_PORT))
-        probe.listen(1)
-        taken = False
-    except OSError:
-        taken = True
-    try:
-        port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
-        assert (port != desktop.DEFAULT_PORT) if taken else (port == desktop.DEFAULT_PORT)
-    finally:
-        probe.close()
+
+    def port_taken():
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((desktop.DEFAULT_HOST, desktop.DEFAULT_PORT))
+            return False
+        except OSError:
+            return True
+        finally:
+            probe.close()
+
+    taken = port_taken()
+    port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
+    assert (port != desktop.DEFAULT_PORT) if taken else (port == desktop.DEFAULT_PORT)
 
 
 def test_find_free_port_falls_back_when_taken():
@@ -3664,3 +3685,96 @@ def test_player_tab_has_new_sections(client):
     page = client.get('/player')
     for marker in (b'id="tabRecent"', b'id="tabDupes"', b'library.csv'):
         assert marker in page.data
+
+
+# ------------------------------------------------------- video tab ----
+
+def test_video_page_video_only(client):
+    page = client.get('/video')
+    assert page.status_code == 200
+    html = page.data.decode('utf-8')
+    for value in ('video_mp4', 'video_webm', 'video_mkv'):
+        assert f'value="{value}"' in html
+    for value in ('value="flac"', 'value="alac"', 'value="wav"',
+                  'value="ogg_vorbis"'):
+        assert value not in html
+
+
+def test_audio_forms_have_no_video_options(client):
+    for path in ('/', '/convert'):
+        html = client.get(path).data.decode('utf-8')
+        for value in ('video_mp4', 'video_webm', 'video_mkv'):
+            assert value not in html
+
+
+def test_nav_has_video_tab(client):
+    for path in ('/', '/video', '/player', '/settings'):
+        assert 'href="/video"' in client.get(path).data.decode('utf-8')
+
+
+def test_home_form_double_submit_guard(client):
+    html = client.get('/').data.decode('utf-8')
+    assert 'id="homeConvertForm"' in html
+    assert 'Queued... checking status below' in html
+
+
+# ------------------------------------------------------- disk full ----
+
+@pytest.mark.parametrize('error,expected', [
+    ('ffmpeg failed: No space left on device (os error 28)', True),
+    ('write error: disk quota exceeded', True),
+    ('ENOSPC while merging', True),
+    ('yt-dlp download failed', False),
+    ('', False),
+])
+def test_looks_like_nospace(error, expected):
+    assert convert_module._looks_like_nospace(error) is expected
+
+
+def test_failure_plan_disk_never_retries():
+    action, attempts, message = convert_module._failure_plan(
+        0, 3, 'No space left on device')
+    assert action == 'fail'
+    assert attempts == 0
+    assert 'free space' in message
+
+
+def test_failure_plan_retry_then_give_up():
+    action, attempts, message = convert_module._failure_plan(
+        0, 3, 'yt-dlp download failed')
+    assert (action, attempts) == ('retry', 1)
+    assert 'Retry 1/3' in message
+    action, _, message = convert_module._failure_plan(
+        3, 3, 'yt-dlp download failed')
+    assert action == 'fail'
+    assert 'Max retries' in message
+
+
+# ------------------------------------------------------- diagnostics ----
+
+def test_diagnostics_redacts_secrets(client):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.proxy = 'socks5://user:pass@127.0.0.1:9050'
+        settings.tidal_client_secret = 'super-secret'
+        settings.tidal_access_token = 'token-abc'
+        db.session.commit()
+
+    data = client.get('/api/diagnostics').get_json()
+    assert data['ok'] is True
+    assert data['settings']['proxy_configured'] is True
+    assert data['settings']['tidal_connected'] is True
+    blob = json.dumps(data)
+    assert 'super-secret' not in blob
+    assert 'token-abc' not in blob
+    assert 'user:pass' not in blob
+    assert 'app_version' in data
+    assert 'workers_desired' in data['queue'] or 'workers' in str(data['queue'])
+
+
+def test_player_tab_markers_present(client):
+    assert client.get('/player').status_code == 200

@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, flash, redirect, url_for, jsonify
-from app.models import db, UserSettings
-from app import APP_VERSION
+from app.models import db, UserSettings, default_output_path
+from app import APP_VERSION, _version_tuple
 import os
 import requests
 
@@ -30,15 +30,10 @@ def _bool_from_form(request, name):
     return value not in ('0', 'false', 'False')
 
 
-def get_default_output_path():
-    home = os.path.expanduser('~')
-    return os.path.join(home, 'Audio-Converter', 'output')
-
-
 def get_settings_dict():
     """Current settings as a plain dict, with defaults if none are saved yet."""
     defaults = {
-        'output_path': get_default_output_path(),
+        'output_path': default_output_path(),
         'wav_sample_rate': 'auto',
         'wav_bit_depth': '16',
         'ogg_quality': '8',
@@ -151,12 +146,6 @@ def save_settings():
 
     return redirect(url_for('settings.settings_page'))
 
-
-def _version_tuple(value):
-    try:
-        return tuple(int(part) for part in str(value).strip().lstrip('v').split('.'))
-    except (TypeError, ValueError):
-        return ()
 
 
 def _default_update_feed():

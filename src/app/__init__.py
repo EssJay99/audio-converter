@@ -9,6 +9,14 @@ from sqlalchemy import inspect, text
 APP_VERSION = '1.0.1'
 
 
+def _version_tuple(value):
+    """'v1.2.3' -> (1, 2, 3) for release comparisons. Unparseable -> ()."""
+    try:
+        return tuple(int(part) for part in str(value).strip().lstrip('v').split('.'))
+    except (TypeError, ValueError):
+        return ()
+
+
 def _resource_base():
     """Directory holding the bundled templates/static folders.
 

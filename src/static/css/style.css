@@ -1141,6 +1141,30 @@ body {
     }
 }
 
+/* Compact player bar on phones: two tidy rows instead of three tall ones. */
+@media (max-width: 640px) {
+    .app-player-tag,
+    .app-player-context,
+    .app-player-volume,
+    .app-player-vol-icon {
+        display: none;
+    }
+    .app-player-cover {
+        width: 34px;
+        height: 34px;
+    }
+    .app-player .app-player-btn {
+        padding: 0.3rem 0.35rem;
+    }
+    .app-player-repeat,
+    .app-player-select {
+        font-size: 0.68rem;
+    }
+    .app-player-title {
+        max-width: 44vw;
+    }
+}
+
 
 @media (max-width: 768px) {
     .card p { font-size: 0.9rem; }

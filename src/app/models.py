@@ -10,6 +10,14 @@ def default_output_path():
     return os.path.join(home, 'Audio-Converter', 'output')
 
 
+def effective_output_path():
+    """The user's configured output folder, falling back to the default."""
+    settings = UserSettings.query.first()
+    if settings and settings.output_path:
+        return settings.output_path
+    return default_output_path()
+
+
 class UserSettings(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     output_path = db.Column(db.String(500), nullable=False, default=default_output_path)

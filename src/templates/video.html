@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Convert Audio - Audio Converter</title>
+    <title>Convert Video - Audio Converter</title>
     <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
@@ -18,7 +18,7 @@
                 <div class="collapse navbar-collapse" id="navMenu">
                     <div class="navbar-nav">
                         <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
-                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/video' %}active{% endif %}" href="/video">Video</a>
                         <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
                         <a class="nav-link {% if request_path == '/player' %}active{% endif %}" href="/player">Player</a>
                         <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
@@ -28,14 +28,14 @@
         </nav>
 
         <div class="header">
-            <h1>Convert Audio</h1>
-            <p>Paste a YouTube or SoundCloud link and download it as high-quality lossless audio</p>
+            <h1>Convert Video</h1>
+            <p>Paste a YouTube or SoundCloud link and download it as a video file</p>
         </div>
 
         <div class="row">
             <div class="col-md-12">
                 <div class="card p-4 shadow-sm border-0 rounded">
-                    <h3>Conversion Form</h3>
+                    <h3>Video Conversion Form</h3>
 
                     {% with messages = get_flashed_messages(with_categories=true) %}
                         {% if messages %}
@@ -53,28 +53,25 @@
                         <div class="mb-3">
                             <label for="url" class="form-label">YouTube or SoundCloud Link</label>
                             <input type="text" class="form-control form-control-lg" id="url" name="url" required
-                                   placeholder="https://www.youtube.com/watch?v=... or https://soundcloud.com/...">
-                            <small class="form-text text-muted">Tip: paste a YouTube playlist, channel, or SoundCloud set/artist link and every track lands in its own folder. Spotify or Apple Music playlist link? It will be imported: each song is found on YouTube and saved into one folder.</small>
+                                   placeholder="https://www.youtube.com/watch?v=...">
+                            <small class="form-text text-muted">Tip: paste a playlist or channel link and every video lands in its own folder.</small>
                         </div>
 
                         <div class="mb-3">
                             <label for="format" class="form-label">Output Format</label>
                             <select class="form-select form-control-lg" id="format" name="format" required>
-                                <option value="flac">FLAC (Free Lossless Audio Codec)</option>
-                                <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
-                                <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
-                                <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
                                 <option value="video_mp4">MP4 Video (plays everywhere)</option>
                                 <option value="video_webm">WebM Video (small files)</option>
                                 <option value="video_mkv">MKV Video (archival, external players)</option>
                             </select>
+                            <small class="form-text text-muted">MP4 plays in the app's theater mode and everywhere else. WebM is smaller. MKV keeps maximum quality for VLC and friends.</small>
                         </div>
 
                         <div class="mb-3">
                             <label for="organization" class="form-label">Playlist Organization</label>
                             <select class="form-select form-control-lg" id="organization" name="organization">
-                                <option value="folder">One folder per playlist (tracks in <code>Output/PlaylistTitle/</code>)</option>
-                                <option value="flat">Save individual tracks in output folder (no subfolders)</option>
+                                <option value="folder">One folder per playlist (videos in <code>Output/PlaylistTitle/</code>)</option>
+                                <option value="flat">Save individual videos in output folder (no subfolders)</option>
                             </select>
                             <small class="form-text text-muted">Controls how converted files are organized on disk.</small>
                         </div>
@@ -84,7 +81,7 @@
                             <input type="text" class="form-control form-control-lg" id="output_path" name="output_path" required
                                    value="{{ default_output_path }}" data-path-browser
                                    autocomplete="off" spellcheck="false">
-                            <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path. This is where your converted audio will be saved.</small>
+                            <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path. This is where your converted video will be saved.</small>
                         </div>
 
                         <button type="submit" class="btn btn-primary w-100 py-2">Queue Conversion</button>
@@ -94,25 +91,11 @@
         </div>
 
         <div class="card p-4 shadow-sm border-0 rounded mt-3">
-            <h5>Supported URL Types</h5>
-
-            <h6>YouTube</h6>
-            <ul class="list-group list-group-flush mb-3">
-                <li class="list-group-item"><code>https://www.youtube.com/watch?v=VIDEO_ID</code></li>
-                <li class="list-group-item"><code>https://www.youtube.com/shorts/VIDEO_ID</code></li>
-                <li class="list-group-item"><code>https://youtu.be/SHORT_ID</code></li>
-            </ul>
-
-            <h6>SoundCloud</h6>
-            <ul class="list-group list-group-flush mb-3">
-                <li class="list-group-item"><code>https://soundcloud.com/ARTIST-NAME</code></li>
-                <li class="list-group-item"><code>https://soundcloud.com/ARTIST-NAME/SONG-TITLE</code></li>
-            </ul>
-
-            <h6>Playlist import (tracks are found on YouTube)</h6>
+            <h5>About video downloads</h5>
             <ul class="list-group list-group-flush">
-                <li class="list-group-item"><code>https://open.spotify.com/playlist/PLAYLIST_ID</code></li>
-                <li class="list-group-item"><code>https://music.apple.com/.../playlist/.../PLAYLIST_ID</code></li>
+                <li class="list-group-item">Video is capped at 1080p to keep conversions fast and files reasonable.</li>
+                <li class="list-group-item">MP4 and WebM play right in the app's theater mode; MKV downloads for external players.</li>
+                <li class="list-group-item">Every video is verified after conversion — truncated or wrong files are retried automatically.</li>
             </ul>
         </div>
     </div>

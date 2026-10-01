@@ -19,7 +19,7 @@
                 <div class="collapse navbar-collapse" id="navMenu">
                     <div class="navbar-nav">
                         <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
-                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/video' %}active{% endif %}" href="/video">Video</a>
                         <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
                         <a class="nav-link {% if request_path == '/player' %}active{% endif %}" href="/player">Player</a>
                         <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
@@ -43,7 +43,7 @@
             <div class="col-lg-5">
                 <div class="card p-4 shadow-sm border-0 rounded">
                     <h3>Convert Audio</h3>
-                    <form method="POST" action="/convert">
+                    <form method="POST" action="/convert" id="homeConvertForm">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3">
                             <label for="url" class="form-label">YouTube or SoundCloud Link</label>
@@ -59,10 +59,7 @@
                                 <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
                                 <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
                                 <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
-                                <option value="video_mp4">MP4 Video (plays everywhere)</option>
-                                <option value="video_webm">WebM Video (small files)</option>
-                                <option value="video_mkv">MKV Video (archival, external players)</option>
-                            </select>
+                                                                                                                            </select>
                         </div>
 
                         <div class="mb-3">
@@ -85,6 +82,19 @@
                         <button type="submit" class="btn btn-primary w-100 py-2">Convert to Lossless Audio</button>
                     </form>
                 </div>
+
+                <script>
+                    document.addEventListener('DOMContentLoaded', function () {
+                        const form = document.querySelector('#homeConvertForm');
+                        const submit = form ? form.querySelector('button[type="submit"]') : null;
+                        if (form && submit) {
+                            form.addEventListener('submit', function () {
+                                submit.disabled = true;
+                                submit.textContent = 'Queued... checking status below';
+                            });
+                        }
+                    });
+                </script>
             </div>
 
             <div class="col-lg-7">

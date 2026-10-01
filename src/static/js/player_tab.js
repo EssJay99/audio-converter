@@ -19,8 +19,8 @@
     function apiHeaders() {
         var token = '';
         try {
-            var meta = document.querySelector('meta[name="csrf-token"]');
-            token = meta ? meta.getAttribute('content') : '';
+            // Shared helper from main.js (loaded on every player page).
+            token = typeof csrfToken === 'function' ? csrfToken() : '';
         } catch (err) { /* ignore */ }
         return { 'Content-Type': 'application/json', 'X-CSRFToken': token };
     }

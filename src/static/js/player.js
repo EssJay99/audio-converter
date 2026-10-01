@@ -103,6 +103,7 @@
             localStorage.setItem('appPlayerVolume', String(v));
         });
         Player.ui.queueBtn.addEventListener('click', () => toggleQueueBox());
+        initQueueDrag();
         Player.ui.queueClear.addEventListener('click', () => {
             Player.queue = [];
             Player.index = -1;
@@ -233,6 +234,7 @@
             const li = document.createElement('li');
             li.className = 'app-player-queue-item' + (i === Player.index ? ' active' : '');
             li.setAttribute('data-queue-index', String(i));
+            li.draggable = true;
             const title = document.createElement('span');
             title.className = 'app-player-queue-title';
             title.textContent = (i + 1) + '. ' + item.display;
@@ -245,10 +247,69 @@
             rem.type = 'button';
             rem.className = 'app-player-queue-remove';
             rem.setAttribute('data-queue-remove', String(i));
-            rem.textContent = '\u00d7';
+            rem.textContent = '×';
             li.appendChild(rem);
             Player.ui.queueList.appendChild(li);
         });
+    }
+
+    let dragIndex = null;
+
+    function initQueueDrag() {
+        const list = Player.ui.queueList;
+        if (!list || list.dataset.dragInit) return;
+        list.dataset.dragInit = '1';
+        list.addEventListener('dragstart', (e) => {
+            const li = e.target.closest ? e.target.closest('[data-queue-index]') : null;
+            if (!li || e.target.closest('[data-queue-remove]')) {
+                e.preventDefault();
+                return;
+            }
+            dragIndex = Number(li.dataset.queueIndex);
+            try {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', String(dragIndex));
+            } catch (err) { /* ignore */ }
+            li.classList.add('dragging');
+        });
+        list.addEventListener('dragend', () => {
+            dragIndex = null;
+            Array.from(list.children).forEach((child) => {
+                child.classList.remove('dragging');
+                child.classList.remove('drag-over');
+            });
+        });
+        list.addEventListener('dragover', (e) => {
+            if (dragIndex === null) return;
+            e.preventDefault();
+            const li = e.target.closest ? e.target.closest('[data-queue-index]') : null;
+            Array.from(list.children).forEach((child) => child.classList.remove('drag-over'));
+            if (li && Number(li.dataset.queueIndex) !== dragIndex) {
+                li.classList.add('drag-over');
+            }
+        });
+        list.addEventListener('drop', (e) => {
+            if (dragIndex === null) return;
+            e.preventDefault();
+            const li = e.target.closest ? e.target.closest('[data-queue-index]') : null;
+            moveQueueItem(dragIndex, li ? Number(li.dataset.queueIndex) : Player.queue.length - 1);
+            dragIndex = null;
+        });
+    }
+
+    function moveQueueItem(from, to) {
+        if (from < 0 || from >= Player.queue.length) return;
+        to = Math.max(0, Math.min(Player.queue.length - 1, to));
+        if (from === to) {
+            renderQueue();
+            return;
+        }
+        const currentId = Player.queue[Player.index] ? Player.queue[Player.index].id : null;
+        const moved = Player.queue.splice(from, 1)[0];
+        Player.queue.splice(to, 0, moved);
+        Player.index = Player.queue.findIndex((item) => item.id === currentId);
+        saveQueue();
+        renderQueue();
     }
 
     // ----------------------------------------------------------------- load
@@ -390,10 +451,34 @@
         }
         if (minutes > 0) {
             sleepTimer = setTimeout(() => {
-                Player.audio.pause();
-                if (typeof toast === 'function') toast('Sleep timer stopped playback.', 'info');
+                fadeOutAndPause();
                 if (Player.ui.sleep) Player.ui.sleep.value = '0';
             }, minutes * 60 * 1000);
+        }
+    }
+
+    // Fade the volume out over a few seconds instead of stopping cold.
+    function fadeOutAndPause() {
+        const finish = () => {
+            Player.audio.pause();
+            if (typeof toast === 'function') toast('Sleep timer stopped playback.', 'info');
+        };
+        if (!eqNodes || !eqNodes.ctx || !eqNodes.master) {
+            finish();
+            return;
+        }
+        try {
+            const ctx = eqNodes.ctx;
+            const master = eqNodes.master;
+            master.gain.cancelScheduledValues(ctx.currentTime);
+            master.gain.setValueAtTime(Math.max(master.gain.value, 0.0001), ctx.currentTime);
+            master.gain.linearRampToValueAtTime(0.0001, ctx.currentTime + 8);
+            setTimeout(() => {
+                finish();
+                master.gain.setValueAtTime(1, ctx.currentTime);
+            }, 8200);
+        } catch (err) {
+            finish();
         }
     }
 
@@ -570,11 +655,14 @@
                 return filter;
             });
             node.connect(ctx.destination);
+            const master = ctx.createGain();
+            master.gain.value = 1;
+            node.connect(master);
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 128;
-            node.connect(analyser);
+            master.connect(analyser);
             analyser.connect(ctx.destination);
-            eqNodes = { ctx: ctx, filters: filters, analyser: analyser };
+            eqNodes = { ctx: ctx, filters: filters, master: master, analyser: analyser };
             applyEQGains(currentEQGains());
         } catch (err) { eqNodes = null; }
     }
