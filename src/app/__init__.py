@@ -86,6 +86,7 @@ _SCHEMA_MIGRATIONS = {
         ('liked', 'BOOLEAN DEFAULT 0'),
         ('play_count', 'INTEGER DEFAULT 0'),
         ('last_played_at', 'DATETIME'),
+        ('duration', 'FLOAT DEFAULT 0'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),

@@ -82,6 +82,9 @@ class ConversionHistory(db.Model):
     liked = db.Column(db.Boolean, nullable=False, default=False)
     play_count = db.Column(db.Integer, nullable=False, default=0)
     last_played_at = db.Column(db.DateTime, nullable=True)
+    # Length in seconds, probed once at conversion time so listings, stats,
+    # and playlists never re-spawn ffmpeg just to read it back.
+    duration = db.Column(db.Float, nullable=False, default=0)
 
     ACTIVE_STATUSES = ('pending', 'downloading', 'converting')
 

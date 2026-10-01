@@ -511,6 +511,14 @@ function renderHistoryRow(item) {
     return tr;
 }
 
+function fmtRuntime(totalSeconds) {
+    const total = Math.round(totalSeconds || 0);
+    if (total <= 0) return '';
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    return h ? h + 'h ' + m + 'm total' : m + 'm total';
+}
+
 function togglePlaylist(btn) {
     const row = document.getElementById('children-' + btn.dataset.expandPlaylist);
     if (!row) return;
@@ -528,6 +536,17 @@ function togglePlaylist(btn) {
                     box.dataset.loaded = '1';
                     box.innerHTML = '';
                     (data.items || []).forEach((item) => box.appendChild(renderHistoryRow(item)));
+                    const total = (data.items || []).reduce(
+                        (sum, item) => sum + (Number(item.duration) || 0), 0);
+                    const label = fmtRuntime(total);
+                    if (label) {
+                        const parentRow = document.getElementById('row-' + btn.dataset.expandPlaylist);
+                        const summary = parentRow ? parentRow.querySelector('[data-playlist-summary]') : null;
+                        if (summary) {
+                            summary.dataset.runtime = ' · ' + label;
+                            summary.textContent += ' · ' + label;
+                        }
+                    }
                 })
                 .catch(() => {
                     box.innerHTML = '<div class="small text-danger py-2">Could not load tracks.</div>';

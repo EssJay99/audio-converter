@@ -8,6 +8,7 @@
     var userPlaylists = [];
     var lastCoverId = null;
     var lastSnapshotSig = '';
+    var libShown = 100;
 
     function esc(s) {
         return String(s == null ? '' : s)
@@ -87,14 +88,14 @@
             grid.innerHTML = '<span class="text-muted small">Nothing here yet — convert something first.</span>';
             return;
         }
-        rows.forEach(function (item) {
+        rows.slice(0, libShown).forEach(function (item) {
             var card = document.createElement('div');
             card.className = 'lib-card';
             var img = document.createElement('img');
             img.className = 'lib-cover';
             img.alt = '';
             img.loading = 'lazy';
-            img.src = '/api/cover/' + item.id;
+            img.src = '/api/cover/' + item.id + '?size=thumb';
             img.onerror = function () { img.classList.add('d-none'); };
             card.appendChild(img);
             var info = document.createElement('div');
@@ -160,6 +161,17 @@
             card.appendChild(actions);
             grid.appendChild(card);
         });
+        if (rows.length > libShown) {
+            const more = document.createElement('button');
+            more.type = 'button';
+            more.className = 'btn btn-sm btn-outline-secondary mt-2';
+            more.textContent = 'Show more (' + (rows.length - libShown) + ' remaining)';
+            more.addEventListener('click', function () {
+                libShown += 100;
+                renderLibrary();
+            });
+            grid.appendChild(more);
+        }
     }
 
     // ------------------------------------------------------------- playlists
@@ -339,6 +351,11 @@
         const canvas = document.getElementById('viz');
         if (!canvas) return;
         const analyser = window.AudioPlayer ? window.AudioPlayer.getAnalyser() : null;
+        // Only burn frames while there is something to draw: playing audio,
+        // a live analyser, and a visible tab. The play listener restarts us.
+        if (!analyser || !tabPlaying || document.hidden || !canvas.offsetParent) {
+            return;
+        }
         const ctx2d = canvas.getContext('2d');
         const W = canvas.width;
         const H = canvas.height;
@@ -371,18 +388,129 @@
         }
     }
 
+    // ------------------------------------------------- recent + dupes ----
+
+    function loadRecent() {
+        const list = document.getElementById('tabRecent');
+        if (!list) return;
+        fetch('/api/recently-played')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                const items = data.items || [];
+                list.innerHTML = '';
+                if (!items.length) {
+                    list.innerHTML = '<span class="text-muted small">Play something first.</span>';
+                    return;
+                }
+                items.forEach(function (item, i) {
+                    const li = document.createElement('li');
+                    li.className = 'list-group-item tab-queue-item';
+                    li.textContent = (i + 1) + '. ' + trackTitle(item);
+                    li.title = 'Play';
+                    li.addEventListener('click', function () {
+                        if (window.AudioPlayer) {
+                            const playable = items.filter(function (it) { return it.file_exists; });
+                            const start = Math.max(0, playable.findIndex(function (it) { return it.id === item.id; }));
+                            window.AudioPlayer.playItems(playable, start, 'Recently played');
+                        }
+                    });
+                    list.appendChild(li);
+                });
+            })
+            .catch(function () {});
+    }
+
+    function loadDupes() {
+        const box = document.getElementById('tabDupes');
+        if (!box) return;
+        fetch('/api/duplicates')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                const groups = data.groups || [];
+                box.innerHTML = '';
+                if (!groups.length) {
+                    box.innerHTML = '<span class="text-muted small">No duplicates found.</span>';
+                    return;
+                }
+                groups.forEach(function (group) {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'user-pl';
+                    const head = document.createElement('div');
+                    head.className = 'user-pl-head';
+                    const name = document.createElement('strong');
+                    name.textContent = group.title + ' (' + group.items.length + ')';
+                    head.appendChild(name);
+                    wrap.appendChild(head);
+                    const list = document.createElement('ul');
+                    list.className = 'user-pl-tracks';
+                    group.items.forEach(function (item) {
+                        const li = document.createElement('li');
+                        const label = document.createElement('span');
+                        label.className = 'user-pl-jump';
+                        label.textContent = item.output_path;
+                        label.title = item.output_path;
+                        li.appendChild(label);
+                        const rm = document.createElement('button');
+                        rm.type = 'button';
+                        rm.className = 'btn btn-sm btn-link user-pl-remove';
+                        rm.textContent = 'Delete';
+                        rm.title = 'Delete file from disk';
+                        rm.addEventListener('click', function () {
+                            if (!confirm('Delete this file from disk?')) return;
+                            postJSON('/api/delete/' + item.id, {})
+                                .then(function (res) {
+                                    if (typeof toast === 'function') {
+                                        toast(res.ok ? 'Deleted.' : (res.message || 'Could not delete.'),
+                                              res.ok ? 'success' : 'danger');
+                                    }
+                                    loadDupes();
+                                    loadLibrary();
+                                })
+                                .catch(function () {});
+                        });
+                        li.appendChild(rm);
+                        list.appendChild(li);
+                    });
+                    wrap.appendChild(list);
+                    box.appendChild(wrap);
+                });
+            })
+            .catch(function () {
+                box.innerHTML = '<span class="text-muted small">Could not scan.</span>';
+            });
+    }
+
     // ------------------------------------------------------------------ init
+
+    var tabPlaying = false;
+
+    function wirePlaybackState() {
+        const audio = document.getElementById('appPlayerAudio');
+        if (!audio) return;
+        audio.addEventListener('play', function () {
+            tabPlaying = true;
+            scheduleViz();
+        });
+        audio.addEventListener('pause', function () { tabPlaying = false; });
+    }
 
     function init() {
         if (!document.getElementById('libGrid')) return;
         loadUserPlaylists();
         loadLibrary();
+        loadRecent();
+        loadDupes();
+        loadStats();
+        wirePlaybackState();
+        document.addEventListener('trackplayed', function () {
+            setTimeout(loadRecent, 1500);
+        });
         const search = document.getElementById('tabSearch');
-        if (search) search.addEventListener('input', renderLibrary);
+        if (search) search.addEventListener('input', function () { libShown = 100; renderLibrary(); });
         const liked = document.getElementById('tabLikedOnly');
-        if (liked) liked.addEventListener('change', renderLibrary);
+        if (liked) liked.addEventListener('change', function () { libShown = 100; renderLibrary(); });
         const sort = document.getElementById('tabSort');
-        if (sort) sort.addEventListener('change', renderLibrary);
+        if (sort) sort.addEventListener('change', function () { libShown = 100; renderLibrary(); });
         const form = document.getElementById('tabPlaylistCreate');
         if (form) {
             form.addEventListener('submit', function (e) {

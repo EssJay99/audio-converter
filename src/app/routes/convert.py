@@ -177,11 +177,14 @@ def _worker_loop():
                             continue
                         if result.get('duplicate'):
                             _job_finish(job, status='skipped', progress=100, error='Already exists on disk',
-                                        output_path=result['filepath'])
+                                        output_path=result['filepath'],
+                                        duration=_probe_duration(result['filepath']))
                             _invalidate_stat(result['filepath'])
                         elif result['success']:
+                            duration = _probe_duration(result['filepath'])
                             if not _job_finish(job, status='completed', progress=100,
-                                               error=None, output_path=result['filepath']):
+                                               error=None, output_path=result['filepath'],
+                                               duration=duration):
                                 _cleanup(result['filepath'])
                             else:
                                 _invalidate_stat(result['filepath'])
@@ -1191,33 +1194,49 @@ def cover_art(conversion_id):
 
     Prefers art embedded in the file; falls back to the `<track>.cover.jpg`
     sidecar written for formats whose containers cannot hold pictures.
+    `?size=thumb` serves a 160px variant for grids and the player bar.
     """
     history = _playable_file_or_404(conversion_id)
     if not history:
         abort(404)
 
+    thumb = request.args.get('size') == 'thumb'
     cache_dir = os.path.join(tempfile.gettempdir(), 'audio-converter-covers')
     try:
         os.makedirs(cache_dir, exist_ok=True)
     except OSError:
         abort(404)
-    cached = os.path.join(cache_dir, f'{history.id}.jpg')
+    cached = os.path.join(cache_dir,
+                          f'{history.id}-thumb.jpg' if thumb else f'{history.id}.jpg')
     try:
         fresh = (os.path.isfile(cached) and
                  os.path.getmtime(cached) >= os.path.getmtime(history.output_path))
     except OSError:
         fresh = False
     if not fresh:
-        result = subprocess.run(
-            ['ffmpeg', '-y', '-v', 'error', '-i', history.output_path,
-             '-an', '-vcodec', 'copy', cached],
-            capture_output=True, text=True, timeout=30)
+        extract = ['ffmpeg', '-y', '-v', 'error', '-i', history.output_path, '-an']
+        if thumb:
+            extract += ['-vf', 'scale=160:-1', '-vframes', '1']
+        else:
+            extract += ['-vcodec', 'copy']
+        extract.append(cached)
+        result = subprocess.run(extract, capture_output=True, text=True,
+                               timeout=30)
         if result.returncode != 0 or not os.path.isfile(cached):
             _cleanup(cached)
     if not os.path.isfile(cached):
         sidecar = os.path.splitext(history.output_path)[0] + '.cover.jpg'
         if os.path.isfile(sidecar):
-            return send_file(sidecar, mimetype='image/jpeg')
+            if thumb:
+                scaled = os.path.join(cache_dir, f'{history.id}-thumb.jpg')
+                thumb_ok = subprocess.run(
+                    ['ffmpeg', '-y', '-v', 'error', '-i', sidecar,
+                     '-vf', 'scale=160:-1', '-vframes', '1', scaled],
+                    capture_output=True, text=True, timeout=30)
+                if thumb_ok.returncode == 0 and os.path.isfile(scaled):
+                    return send_file(scaled, mimetype='image/jpeg')
+            else:
+                return send_file(sidecar, mimetype='image/jpeg')
         abort(404)
     return send_file(cached, mimetype='image/jpeg')
 
@@ -2070,6 +2089,7 @@ def _serialize(item):
         'retry_attempts': item.retry_attempts,
         'liked': bool(getattr(item, 'liked', False)),
         'play_count': getattr(item, 'play_count', 0) or 0,
+        'duration': getattr(item, 'duration', 0) or 0,
         'error': item.error or '',
         'created_at': str(item.created_at) if item.created_at else '',
     }
@@ -3172,6 +3192,25 @@ def _is_valid_audio(path):
 def _probe_duration(path):
     """Return a file's audio duration in seconds, or 0 if unreadable."""
     duration, _tags = _ffmpeg_file_info(path)
+    return duration
+
+
+def _stored_duration(row):
+    """A track's length, probing once and storing it for old rows."""
+    try:
+        if row.duration:
+            return float(row.duration)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    path = getattr(row, 'output_path', '') or ''
+    if not path or not os.path.isfile(path):
+        return 0.0
+    duration = _probe_duration(path)
+    try:
+        row.duration = duration
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
     return duration
 
 

@@ -402,9 +402,9 @@
                         if (summary) {
                             const label = row.querySelector('.expand-label');
                             if (label && item.item_count) label.textContent = item.item_count;
-                            summary.textContent = item.item_count
-                                ? item.progress + '% &middot; ' + item.item_count + ' track(s)'
-                                : 'Reading playlist\u2026';
+                            summary.textContent = (item.item_count
+                                ? item.progress + '% · ' + item.item_count + ' track(s)'
+                                : 'Reading playlist…') + (summary.dataset.runtime || '');
                         }
                         if ((item.status === 'completed' || item.status === 'skipped') && fileCell && !item.is_playlist && !fileCell.querySelector('a') && !fileCell.querySelector('.play-btn')) {
                             renderSavedFileCell(fileCell, item);

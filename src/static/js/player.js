@@ -287,7 +287,7 @@
                 Player.audio.src = '/audio/' + item.id;
                 Player.ui.cover.onload = () => Player.ui.cover.classList.remove('d-none');
                 Player.ui.cover.onerror = () => Player.ui.cover.classList.add('d-none');
-                Player.ui.cover.src = '/api/cover/' + item.id;
+                Player.ui.cover.src = '/api/cover/' + item.id + '?size=thumb';
                 Player.audio.load();
                 if (!Player.audio.paused) Player.audio.pause();
                 play();
@@ -457,6 +457,8 @@
         fetch('/api/played/' + id, {
             method: 'POST',
             headers: { 'X-CSRFToken': token },
+        }).then(function () {
+            document.dispatchEvent(new CustomEvent('trackplayed', { detail: { id: id } }));
         }).catch(function () {});
     }
 

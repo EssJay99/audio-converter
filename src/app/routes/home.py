@@ -126,7 +126,7 @@ DURATION_PROBE_CAP = 500
 def api_stats():
     """Library dashboard numbers: counts, size, playtime, top playlists."""
     from datetime import datetime, timedelta
-    from app.routes.convert import _cached_metadata, _cached_stat
+    from app.routes.convert import _stored_duration, _cached_stat
 
     rows = db.session.query(ConversionHistory).all()
     by_status, by_format = {}, {}
@@ -149,14 +149,11 @@ def api_stats():
     for row in rows:
         if probed >= DURATION_PROBE_CAP:
             break
-        path = row.output_path or ''
-        if row.status not in ('completed', 'skipped') or not path:
+        if row.status not in ('completed', 'skipped'):
             continue
-        if not os.path.isfile(path):
-            continue
-        meta = _cached_metadata(path)
-        if meta.get('duration'):
-            total_seconds += meta['duration']
+        duration = _stored_duration(row)
+        if duration > 0:
+            total_seconds += duration
             duration_files += 1
         probed += 1
 
@@ -185,6 +182,83 @@ def api_stats():
     })
 
 
+@bp.route('/api/duplicates')
+def api_duplicates():
+    """Find the same song saved in more than one folder.
+
+    Groups by normalized filename stem (ignoring ' (2)'-style suffixes and
+    bracketed tags), so 'Song.flac' in two folders is flagged while genuinely
+    different tracks are not. DB-only and fast.
+    """
+    import re as _re
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).all()
+    groups = {}
+    for row in rows:
+        path = row.output_path or ''
+        if not path or not os.path.isfile(path):
+            continue
+        stem = os.path.splitext(os.path.basename(path))[0]
+        key = _re.sub(r'\s*[\(\[].*', '', stem).strip().lower()
+        key = _re.sub(r'\s+', ' ', key)
+        if not key:
+            continue
+        groups.setdefault(key, {'title': stem, 'items': []})
+        groups[key]['items'].append(_serialize(row))
+    dupes = []
+    for key in sorted(groups):
+        folders = {os.path.dirname(i['output_path']) for i in groups[key]['items']}
+        if len(folders) > 1:
+            dupes.append({'key': key, 'title': groups[key]['title'],
+                          'items': groups[key]['items']})
+        if len(dupes) >= 50:
+            break
+    return jsonify({'ok': True, 'groups': dupes})
+
+
+@bp.route('/api/recently-played')
+def api_recently_played():
+    """Most recently played tracks, newest listen first."""
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.last_played_at.isnot(None)
+    ).order_by(ConversionHistory.last_played_at.desc()).limit(10).all()
+    items = []
+    for row in rows:
+        if not row.output_path or not os.path.isfile(row.output_path):
+            continue
+        items.append(_serialize(row))
+    return jsonify({'ok': True, 'items': items})
+
+
+@bp.route('/api/library.csv')
+def api_library_csv():
+    """Download the whole library as CSV (no probing: stored values only)."""
+    from flask import Response
+    import csv
+    import io
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])
+    ).order_by(ConversionHistory.created_at.desc()).all()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['filename', 'format', 'duration_s', 'status', 'plays',
+                     'liked', 'file', 'created_at'])
+    for row in rows:
+        writer.writerow([
+            os.path.basename(row.output_path or ''),
+            row.format,
+            getattr(row, 'duration', 0) or 0,
+            row.status,
+            getattr(row, 'play_count', 0) or 0,
+            bool(getattr(row, 'liked', False)),
+            row.output_path or '',
+            str(row.created_at) if row.created_at else '',
+        ])
+    return Response(buf.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition':
+                             'attachment; filename="library.csv"'})
+
+
 @bp.route('/api/playlist/<int:parent_id>/m3u')
 def api_playlist_m3u(parent_id):
     """Download a playlist as an .m3u file pointing at the converted tracks."""
@@ -200,10 +274,13 @@ def api_playlist_m3u(parent_id):
         path = child.output_path or ''
         if child.status not in ('completed', 'skipped') or not os.path.isfile(path):
             continue
-        from app.routes.convert import _ffmpeg_file_info
-        duration, tags = _ffmpeg_file_info(path)
-        title = tags.get('title') or os.path.splitext(os.path.basename(path))[0]
-        artist = tags.get('artist') or ''
+        from app.routes.convert import _stored_duration, _cached_metadata
+        duration = _stored_duration(child)
+        meta = _cached_metadata(path)
+        title = meta.get('title') or os.path.splitext(os.path.basename(path))[0]
+        artist = meta.get('artist') or ''
+        duration = _stored_duration(child)
+        meta = _cached_metadata(path)
         lines.append(f'#EXTINF:{int(duration) if duration > 0 else -1},'
                      f'{artist + " - " if artist else ""}{title}')
         lines.append(path)

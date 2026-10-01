@@ -2751,15 +2751,18 @@ def test_m3u_probes_each_file_once(client, tmp_path, monkeypatch):
         db.session.add_all([
             ConversionHistory(url='https://youtu.be/1', format='FLAC',
                               output_path=str(one), status='completed',
-                              parent_id=pid, item_index=0),
+                              parent_id=pid, item_index=0,
+                              duration=120.0),
             ConversionHistory(url='https://youtu.be/2', format='FLAC',
                               output_path=str(two), status='completed',
-                              parent_id=pid, item_index=1),
+                              parent_id=pid, item_index=1,
+                              duration=120.0),
         ])
         db.session.commit()
 
     resp = client.get(f'/api/playlist/{pid}/m3u')
     assert resp.status_code == 200
+    # Stored durations: exactly one probe per file (tags only), never two.
     assert sorted(calls) == sorted([str(one), str(two)])
 
 
@@ -3525,3 +3528,139 @@ def test_serialize_reports_likes_and_plays(client, completed_conversion):
     row = next(i for i in item if i['id'] == job_id)
     assert row['liked'] is True
     assert row['play_count'] == 1
+
+
+# ------------------------------------------------------- durations ----
+
+def test_completion_stores_duration(client, tmp_path, monkeypatch):
+    import subprocess as _sp
+    src = tmp_path / 'tone.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=4', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+
+    monkeypatch.setattr(convert_module, 'extract_metadata', lambda url: {
+        'title': 'Tone', 'duration': 4.0, 'thumbnail': ''})
+    monkeypatch.setattr(convert_module, '_should_skip_duplicates', lambda: False)
+    monkeypatch.setattr(convert_module, 'check_ffmpeg', lambda: True)
+    monkeypatch.setattr(convert_module, '_fetch_thumbnail', lambda url: None)
+
+    def fake_download(url, temp_audio, job=None):
+        import shutil as _sh
+        _sh.copyfile(str(src), temp_audio)
+        return {'success': True}
+
+    monkeypatch.setattr(convert_module, 'download_audio', fake_download)
+
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='FLAC',
+                                output_path=str(tmp_path), status='downloading')
+        db.session.add(job)
+        db.session.commit()
+
+        result = convert_module.download_and_convert(
+            job.url, 'flac', str(tmp_path), job)
+
+    assert result['success'] is True
+    with client.application.app_context():
+        job = db.session.get(ConversionHistory, job.id)
+        # Source-stated duration is remembered for the finished-file check.
+        assert 3.5 < job.expected_duration <= 4.5
+
+
+def test_stored_duration_backfills_old_rows(client, tmp_path):
+    import subprocess as _sp
+    target = tmp_path / 'old.flac'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=6', '-c:a', 'flac',
+             str(target)], check=True)
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/x', format='FLAC',
+                                output_path=str(target), status='completed',
+                                duration=0)
+        db.session.add(job)
+        db.session.commit()
+
+        assert convert_module._stored_duration(job) == 6.0
+        assert db.session.get(ConversionHistory, job.id).duration == 6.0
+        # Second read uses the stored value (no re-probe needed).
+        assert convert_module._stored_duration(job) == 6.0
+
+
+def test_m3u_uses_stored_duration_without_probing(client, tmp_path, monkeypatch):
+    target = tmp_path / 'song.flac'
+    target.write_bytes(b'fLaC')
+    calls = []
+    monkeypatch.setattr(convert_module, '_ffmpeg_file_info',
+                        lambda p: (calls.append(p), (120.0, {}))[1])
+    with client.application.app_context():
+        parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
+                                   output_path=str(tmp_path), status='completed',
+                                   is_playlist=True, playlist_title='Mix',
+                                   item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/1', format='FLAC',
+            output_path=str(target), status='completed',
+            parent_id=pid, item_index=0, duration=120.0))
+        db.session.commit()
+
+    resp = client.get(f'/api/playlist/{pid}/m3u')
+    assert resp.status_code == 200
+    assert '#EXTINF:120,' in resp.data.decode('utf-8')
+    # Stored duration used; the single probe left is the tags fetch.
+    assert calls == [str(target)]
+
+
+def test_cover_thumb_variant(client, completed_conversion):
+    job_id, _ = completed_conversion
+    resp = client.get(f'/api/cover/{job_id}?size=thumb')
+    assert resp.status_code in (200, 404)
+
+
+# ------------------------------------------------------- find dupes ----
+
+def test_api_duplicates_groups_folders(client, tmp_path):
+    a = tmp_path / 'a'
+    b = tmp_path / 'b'
+    a.mkdir()
+    b.mkdir()
+    (a / 'Same Song.flac').write_bytes(b'x')
+    (b / 'Same Song.flac').write_bytes(b'x')
+    (a / 'Unique.flac').write_bytes(b'x')
+    with client.application.app_context():
+        for path in (a / 'Same Song.flac', b / 'Same Song.flac', a / 'Unique.flac'):
+            db.session.add(ConversionHistory(
+                url='https://youtu.be/x', format='FLAC',
+                output_path=str(path), status='completed'))
+        db.session.commit()
+
+    data = client.get('/api/duplicates').get_json()
+    assert data['ok'] is True
+    assert len(data['groups']) == 1
+    assert len(data['groups'][0]['items']) == 2
+
+
+def test_api_recently_played(client, completed_conversion):
+    job_id, _ = completed_conversion
+    client.post(f'/api/played/{job_id}')
+    items = client.get('/api/recently-played').get_json()['items']
+    assert [i['id'] for i in items] == [job_id]
+
+
+def test_api_library_csv(client, completed_conversion):
+    job_id, path = completed_conversion
+    resp = client.get('/api/library.csv')
+    assert resp.status_code == 200
+    assert 'attachment' in resp.headers['Content-Disposition']
+    text = resp.data.decode('utf-8')
+    assert text.splitlines()[0].startswith('filename,format,')
+    assert os.path.basename(path) in text
+
+
+def test_player_tab_has_new_sections(client):
+    page = client.get('/player')
+    for marker in (b'id="tabRecent"', b'id="tabDupes"', b'library.csv'):
+        assert marker in page.data
