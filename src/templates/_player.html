@@ -21,6 +21,8 @@
             <option value="30">Sleep: 30 min</option>
             <option value="45">Sleep: 45 min</option>
             <option value="60">Sleep: 60 min</option>
+            <option value="end-track">Sleep: end of track</option>
+            <option value="end-queue">Sleep: end of queue</option>
         </select>
     </div>
 
@@ -49,12 +51,39 @@
         <button type="button" id="appPlayerQueueBtn" class="app-player-btn app-player-queue-btn" title="Upcoming tracks">
             Queue <span class="app-queue-count" id="appPlayerQueueCount">0</span>
         </button>
+        <button type="button" id="appBellBtn" class="app-player-btn" title="Notifications" aria-label="Notifications">&#128276;<span id="appBellDot" class="app-bell-dot d-none"></span></button>
         <button type="button" id="appPlayerClose" class="app-player-btn app-player-close" title="Hide player" aria-label="Hide player">&times;</button>
     </div>
 </aside>
 
+<div id="appNotices" class="app-notices d-none" aria-label="Notifications">
+    <div class="app-notices-head"><strong>Notifications</strong>
+        <span><button type="button" id="appNoticesClear" class="btn btn-sm btn-link">Clear all</button></span>
+    </div>
+    <div id="appNoticesBody" class="app-notices-body"><span class="text-muted small">Loading…</span></div>
+</div>
+
+<div id="appShortcuts" class="app-lyrics d-none" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="app-lyrics-box">
+        <div class="app-lyrics-head">
+            <strong>Keyboard shortcuts</strong>
+            <button type="button" id="appShortcutsClose" class="app-player-btn app-player-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="app-lyrics-body">
+            <div class="row small">
+                <div class="col-6"><kbd>Space</kbd> play / pause<br><kbd>&larr;</kbd><kbd>&rarr;</kbd> seek 5 s<br><kbd>&uarr;</kbd><kbd>&darr;</kbd> volume</div>
+                <div class="col-6"><kbd>N</kbd> next track<br><kbd>P</kbd> previous track<br><kbd>M</kbd> mute<br><kbd>L</kbd> lyrics<br><kbd>Ctrl/&#8984; K</kbd> command palette<br><kbd>?</kbd> this list</div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div id="appPlayerQueueBox" class="app-player-queue d-none">
-    <div class="app-player-queue-head">Upcoming tracks <button type="button" id="appPlayerQueueClear" class="btn btn-sm btn-link">Clear</button></div>
+    <div class="app-player-queue-head">Upcoming tracks
+        <button type="button" id="appPlayerQueueExport" class="btn btn-sm btn-link" title="Download queue as .m3u">Export</button>
+        <label class="btn btn-sm btn-link mb-0" title="Load tracks from an .m3u file">Import<input type="file" id="appPlayerQueueImport" accept=".m3u,.m3u8" class="d-none"></label>
+        <button type="button" id="appPlayerQueueClear" class="btn btn-sm btn-link">Clear</button>
+    </div>
     <ul id="appPlayerQueueList" class="app-player-queue-list"></ul>
 </div>
 
@@ -62,11 +91,16 @@
     <div class="app-theater-box">
         <div class="app-theater-head">
             <strong id="appTheaterTitle">Video</strong>
-            <button type="button" id="appTheaterClose" class="app-player-btn app-player-close" aria-label="Close video">&times;</button>
+            <span>
+                <button type="button" id="appTheaterPip" class="app-player-btn" title="Picture in picture" aria-label="Picture in picture">&#10697;</button>
+                <button type="button" id="appTheaterClose" class="app-player-btn app-player-close" aria-label="Close video">&times;</button>
+            </span>
         </div>
         <video id="appTheaterVideo" controls playsinline preload="metadata"></video>
+        <div id="appTheaterChapters" class="app-theater-chapters d-none" aria-label="Chapters"></div>
         <div class="app-theater-foot">
             <a id="appTheaterDownload" class="btn btn-sm btn-success" href="#">Download</a>
+            <button type="button" id="appTheaterLyrics" class="btn btn-sm btn-outline-secondary" title="Show lyrics">Lyrics</button>
             <span id="appTheaterMeta" class="text-muted small"></span>
         </div>
     </div>
@@ -74,11 +108,42 @@
 
 <div id="appPlayerEQBox" class="app-player-eq d-none" aria-label="Equalizer">
     <div class="app-player-eq-head">Equalizer <button type="button" id="appPlayerEQReset" class="btn btn-sm btn-link">Reset</button></div>
+    <div class="app-player-eq-row">
+        <label class="small text-muted" for="appPlayerCrossfade">Crossfade</label>
+        <select id="appPlayerCrossfade" class="app-player-select" title="Overlap the next track by this long" aria-label="Crossfade">
+            <option value="0" selected>Off</option>
+            <option value="2">2 s</option>
+            <option value="4">4 s</option>
+            <option value="6">6 s</option>
+        </select>
+        <button type="button" id="appPlayerLyricsBtn" class="btn btn-sm btn-outline-secondary ms-auto" title="Show lyrics for the current track">Lyrics</button>
+    </div>
+    <div class="app-player-eq-presets" role="group" aria-label="Equalizer presets">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="flat">Flat</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="rock">Rock</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="pop">Pop</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="jazz">Jazz</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="vocal">Vocal</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="bass">Bass</button>
+    </div>
     <div class="app-player-eq-sliders">
         <label>60<input type="range" class="app-player-eq-slider" data-eq="0" min="-12" max="12" step="1" value="0" aria-label="60 hertz"></label>
         <label>230<input type="range" class="app-player-eq-slider" data-eq="1" min="-12" max="12" step="1" value="0" aria-label="230 hertz"></label>
         <label>910<input type="range" class="app-player-eq-slider" data-eq="2" min="-12" max="12" step="1" value="0" aria-label="910 hertz"></label>
         <label>3.6k<input type="range" class="app-player-eq-slider" data-eq="3" min="-12" max="12" step="1" value="0" aria-label="3.6 kilohertz"></label>
         <label>14k<input type="range" class="app-player-eq-slider" data-eq="4" min="-12" max="12" step="1" value="0" aria-label="14 kilohertz"></label>
+    </div>
+</div>
+
+<div id="appLyrics" class="app-lyrics d-none" role="dialog" aria-label="Lyrics">
+    <div class="app-lyrics-box">
+        <div class="app-lyrics-head">
+            <div class="min-w-0">
+                <strong id="appLyricsTitle">Lyrics</strong>
+                <div id="appLyricsArtist" class="text-muted small"></div>
+            </div>
+            <button type="button" id="appLyricsClose" class="app-player-btn app-player-close" aria-label="Close lyrics">&times;</button>
+        </div>
+        <div id="appLyricsBody" class="app-lyrics-body"><span class="text-muted small">Loading…</span></div>
     </div>
 </div>

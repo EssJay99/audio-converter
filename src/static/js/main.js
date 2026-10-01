@@ -107,6 +107,13 @@ function renderSavedFileCell(cell, item) {
         name.className = 'fw-semibold file-name';
         name.textContent = item.output_path.split(/[\\/]/).pop();
         meta.appendChild(name);
+        if (item.quality) {
+            const qual = document.createElement('span');
+            qual.className = 'file-quality d-block';
+            qual.textContent = item.quality;
+            qual.title = 'Source quality';
+            meta.appendChild(qual);
+        }
 
         const full = document.createElement('span');
         full.className = 'file-full d-block';
@@ -194,6 +201,48 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return;
     }
+    const pauseBtn = e.target.closest('[data-pause]');
+    if (pauseBtn) {
+        pauseBtn.disabled = true;
+        fetch('/api/pause/' + pauseBtn.dataset.pause)
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.ok) {
+                    if (data.message) alert(data.message);
+                    pauseBtn.disabled = false;
+                    return;
+                }
+                toast('Download paused — resume anytime.', 'info');
+                if (typeof refreshTable === 'function') refreshTable();
+            })
+            .catch(() => {
+                alert('Could not pause this track.');
+                pauseBtn.disabled = false;
+            });
+        e.preventDefault();
+        return;
+    }
+    const resumeBtn = e.target.closest('[data-resume]');
+    if (resumeBtn) {
+        resumeBtn.disabled = true;
+        fetch('/api/resume/' + resumeBtn.dataset.resume)
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.ok) {
+                    if (data.message) alert(data.message);
+                    resumeBtn.disabled = false;
+                    return;
+                }
+                toast('Download resumed.', 'info');
+                if (typeof refreshTable === 'function') refreshTable();
+            })
+            .catch(() => {
+                alert('Could not resume this track.');
+                resumeBtn.disabled = false;
+            });
+        e.preventDefault();
+        return;
+    }
     const skipBtn = e.target.closest('[data-skip]');
     if (skipBtn) {
         skipBtn.disabled = true;
@@ -251,7 +300,7 @@ document.addEventListener('click', (e) => {
                     : null;
                 if (box) box.remove();
                 if (row) row.remove();
-                toast('Deleted ' + data.removed_tracks + ' track(s).', 'info');
+                toast(data.trashed_files ? ('Moved ' + data.removed_tracks + ' track file(s) to Trash.') : ('Deleted ' + data.removed_tracks + ' track(s).'), 'info');
                 refreshStorageInfo();
                 if (typeof refreshTable === 'function') refreshTable();
             })
@@ -270,7 +319,7 @@ document.addEventListener('click', (e) => {
     }
     const delBtn = e.target.closest('[data-delete]');
     if (delBtn) {
-        if (!confirm('Delete this file from disk and remove it from history?')) {
+        if (!confirm('Move this file to the Trash and remove it from history?')) {
             e.preventDefault();
             return;
         }
@@ -288,7 +337,7 @@ document.addEventListener('click', (e) => {
                 }
                 const row = delBtn.closest('tr');
                 if (row) row.remove();
-                toast(data.removed_file ? 'Deleted file from disk.' : 'Removed from history.', 'info');
+                toast(data.removed_file ? (data.message || 'Deleted file from disk.') : 'Removed from history.', 'info');
                 refreshStorageInfo();
                 if (typeof refreshTable === 'function') refreshTable();
             })
@@ -499,6 +548,28 @@ function renderHistoryRow(item) {
         retry.textContent = 'Retry';
         fileTd.appendChild(retry);
     } else if (['pending', 'downloading', 'converting'].includes(item.status)) {
+        const pause = document.createElement('button');
+        pause.type = 'button';
+        pause.className = 'btn btn-sm btn-outline-info pause-btn me-1';
+        pause.title = 'Pause this download (resumable)';
+        pause.setAttribute('data-pause', item.id);
+        pause.textContent = 'Pause';
+        fileTd.appendChild(pause);
+        const skip = document.createElement('button');
+        skip.type = 'button';
+        skip.className = 'btn btn-sm btn-outline-warning skip-btn';
+        skip.title = 'Skip this track';
+        skip.setAttribute('data-skip', item.id);
+        skip.textContent = 'Skip';
+        fileTd.appendChild(skip);
+    } else if (item.status === 'paused') {
+        const resume = document.createElement('button');
+        resume.type = 'button';
+        resume.className = 'btn btn-sm btn-outline-success resume-btn me-1';
+        resume.title = 'Resume this download';
+        resume.setAttribute('data-resume', item.id);
+        resume.textContent = 'Resume';
+        fileTd.appendChild(resume);
         const skip = document.createElement('button');
         skip.type = 'button';
         skip.className = 'btn btn-sm btn-outline-warning skip-btn';
@@ -777,7 +848,23 @@ function initHealthBanner() {
     fetch('/api/health')
         .then((r) => r.json())
         .then((data) => {
-            if (data.stale_helper_suspected) banner.classList.remove('d-none');
+            const problems = [];
+            if (data.stale_helper_suspected) {
+                problems.push('downloads keep failing — this looks like an outdated downloader (update yt-dlp in Settings › Helpers)');
+            }
+            if (data.ffmpeg === false) {
+                problems.push('FFmpeg was not found — conversions cannot run until it is installed');
+            }
+            if (data.ytdlp === false) {
+                problems.push('yt-dlp was not found — downloads cannot start until it is installed');
+            }
+            if (data.output_writable === false) {
+                problems.push('the output folder is not writable');
+            }
+            if (!problems.length) return;
+            const text = document.getElementById('healthBannerText');
+            if (text) text.textContent = problems.join(' Also: ') + '.';
+            banner.classList.remove('d-none');
         })
         .catch(() => {});
     document.addEventListener('click', (e) => {
@@ -916,6 +1003,7 @@ function initBulkActions() {
             const step = () => {
                 if (done >= items.length) {
                     retry.disabled = false;
+                    retry.textContent = 'Retry';
                     toast('Re-queued ' + okCount + ' of ' + items.length + ' failed track(s).',
                           okCount ? 'success' : 'danger');
                     if (typeof refreshTable === 'function') refreshTable();
@@ -928,6 +1016,86 @@ function initBulkActions() {
                     if (data.ok) okCount += 1;
                     step();
                 }).catch(step);
+            };
+            step();
+        });
+    }
+    const transcode = document.getElementById('bulkTranscode');
+    if (transcode) {
+        transcode.addEventListener('click', () => {
+            const items = selectedRows().filter((item) =>
+                (item.status === 'completed' || item.status === 'skipped') && !item.isPlaylist);
+            if (!items.length) {
+                toast('Nothing convertible among the selection.', 'info');
+                return;
+            }
+            const fmtSel = document.getElementById('bulkFormat');
+            const format = fmtSel ? fmtSel.value : 'flac';
+            if (!confirm('Convert ' + items.length + ' track(s) to ' +
+                         (fmtSel ? fmtSel.options[fmtSel.selectedIndex].text : format) +
+                         ' without re-downloading?')) {
+                return;
+            }
+            transcode.disabled = true;
+            fetch('/api/transcode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                body: JSON.stringify({ ids: items.map((i) => i.id), format: format }),
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    transcode.disabled = false;
+                    if (!data.ok) {
+                        toast(data.message || 'Could not transcode.', 'danger');
+                        return;
+                    }
+                    toast('Converted ' + data.converted + ' of ' + items.length + ' track(s).',
+                          data.converted ? 'success' : 'danger');
+                    if (typeof refreshTable === 'function') refreshTable();
+                })
+                .catch(() => {
+                    transcode.disabled = false;
+                    toast('Could not transcode.', 'danger');
+                });
+        });
+    }
+    const queue = document.getElementById('bulkQueue');
+    if (queue && window.AudioPlayer) {
+        queue.addEventListener('click', () => {
+            const items = selectedRows().filter((item) =>
+                (item.status === 'completed' || item.status === 'skipped') && !item.isPlaylist);
+            if (!items.length) {
+                toast('Nothing playable among the selection.', 'info');
+                return;
+            }
+            if (!window.AudioPlayer || !window.AudioPlayer.enqueue) {
+                toast('Player is not ready.', 'danger');
+                return;
+            }
+            queue.disabled = true;
+            let done = 0;
+            let okCount = 0;
+            const step = () => {
+                if (done >= items.length) {
+                    queue.disabled = false;
+                    queue.textContent = 'Queue';
+                    toast('Added ' + okCount + ' of ' + items.length + ' track(s) to the player queue.',
+                          okCount ? 'success' : 'danger');
+                    return;
+                }
+                const item = items[done];
+                done += 1;
+                queue.textContent = 'Queue (' + done + '/' + items.length + ')';
+                fetch('/api/track/' + item.id)
+                    .then((r) => r.json())
+                    .then((data) => {
+                        if (data.ok) {
+                            window.AudioPlayer.enqueue(data.item);
+                            okCount += 1;
+                        }
+                        step();
+                    })
+                    .catch(step);
             };
             step();
         });
@@ -1229,7 +1397,27 @@ function initHistoryToolbar() {
     }
     refreshQueueButton();
     refreshStorageInfo();
-    initServerSearch();
+    const pruneBtn = document.getElementById('pruneMissing');
+    if (pruneBtn) {
+        pruneBtn.addEventListener('click', () => {
+            if (!confirm('Remove history entries whose files are gone from disk? Active downloads are never touched.')) return;
+            pruneBtn.disabled = true;
+            fetch('/api/prune-missing', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrfToken() },
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    toast(data.ok ? ('Removed ' + data.removed + ' missing entr' + (data.removed === 1 ? 'y.' : 'ies.')) : (data.message || 'Cleanup failed.'),
+                          data.ok ? 'success' : 'danger');
+                    refreshStorageInfo();
+                    if (typeof refreshTable === 'function') refreshTable();
+                    else window.location.reload();
+                })
+                .catch(() => toast('Cleanup failed.', 'danger'))
+                .finally(() => { pruneBtn.disabled = false; });
+        });
+    }
     const verifyBtn = document.getElementById('verifyFiles');
     if (verifyBtn) {
         const pollVerify = () => {
@@ -1275,3 +1463,260 @@ function initHistoryToolbar() {
 }
 
 document.addEventListener('DOMContentLoaded', initHistoryToolbar);
+
+// --- Command palette: Ctrl/⌘K ------------------------------------------------
+// One bar for everything: paste a link to convert it, fuzzy-find library
+// tracks to play/queue, or run app actions. Built on DOM the script
+// injects, so no template changes are needed on any page.
+(function commandPalette() {
+    let overlay = null;
+    let input = null;
+    let list = null;
+    let libCache = null;
+    let libPending = null;
+    let activeIdx = 0;
+    let visible = [];
+
+    function looksLikeUrl(text) {
+        return /^(https?:\/\/|www\.)\S+$/i.test(text.trim());
+    }
+
+    function ensureDOM() {
+        if (overlay) return;
+        overlay = document.createElement('div');
+        overlay.id = 'cmdPalette';
+        overlay.className = 'cmd-palette d-none';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-label', 'Command palette');
+        const box = document.createElement('div');
+        box.className = 'cmd-palette-box';
+        input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-control form-control-lg';
+        input.placeholder = 'Paste a link, search tracks, or type an action…';
+        input.setAttribute('aria-label', 'Command palette input');
+        input.setAttribute('autocomplete', 'off');
+        list = document.createElement('div');
+        list.className = 'cmd-palette-list';
+        box.appendChild(input);
+        box.appendChild(list);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) close();
+        });
+        input.addEventListener('input', () => render(input.value));
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                activeIdx = Math.min(visible.length - 1, activeIdx + 1);
+                paint();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                activeIdx = Math.max(0, activeIdx - 1);
+                paint();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (visible[activeIdx]) run(visible[activeIdx]);
+            } else if (e.key === 'Escape') {
+                close();
+            }
+        });
+    }
+
+    function library() {
+        if (libCache) return Promise.resolve(libCache);
+        if (!libPending) {
+            libPending = fetch('/api/library')
+                .then((r) => r.json())
+                .then((data) => {
+                    libCache = data.items || [];
+                    return libCache;
+                })
+                .catch(() => [])
+                .finally(() => { libPending = null; });
+        }
+        return libPending;
+    }
+
+    function actions() {
+        const go = (label, path) => ({
+            kind: 'action', label: label, hint: 'Go to ' + label,
+            run: () => { window.location.href = path; },
+        });
+        const call = (label, hint, url, method, done) => ({
+            kind: 'action', label: label, hint: hint,
+            run: () => {
+                fetch(url, { method: method, headers: { 'X-CSRFToken': csrfToken() } })
+                    .then((r) => r.json())
+                    .then((d) => toast(d.ok ? (done || label + ' done.') : (d.message || 'Failed.'), d.ok ? 'success' : 'danger'))
+                    .catch(() => toast('Failed.', 'danger'));
+            },
+        });
+        const post = (label, hint, url, done) => call(label, hint, url, 'POST', done);
+        const get = (label, hint, url, done) => call(label, hint, url, 'GET', done);
+        return [
+            go('Player', '/player'),
+            go('History', '/history'),
+            go('Video', '/video'),
+            go('Settings', '/settings'),
+            go('Home', '/'),
+            get('Pause queue', 'Pause all downloads', '/api/queue/pause', 'Queue paused.'),
+            get('Resume queue', 'Resume all downloads', '/api/queue/resume', 'Queue resumed.'),
+            post('Verify files', 'Re-check saved files', '/api/verify-files', 'Verification started.'),
+            post('Prune missing files', 'Drop rows whose files are gone', '/api/prune-missing', 'Pruned.'),
+        ];
+    }
+
+    function render(filter) {
+        const q = filter.trim().toLowerCase();
+        const rows = [];
+        if (looksLikeUrl(filter)) {
+            rows.push({
+                kind: 'convert', label: 'Convert ' + filter.trim(), hint: 'Queue this link',
+                url: filter.trim(),
+                run: (item) => {
+                    const form = new FormData();
+                    form.append('csrf_token', csrfToken());
+                    form.append('url', item.url);
+                    const fmt = document.querySelector('#format');
+                    form.append('format', (fmt && fmt.value) || 'flac');
+                    const out = document.querySelector('#output_path, #video_output_path');
+                    if (out && out.value) form.append('output_path', out.value);
+                    fetch('/convert', { method: 'POST', body: form })
+                        .then(() => {
+                            toast('Conversion queued. Track progress on Home.', 'success');
+                            if (window.location.pathname !== '/') window.location.href = '/';
+                            else if (typeof refreshTable === 'function') refreshTable();
+                        })
+                        .catch(() => toast('Could not queue.', 'danger'));
+                },
+            });
+        }
+        const acts = actions().filter((a) => !q || a.label.toLowerCase().includes(q));
+        acts.forEach((a) => rows.push(a));
+        library().then((items) => {
+            if (q) {
+                items
+                    .filter((it) => ((it.filename || '') + ' ' + (it.tag_title || '') + ' ' +
+                                     (it.tag_artist || '')).toLowerCase().includes(q))
+                    .slice(0, 8)
+                    .forEach((it) => rows.push({
+                        kind: 'track', label: (it.filename || 'Track').replace(/\.[^.]+$/, ''),
+                        hint: (it.format || '') + ' · play',
+                        id: it.id,
+                        run: (item) => {
+                            fetch('/api/track/' + item.id)
+                                .then((r) => r.json())
+                                .then((data) => {
+                                    if (data.ok && window.AudioPlayer) {
+                                        window.AudioPlayer.playItems([data.item], 0, '');
+                                    }
+                                })
+                                .catch(() => toast('Could not play.', 'danger'));
+                        },
+                    }));
+            }
+            visible = rows.slice(0, 12);
+            activeIdx = 0;
+            paint();
+        });
+        visible = rows.slice(0, 12);
+        activeIdx = 0;
+        paint();
+    }
+
+    function paint() {
+        list.innerHTML = '';
+        if (!visible.length) {
+            list.innerHTML = '<div class="text-muted small p-2">No matches.</div>';
+            return;
+        }
+        visible.forEach((item, i) => {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'cmd-row' + (i === activeIdx ? ' active' : '');
+            const label = document.createElement('span');
+            label.textContent = item.label;
+            row.appendChild(label);
+            if (item.hint) {
+                const hint = document.createElement('span');
+                hint.className = 'cmd-hint';
+                hint.textContent = item.hint;
+                row.appendChild(hint);
+            }
+            row.addEventListener('click', () => run(item));
+            row.addEventListener('mousemove', () => {
+                if (activeIdx !== i) {
+                    activeIdx = i;
+                    paint();
+                }
+            });
+            list.appendChild(row);
+        });
+    }
+
+    function run(item) {
+        close();
+        try {
+            item.run(item);
+        } catch (err) { /* ignore */ }
+    }
+
+    function open() {
+        ensureDOM();
+        libCache = null;
+        overlay.classList.remove('d-none');
+        input.value = '';
+        render('');
+        setTimeout(() => input.focus(), 0);
+    }
+
+    function close() {
+        if (overlay) overlay.classList.add('d-none');
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+            e.preventDefault();
+            ensureDOM();
+            if (overlay.classList.contains('d-none')) open();
+            else close();
+        } else if (e.key === 'Escape' && overlay && !overlay.classList.contains('d-none')) {
+            close();
+        }
+    });
+})();
+
+// --- First-run wizard --------------------------------------------------------
+// Shows once (until the first conversion exists) on Home. Dismissal lasts
+// the browser session; a queued conversion retires it permanently.
+(function firstRun() {
+    function init() {
+        const card = document.getElementById('firstRun');
+        if (!card) return;
+        try {
+            if (sessionStorage.getItem('firstRunDismissed')) return;
+        } catch (err) { /* private mode */ }
+        const skip = document.getElementById('firstRunSkip');
+        if (skip) {
+            skip.addEventListener('click', () => {
+                card.classList.add('d-none');
+                try {
+                    sessionStorage.setItem('firstRunDismissed', '1');
+                } catch (err) { /* private mode */ }
+            });
+        }
+        fetch('/api/first-run')
+            .then((r) => r.json())
+            .then((data) => {
+                if (data.first_run) card.classList.remove('d-none');
+            })
+            .catch(() => {});
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();

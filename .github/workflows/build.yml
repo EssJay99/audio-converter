@@ -71,6 +71,13 @@ jobs:
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
+        env:
+          # Absent until the repo owner adds a Developer ID: without them
+          # the notarize script self-skips and the build stays unsigned.
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           python -m venv .venv
           .venv/bin/pip install -r requirements.txt pyinstaller
@@ -84,6 +91,11 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: cmd
+        env:
+          # Absent until the repo owner adds a code-signing cert: without
+          # them the installer builds unsigned, exactly as before.
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: scripts\build_windows.bat
 
       - name: Upload installer
@@ -109,6 +121,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" installers/* \
+          cd installers
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release create "${{ github.ref_name }}" * \
             --title "Audio Converter ${{ github.ref_name }}" \
             --notes "macOS (.dmg), Windows (Setup .exe), and Linux (.tar.gz) installers. No command line needed: open, install, double-click."
+
+  verify-release:
+    # Smoke-test the verified self-update flow end to end: download every
+    # published asset exactly as the in-app updater would and check it
+    # against SHA256SUMS.txt. A checksum failure here blocks nothing
+    # retroactively, but fails the workflow loudly before users update.
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify published installer checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/verify_release.py "${{ github.ref_name }}"

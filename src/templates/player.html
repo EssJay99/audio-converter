@@ -64,6 +64,12 @@
                 </div>
 
                 <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h5>Smart Mixes</h5>
+                    <p class="text-muted small mb-2">Auto-built from your library — no curation needed.</p>
+                    <div id="tabSmart" class="d-flex flex-wrap gap-2"></div>
+                </div>
+
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
                     <h5>Duplicates</h5>
                     <p class="text-muted small mb-2">Same song in more than one folder. Deleting here removes the file from disk.</p>
                     <div id="tabDupes"><span class="text-muted small">Scanning…</span></div>
@@ -75,9 +81,15 @@
                     <h3>Library</h3>
                     <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
                         <input type="search" id="tabSearch" class="form-control history-search" placeholder="Search title, artist, file…" aria-label="Search library" autocomplete="off">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Library view">
+                            <button type="button" class="btn btn-outline-secondary active" id="libViewTracks">Tracks</button>
+                            <button type="button" class="btn btn-outline-secondary" id="libViewAlbums">Albums</button>
+                            <button type="button" class="btn btn-outline-secondary" id="libViewArtists">Artists</button>
+                        </div>
                         <select id="tabSort" class="form-select history-status" aria-label="Sort library" style="width:auto;">
                             <option value="recent">Recently added</option>
                             <option value="played">Most played</option>
+                            <option value="rated">Top rated</option>
                             <option value="name">Name A–Z</option>
                         </select>
                         <a href="/api/library.csv" class="btn btn-sm btn-outline-secondary" title="Download the library as CSV">CSV</a>
@@ -86,7 +98,27 @@
                             <label class="form-check-label small" for="tabLikedOnly">Liked only ♥</label>
                         </div>
                     </div>
+                    <div id="libGroups" class="lib-groups d-none"></div>
                     <div id="libGrid" class="lib-grid"></div>
+                    <div class="d-flex flex-wrap gap-2 align-items-center mt-3 pt-2 border-top" id="libTools">
+                        <span class="text-muted small">Library tools:</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="libAdoptBtn" title="Add an existing folder of audio files to the library">Adopt folder</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="libTidyBtn" title="Move files into Artist / Album folders from their tags">Tidy folders</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="libCoversBtn" title="Fetch missing cover art from stored thumbnail links">Backfill covers</button>
+                        <span class="text-muted small">Drop audio files here to import, or .m3u to queue.</span>
+                    </div>
+                    <form id="libAdoptForm" class="d-none mt-2 d-flex gap-2 align-items-center" style="max-width:640px;">
+                        <input type="text" id="libAdoptPath" class="form-control form-control-sm" data-path-browser placeholder="Folder of audio files…" autocomplete="off">
+                        <button type="submit" class="btn btn-sm btn-primary text-nowrap">Adopt</button>
+                    </form>
+                    <div id="libBulkBar" class="d-none mt-2 p-2 border rounded d-flex flex-wrap gap-2 align-items-center">
+                        <strong class="small" id="libBulkCount">0 selected</strong>
+                        <input type="text" id="libBulkArtist" class="form-control form-control-sm" placeholder="Artist" style="max-width:160px;" autocomplete="off">
+                        <input type="text" id="libBulkAlbum" class="form-control form-control-sm" placeholder="Album" style="max-width:160px;" autocomplete="off">
+                        <input type="text" id="libBulkTitle" class="form-control form-control-sm" placeholder="Title" style="max-width:160px;" autocomplete="off">
+                        <button type="button" class="btn btn-sm btn-primary" id="libBulkApply">Apply tags</button>
+                        <button type="button" class="btn btn-sm btn-link" id="libBulkClear">Clear</button>
+                    </div>
                 </div>
             </div>
         </div>

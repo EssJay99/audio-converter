@@ -5,7 +5,7 @@ import time
 
 from flask import Blueprint, render_template, request, jsonify, abort, Response
 from sqlalchemy import or_
-from app.models import ConversionHistory, UserSettings, effective_output_path
+from app.models import ConversionHistory, UserSettings, effective_output_path, utcnow
 from app.routes.convert import _serialize, sanitize_filename
 from app import db, APP_VERSION
 
@@ -18,10 +18,13 @@ def index():
         ConversionHistory.created_at.desc()
     ).limit(10).all()
 
+    settings = UserSettings.query.first()
+    default_format = getattr(settings, 'default_format', 'flac') or 'flac'
     return render_template(
         'index.html',
         history=history,
         default_output_path=effective_output_path(),
+        default_format=default_format,
         request_path=request.path,
         show_history=False,
         app_version=APP_VERSION,
@@ -69,6 +72,7 @@ def history():
         'index.html',
         history=history,
         default_output_path=effective_output_path(),
+        default_format='flac',
         request_path=request.path,
         show_history=True,
         history_page=page,
@@ -81,8 +85,9 @@ def history():
 @bp.route('/api/conversions')
 def api_conversions():
     limit = request.args.get('limit', 20, type=int)
-    if limit > 100:
-        limit = 100
+    if not isinstance(limit, int):
+        limit = 20
+    limit = min(100, max(1, limit))
 
     history = db.session.query(ConversionHistory).order_by(
         ConversionHistory.created_at.desc()
@@ -93,7 +98,7 @@ def api_conversions():
 
 @bp.route('/api/search')
 def api_search():
-    """Search conversions by URL, file path, or playlist title.
+    """Search conversions by URL, file path, playlist title, or tags.
 
     Unlike the instant client-side filter (which only sees rendered rows),
     this scans the whole database — including tracks inside playlists that
@@ -102,11 +107,17 @@ def api_search():
     q = request.args.get('q', '').strip()
     if len(q) < 2:
         return jsonify({'ok': True, 'query': q, 'items': []})
-    like = f'%{q}%'
+    # Escape LIKE wildcards so a literal % or _ in the query can't widen
+    # the match into unrelated rows.
+    escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    like = f'%{escaped}%'
     rows = db.session.query(ConversionHistory).filter(
-        or_(ConversionHistory.url.ilike(like),
-            ConversionHistory.output_path.ilike(like),
-            ConversionHistory.playlist_title.ilike(like))
+        or_(ConversionHistory.url.ilike(like, escape='\\'),
+            ConversionHistory.output_path.ilike(like, escape='\\'),
+            ConversionHistory.playlist_title.ilike(like, escape='\\'),
+            ConversionHistory.tag_title.ilike(like, escape='\\'),
+            ConversionHistory.tag_artist.ilike(like, escape='\\'),
+            ConversionHistory.tag_album.ilike(like, escape='\\'))
     ).order_by(ConversionHistory.created_at.desc()).limit(25).all()
     return jsonify({'ok': True, 'query': q,
                     'items': [_serialize(item) for item in rows]})
@@ -118,7 +129,7 @@ DURATION_PROBE_CAP = 500
 @bp.route('/api/stats')
 def api_stats():
     """Library dashboard numbers: counts, size, playtime, top playlists."""
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     from app.routes.convert import _stored_duration, _cached_stat
 
     rows = db.session.query(ConversionHistory).all()
@@ -153,12 +164,30 @@ def api_stats():
     parents = db.session.query(ConversionHistory).filter_by(
         is_playlist=True).order_by(
         ConversionHistory.item_count.desc()).limit(5).all()
-    week_ago = datetime.utcnow() - timedelta(days=7)
+    week_ago = utcnow() - timedelta(days=7)
     recent = db.session.query(ConversionHistory).filter(
         ConversionHistory.created_at >= week_ago).count()
 
     hours = int(total_seconds // 3600)
     minutes = int((total_seconds % 3600) // 60)
+
+    # Listening stats come from stored columns only (no probing): plays,
+    # listening time, and top artists/tracks by play count.
+    played = [r for r in rows
+              if (getattr(r, 'play_count', 0) or 0) > 0]
+    total_plays = sum(r.play_count or 0 for r in played)
+    listened_seconds = 0.0
+    artist_plays: dict = {}
+    for r in played:
+        try:
+            listened_seconds += float(r.duration or 0) * (r.play_count or 0)
+        except (TypeError, ValueError):
+            pass
+        artist = (getattr(r, 'tag_artist', '') or '').strip() or 'Unknown'
+        artist_plays[artist] = artist_plays.get(artist, 0) + (r.play_count or 0)
+    top_artists = sorted(artist_plays.items(), key=lambda kv: -kv[1])[:5]
+    top_tracks = sorted(played, key=lambda r: -(r.play_count or 0))[:5]
+    lh, lm = int(listened_seconds // 3600), int((listened_seconds % 3600) // 60)
     return jsonify({
         'ok': True,
         'tracks': by_status.get('completed', 0) + by_status.get('skipped', 0),
@@ -172,6 +201,11 @@ def api_stats():
         'top_playlists': [{'title': p.playlist_title or p.url[:40],
                            'tracks': p.item_count,
                            'status': p.status} for p in parents],
+        'total_plays': total_plays,
+        'listened': f'{lh}h {lm}m' if lh else f'{lm}m',
+        'top_artists': [{'artist': a, 'plays': n} for a, n in top_artists],
+        'top_tracks': [{'title': (r.tag_title or os.path.basename(r.output_path or '') or r.url[:40]),
+                        'plays': r.play_count or 0} for r in top_tracks],
     })
 
 
@@ -223,6 +257,19 @@ def api_recently_played():
     return jsonify({'ok': True, 'items': items})
 
 
+def _csv_cell(value):
+    """Neutralize spreadsheet formula injection in exported text.
+
+    Filenames derive from video titles, so a hostile title like
+    `=cmd|'/c calc'!A0` would execute on open in Excel/LibreOffice.
+    Prefixing risky leading characters with a quote keeps the text inert.
+    """
+    text = str(value or '')
+    if text[:1] in ('=', '+', '-', '@', '|', '%'):
+        return "'" + text
+    return text
+
+
 @bp.route('/api/library.csv')
 def api_library_csv():
     """Download the whole library as CSV (no probing: stored values only)."""
@@ -238,13 +285,13 @@ def api_library_csv():
                      'liked', 'file', 'created_at'])
     for row in rows:
         writer.writerow([
-            os.path.basename(row.output_path or ''),
+            _csv_cell(os.path.basename(row.output_path or '')),
             row.format,
             getattr(row, 'duration', 0) or 0,
             row.status,
             getattr(row, 'play_count', 0) or 0,
             bool(getattr(row, 'liked', False)),
-            row.output_path or '',
+            _csv_cell(row.output_path or ''),
             str(row.created_at) if row.created_at else '',
         ])
     return Response(buf.getvalue(), mimetype='text/csv',
@@ -272,8 +319,9 @@ def api_playlist_m3u(parent_id):
         meta = _cached_metadata(path)
         title = meta.get('title') or os.path.splitext(os.path.basename(path))[0]
         artist = meta.get('artist') or ''
-        duration = _stored_duration(child)
-        meta = _cached_metadata(path)
+        # Metadata tags can carry newlines; keep each entry on its own line.
+        title = str(title).replace('\r', ' ').replace('\n', ' ')
+        artist = str(artist).replace('\r', ' ').replace('\n', ' ')
         lines.append(f'#EXTINF:{int(duration) if duration > 0 else -1},'
                      f'{artist + " - " if artist else ""}{title}')
         lines.append(path)
@@ -323,6 +371,8 @@ def api_directories():
     """
     q = request.args.get('q', '')
     depth = request.args.get('depth', 2, type=int)
+    if not isinstance(depth, int):
+        depth = 2
     depth = max(1, min(depth, 3))
 
     base = _expand_user_path(q) or os.path.expanduser('~')

@@ -6,8 +6,8 @@
 #
 # Install:  1. `brew install ffmpeg` (once; conversions need it)
 #           2. Copy dist/AudioConverter to /Applications
-#           3. Double-click AudioConverter (first launch: right-click > Open
-#              to clear Gatekeeper, as the bundle is not notarized)
+#           3. Double-click AudioConverter (notarized builds open directly;
+#              unsigned builds: right-click > Open once to clear Gatekeeper)
 #           4. Optional login start: copy scripts/com.audioconverter.app.plist
 #              to ~/Library/LaunchAgents and run `launchctl load` on it.
 set -euo pipefail

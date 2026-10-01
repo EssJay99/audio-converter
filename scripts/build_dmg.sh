@@ -27,6 +27,10 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$BUNDLE" "$STAGE/AudioConverter.app"
 ln -s /Applications "$STAGE/Applications"
 
+# Sign the staged copy BEFORE the image is created, so a notarized build
+# ships a signed bundle (self-skips without credentials).
+bash scripts/notarize_macos.sh --sign-only "$STAGE/AudioConverter.app"
+
 cat > "$STAGE/How to install.txt" << 'EOF'
 Audio Converter — install in 30 seconds
 ========================================
@@ -49,3 +53,6 @@ hdiutil create -volname "AudioConverter" -srcfolder "$STAGE" \
     -ov -format UDZO "$DMG" > /dev/null
 echo "==> installer ready: $DMG"
 ls -la "$DMG"
+
+# Submit + staple when credentials are present (self-skips otherwise).
+bash scripts/notarize_macos.sh --notarize-only "$DMG"

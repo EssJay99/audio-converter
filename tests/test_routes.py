@@ -1548,7 +1548,9 @@ def test_delete_completed_file_and_row(client, completed_conversion):
 
     resp = client.post(f'/api/delete/{job_id}')
     assert resp.status_code == 200
-    assert resp.get_json() == {'ok': True, 'removed_file': True}
+    assert resp.get_json() == {'ok': True, 'removed_file': True,
+                               'trashed': True,
+                               'message': 'Moved to Trash.'}
     assert not os.path.exists(path)
 
     with client.application.app_context():
@@ -2487,7 +2489,8 @@ def test_delete_playlist_removes_tracks_and_folder(client, tmp_path):
     resp = client.post(f'/api/delete-playlist/{pid}')
     assert resp.status_code == 200
     assert resp.get_json() == {'ok': True, 'removed_tracks': 2,
-                               'removed_files': 1}
+                               'removed_files': 1, 'trashed_files': 1,
+                               'kept_files': 0}
     assert not one.exists()
     assert not folder.exists()
 
@@ -2756,7 +2759,7 @@ def test_m3u_probes_each_file_once(client, tmp_path, monkeypatch):
 
     def fake_info(path):
         calls.append(path)
-        return 120.0, {'title': 'T', 'artist': 'A', 'album': '', 'date': ''}
+        return 120.0, {'title': 'T', 'artist': 'A', 'album': '', 'date': ''}, ''
 
     monkeypatch.setattr(convert_module, '_ffmpeg_file_info', fake_info)
     with client.application.app_context():
@@ -3403,15 +3406,19 @@ def test_update_install_blocked_when_not_frozen(client):
     assert 'Applications' in resp.get_json()['message']
 
 
-def test_find_dmg_asset():
+def test_find_asset_by_suffix():
     release = {'assets': [
         {'name': 'notes.txt', 'browser_download_url': 'https://x/notes'},
         {'name': 'AudioConverter-1.0.0.dmg',
          'browser_download_url': 'https://x/app.dmg'},
+        {'name': 'AudioConverter-Setup-1.0.0.exe',
+         'browser_download_url': 'https://x/setup.exe'},
     ]}
-    assert convert_module._find_dmg_asset(release) == (
+    assert convert_module._find_asset_by_suffix(release, ('.dmg',)) == (
         'AudioConverter-1.0.0.dmg', 'https://x/app.dmg')
-    assert convert_module._find_dmg_asset({}) == (None, None)
+    assert convert_module._find_asset_by_suffix(release, ('.exe',)) == (
+        'AudioConverter-Setup-1.0.0.exe', 'https://x/setup.exe')
+    assert convert_module._find_asset_by_suffix({}, ('.dmg',)) == (None, None)
 
 
 def test_running_bundle_dir_unfrozen():
@@ -3613,7 +3620,7 @@ def test_m3u_uses_stored_duration_without_probing(client, tmp_path, monkeypatch)
     target.write_bytes(b'fLaC')
     calls = []
     monkeypatch.setattr(convert_module, '_ffmpeg_file_info',
-                        lambda p: (calls.append(p), (120.0, {}))[1])
+                        lambda p: (calls.append(p), (120.0, {}, ''))[1])
     with client.application.app_context():
         parent = ConversionHistory(url='https://youtu.be/list', format='FLAC',
                                    output_path=str(tmp_path), status='completed',
@@ -3819,3 +3826,1360 @@ def test_failure_plan_branches():
     assert plan(0, 3, 'Not enough free disk space')[0] == 'fail'
     action, attempts, message = plan(3, 3, 'boom')
     assert action == 'fail' and 'Max retries' in message
+
+
+# ------------------------------------------------------- prune+health ----
+
+def test_prune_missing_removes_only_gone_files(client, tmp_path):
+    gone = tmp_path / 'gone.flac'
+    here = tmp_path / 'here.flac'
+    here.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/gone', format='FLAC',
+            output_path=str(gone), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/here', format='FLAC',
+            output_path=str(here), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/busy', format='FLAC',
+            output_path=str(tmp_path), status='downloading'))
+        parent = ConversionHistory(
+            url='https://youtu.be/list', format='FLAC',
+            output_path=str(tmp_path), status='completed',
+            is_playlist=True, item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/gone2', format='FLAC',
+            output_path=str(tmp_path / 'gone2.flac'), status='completed',
+            parent_id=pid, item_index=0))
+        db.session.commit()
+
+    resp = client.post('/api/prune-missing')
+    assert resp.status_code == 200
+    # gone track + gone child + now-childless parent = 3.
+    assert resp.get_json() == {'ok': True, 'removed': 3}
+
+    with client.application.app_context():
+        assert ConversionHistory.query.filter_by(
+            url='https://youtu.be/here').count() == 1
+        assert ConversionHistory.query.filter_by(
+            url='https://youtu.be/busy').count() == 1
+        assert db.session.get(ConversionHistory, pid) is None
+
+
+def test_health_reports_helpers_and_output(client):
+    data = client.get('/api/health').get_json()
+    assert data['ok'] is True
+    assert data['ffmpeg'] is True
+    assert data['ytdlp'] is True
+    assert data['output_writable'] is True
+    assert 'stale_helper_suspected' in data
+    assert data['disk_free_bytes'] is None or data['disk_free_bytes'] > 0
+
+
+# ------------------------------------------------------- toggles ----
+
+def test_settings_media_toggles_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'wav_sample_rate': 'auto',
+        'wav_bit_depth': '16',
+        'ogg_quality': '8',
+        'flac_compression': '5',
+        'subtitles': 'on',
+        'normalize_audio': 'on',
+        # sponsorblock omitted -> off
+    })
+    assert resp.status_code == 302
+
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.subtitles is True
+        assert settings.sponsorblock is False
+        assert settings.normalize_audio is True
+
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('name="subtitles"', 'name="sponsorblock"',
+                   'name="normalize_audio"'):
+        assert marker in page
+
+
+# ------------------------------------------------------- tab UI ----
+
+def test_player_tab_eq_presets_and_queue_export(client):
+    page = client.get('/player').data.decode('utf-8')
+    assert 'data-eq-preset' in page
+    for preset in ('flat', 'rock', 'pop', 'jazz', 'vocal', 'bass'):
+        assert f'data-eq-preset="{preset}"' in page
+
+
+def test_sponsorblock_flags_present_when_on(client, monkeypatch):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.sponsorblock = True
+        db.session.commit()
+
+        seen = {}
+
+        class FakeProc:
+            returncode = 0
+
+            def __init__(self):
+                self.stdout = FakeStdout()
+
+            def wait(self, timeout=None):
+                return 0
+
+        class FakeStdout:
+            def readline(self):
+                return ''
+
+        def fake_popen(cmd, **kwargs):
+            seen['cmd'] = cmd
+            return FakeProc()
+
+        monkeypatch.setattr(convert_module.subprocess, 'Popen', fake_popen)
+        target = '/tmp/opencode-sponsor-test.tmp'
+        open(target, 'wb').close()
+        try:
+            with client.application.app_context():
+                video_job = ConversionHistory(
+                    url='https://www.youtube.com/watch?v=x',
+                    format='MP4 Video', output_path=target,
+                    status='downloading')
+                db.session.add(video_job)
+                db.session.commit()
+                job_id = video_job.id
+                convert_module.download_audio(
+                    'https://www.youtube.com/watch?v=x', target,
+                    job=db.session.get(ConversionHistory, job_id))
+        finally:
+            if os.path.exists(target):
+                os.unlink(target)
+    assert '--sponsorblock-remove' in seen['cmd']
+
+
+def test_normalize_adds_loudnorm_filter(client, monkeypatch, tmp_path):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.normalize_audio = True
+        db.session.commit()
+
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen['cmd'] = cmd
+
+            class FakeResult:
+                returncode = 0
+                stdout = ''
+                stderr = ''
+            return FakeResult()
+
+        monkeypatch.setattr(convert_module.subprocess, 'run', fake_run)
+        src = tmp_path / 'in.wav'
+        src.write_bytes(b'x')
+        convert_module.convert_audio_file(
+            str(src), 'flac', str(tmp_path / 'out.flac'),
+            {'title': 'T'}, None)
+    assert '-filter:a' in seen['cmd']
+    assert 'loudnorm' in seen['cmd']
+
+
+def test_delete_keeps_file_shared_with_another_row(client, tmp_path):
+    shared = tmp_path / 'shared.flac'
+    shared.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/a1', format='FLAC',
+            output_path=str(shared), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/a2', format='FLAC',
+            output_path=str(shared), status='skipped'))
+        db.session.commit()
+        first = ConversionHistory.query.filter_by(
+            url='https://youtu.be/a1').first().id
+
+    resp = client.post(f'/api/delete/{first}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['removed_file'] is False
+    assert 'another entry' in data['message']
+    assert shared.is_file()
+    with client.application.app_context():
+        assert ConversionHistory.query.filter_by(
+            url='https://youtu.be/a2').count() == 1
+
+
+def test_delete_playlist_keeps_externally_shared_file(client, tmp_path):
+    shared = tmp_path / 'shared.flac'
+    shared.write_bytes(b'fLaC')
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path=str(tmp_path), status='completed',
+            is_playlist=True, item_count=1)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/t1', format='FLAC',
+            output_path=str(shared), status='completed',
+            parent_id=pid, item_index=0))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/solo', format='FLAC',
+            output_path=str(shared), status='completed'))
+        db.session.commit()
+
+    resp = client.post(f'/api/delete-playlist/{pid}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['removed_files'] == 0
+    assert data['kept_files'] == 1
+    assert shared.is_file()
+
+
+# ------------------------------------------------------- hardening ----
+
+def test_supported_url_allowlist():
+    good = [
+        'https://www.youtube.com/watch?v=x',
+        'https://youtu.be/x',
+        'https://music.youtube.com/watch?v=x',
+        'https://m.youtube.com/watch?v=x',
+        'https://www.soundcloud.com/artist/track',
+        'https://soundcloud.com/artist/track',
+        'https://open.spotify.com/track/x',
+        'https://open.spotify.com/playlist/x',
+        'https://music.apple.com/us/album/x',
+        'https://listen.tidal.com/album/x',
+        'https://tidal.com/browse/track/x',
+    ]
+    bad = [
+        'http://localhost:8080/x',
+        'http://127.0.0.1/x',
+        'http://169.254.169.254/latest/meta-data/',
+        'http://192.168.1.1/x',
+        'file:///etc/passwd',
+        'ftp://example.com/x',
+        'https://evil.com/watch?v=x',
+        'https://youtube.com.evil.com/watch?v=x',
+        'https://notyoutube.com/watch?v=x',
+        'https://fakeyoutu.be/x',
+        'not a url',
+        '',
+    ]
+    for url in good:
+        assert convert_module._is_supported_url(url), url
+    for url in bad:
+        assert not convert_module._is_supported_url(url), url
+
+
+def test_convert_rejects_unsupported_url(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    for url in ('http://127.0.0.1:8080/evil',
+                'https://evil.com/track',
+                'file:///etc/passwd'):
+        resp = client.post('/convert', data={
+            'url': url, 'format': 'flac', 'output_path': '/tmp/out'})
+        assert resp.status_code == 302
+    with client.application.app_context():
+        assert ConversionHistory.query.count() == 0
+
+
+def test_thumbnail_fetch_blocks_private_targets(monkeypatch):
+    assert not convert_module._is_public_http_url('http://127.0.0.1/x')
+    assert not convert_module._is_public_http_url('http://localhost/x')
+    assert not convert_module._is_public_http_url('http://169.254.169.254/x')
+    assert not convert_module._is_public_http_url('http://10.0.0.1/x')
+    assert not convert_module._is_public_http_url('file:///etc/passwd')
+    assert not convert_module._is_public_http_url('ftp://example.com/x')
+    assert not convert_module._is_public_http_url('')
+    assert convert_module._is_public_http_url('https://www.youtube.com/')
+
+
+def test_security_headers_and_cookie_flags(client):
+    resp = client.get('/')
+    assert resp.headers.get('X-Content-Type-Options') == 'nosniff'
+    assert resp.headers.get('X-Frame-Options') == 'SAMEORIGIN'
+    assert resp.headers.get('Referrer-Policy') == 'no-referrer'
+    assert client.application.config['SESSION_COOKIE_HTTPONLY'] is True
+    assert client.application.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+
+
+def test_ytdlp_release_uses_repos_api(monkeypatch):
+    seen = {}
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {'tag_name': '2026.01.01', 'assets': []}
+
+    def fake_get(url, **kwargs):
+        seen['url'] = url
+        return FakeResp()
+
+    monkeypatch.setattr(convert_module.requests, 'get', fake_get)
+    assert convert_module._latest_ytdlp_release() == {
+        'version': '2026.01.01', 'assets': {}}
+    assert seen['url'] == (
+        'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest')
+
+
+def test_asset_sha256_parses_sums_file(monkeypatch):
+    sums = ('aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999  yt-dlp_macos\n'
+            'deadbeef  some-other-file\n'
+            'not-a-hash  yt-dlp_linux\n')
+
+    class FakeResp:
+        status_code = 200
+        text = sums
+
+    class FakeSession:
+        def __init__(self):
+            self.cookies = FakeJar()
+
+        def get(self, url, **kwargs):
+            return FakeResp()
+
+    class FakeJar:
+        def clear(self):
+            pass
+
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    assets = {'SHA2-256SUMS': 'https://x/sums',
+              'yt-dlp_macos': 'https://x/bin'}
+    assert convert_module._asset_sha256(assets, 'yt-dlp_macos') == (
+        'aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999')
+    assert convert_module._asset_sha256(assets, 'yt-dlp_linux') is None
+    assert convert_module._asset_sha256(assets, 'missing') is None
+    assert convert_module._asset_sha256({}, 'yt-dlp_macos') is None
+
+
+# ------------------------------------------------------- install verify ----
+
+def test_verify_installer_bytes(monkeypatch):
+    import hashlib
+    content = b'fake-installer-bytes'
+    digest = hashlib.sha256(content).hexdigest()
+    release = {'assets': [
+        {'name': 'AudioConverter-1.0.0.dmg',
+         'browser_download_url': 'https://x/app.dmg'},
+        {'name': 'SHA256SUMS.txt',
+         'browser_download_url': 'https://x/sums'},
+    ]}
+    monkeypatch.setattr(
+        convert_module, '_asset_sha256',
+        lambda assets, name, sums_asset='SHA2-256SUMS', timeout=60: (
+            digest if name == 'AudioConverter-1.0.0.dmg' else None))
+    # Matching checksum passes silently.
+    convert_module._verify_installer_bytes(
+        release, 'AudioConverter-1.0.0.dmg', digest)
+    # Tampered bytes raise.
+    try:
+        convert_module._verify_installer_bytes(
+            release, 'AudioConverter-1.0.0.dmg', '0' * 64)
+    except ValueError as e:
+        assert 'mismatch' in str(e)
+    else:
+        raise AssertionError('tampered installer accepted')
+    # Missing checksums entry refuses rather than skipping verification.
+    try:
+        convert_module._verify_installer_bytes(release, 'other.exe', digest)
+    except ValueError as e:
+        assert 'checksum' in str(e)
+    else:
+        raise AssertionError('unchecksummed installer accepted')
+
+
+def test_stream_download_hashes_incrementally(tmp_path, monkeypatch):
+    import types
+    body = b'x' * (3 * 1024 * 1024)
+
+    class FakeResp:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def iter_content(self, chunk_size=1):
+            for i in range(0, len(body), chunk_size):
+                yield body[i:i + chunk_size]
+
+    class FakeSession:
+        def __init__(self):
+            self.cookies = types.SimpleNamespace(clear=lambda: None)
+
+        def get(self, url, **kwargs):
+            assert kwargs.get('stream') is True
+            return FakeResp()
+
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    dest = str(tmp_path / 'big.bin')
+    digest = convert_module._stream_download('https://x/big.bin', dest)
+    import hashlib
+    assert digest == hashlib.sha256(body).hexdigest()
+    assert os.path.getsize(dest) == len(body)
+
+
+# ------------------------------------------------------- logging ----
+
+def test_setup_logging_rotates_and_captures(tmp_path):
+    import logging
+    sys.path.insert(0, 'src')
+    try:
+        from desktop import _setup_logging
+    finally:
+        sys.path.remove('src')
+    log_path = _setup_logging(str(tmp_path))
+    assert log_path is not None and log_path.endswith('app.log')
+    try:
+        logging.getLogger('test-harness').warning('hello-log-marker')
+        with open(log_path, encoding='utf-8') as f:
+            assert 'hello-log-marker' in f.read()
+    finally:
+        root = logging.getLogger()
+        for h in [h for h in root.handlers
+                  if getattr(h, 'baseFilename', '') == log_path]:
+            root.removeHandler(h)
+            h.close()
+
+
+def test_diagnostics_redacts_log_credentials(client, tmp_path):
+    from app.models import db as _db
+    with client.application.app_context():
+        db_path = _db.engine.url.database
+        log_dir = os.path.join(os.path.dirname(db_path), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, 'app.log'), 'w',
+                  encoding='utf-8') as f:
+            f.write('proxy retry via https://user:s3cret@proxy:8080/x\n')
+            f.write('plain line\n')
+    bundle = client.get('/api/diagnostics').get_json()
+    tail = bundle['recent_log']
+    assert any('***@proxy' in line for line in tail)
+    assert not any('s3cret' in line for line in tail)
+
+
+def test_backup_uses_consistent_snapshot(tmp_path):
+    import sqlite3
+    from app import _backup_database
+    src_path = str(tmp_path / 'config.db')
+    con = sqlite3.connect(src_path)
+    con.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    con.execute("INSERT INTO t (v) VALUES ('one')")
+    con.commit()
+    con.execute('PRAGMA journal_mode=WAL')
+    con.execute("INSERT INTO t (v) VALUES ('two')")
+    con.commit()
+    con.close()
+
+    dest = _backup_database(src_path, keep=2)
+    assert dest and os.path.isfile(dest)
+    check = sqlite3.connect(dest)
+    try:
+        rows = check.execute('SELECT v FROM t ORDER BY id').fetchall()
+        assert rows == [('one',), ('two',)]
+        assert check.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    finally:
+        check.close()
+
+
+def test_helper_watch_starts_once():
+    convert_module._ensure_helper_watch()
+    convert_module._ensure_helper_watch()
+    watchers = [t for t in __import__('threading').enumerate()
+                if t.name == 'helper-watch']
+    assert len(watchers) == 1
+    assert convert_module._helper_watch_started is True
+
+
+# ------------------------------------------------------- setup flow ----
+
+def _setup_flow_fixture(tmp_path, binary=b'fake-setup-bytes', tamper=False):
+    """Fake a release + network for _windows_update_install."""
+    import hashlib
+    import types
+    digest = hashlib.sha256(binary).hexdigest()
+    sums = f'{digest}  AudioConverter-Setup-9.9.9.exe\n'
+    release = {'assets': [
+        {'name': 'AudioConverter-Setup-9.9.9.exe',
+         'browser_download_url': 'https://x/setup.exe'},
+        {'name': 'SHA256SUMS.txt',
+         'browser_download_url': 'https://x/SHA256SUMS.txt'},
+    ]}
+
+    class FeedResp:
+        status_code = 200
+
+        def json(self):
+            return release
+
+    def fake_get(url, **kwargs):
+        assert url == 'https://feed/releases/latest'
+        return FeedResp()
+
+    def fake_stream(url, dest, timeout=600):
+        with open(dest, 'wb') as f:
+            f.write(b'tampered-bytes' if tamper else binary)
+        import hashlib as _hl
+        return _hl.sha256(b'tampered-bytes' if tamper else binary).hexdigest()
+
+    class FakeSession:
+        def __init__(self):
+            self.cookies = types.SimpleNamespace(clear=lambda: None)
+
+        def get(self, url, **kwargs):
+            class SumsResp:
+                status_code = 200
+                text = sums
+            return SumsResp()
+
+    return release, fake_get, FakeSession, fake_stream
+
+
+def test_windows_setup_flow_verifies_then_launches(client, tmp_path, monkeypatch):
+    import types
+    monkeypatch.setenv('HOME', str(tmp_path))
+    release, fake_get, FakeSession, fake_stream = _setup_flow_fixture(tmp_path)
+    monkeypatch.setattr(convert_module.requests, 'get', fake_get)
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    monkeypatch.setattr(convert_module, '_stream_download', fake_stream)
+    monkeypatch.setattr('app.routes.settings._default_update_feed',
+                        lambda: 'https://feed/releases/latest')
+    launched = []
+    monkeypatch.setattr(convert_module.subprocess, 'Popen',
+                        lambda cmd: launched.append(cmd) or types.SimpleNamespace(pid=1))
+
+    with client.application.test_request_context():
+        rv = convert_module._windows_update_install()
+        resp, code = rv if isinstance(rv, tuple) else (rv, 200)
+    assert code == 200
+    assert resp.get_json()['ok'] is True
+    assert len(launched) == 1
+    dest = launched[0][0]
+    assert dest.startswith(str(tmp_path))
+    assert os.path.isfile(dest)
+
+
+def test_windows_setup_flow_refuses_tampered_binary(client, tmp_path, monkeypatch):
+    import types
+    monkeypatch.setenv('HOME', str(tmp_path))
+    release, fake_get, FakeSession, fake_stream = _setup_flow_fixture(tmp_path, tamper=True)
+    monkeypatch.setattr(convert_module.requests, 'get', fake_get)
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    monkeypatch.setattr(convert_module, '_stream_download', fake_stream)
+    monkeypatch.setattr('app.routes.settings._default_update_feed',
+                        lambda: 'https://feed/releases/latest')
+    launched = []
+    monkeypatch.setattr(convert_module.subprocess, 'Popen',
+                        lambda cmd: launched.append(cmd))
+
+    with client.application.test_request_context():
+        resp, code = convert_module._windows_update_install()
+    assert code == 500
+    assert 'mismatch' in resp.get_json()['message']
+    assert launched == []
+
+
+def test_windows_setup_flow_refuses_missing_checksums(client, tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    class FeedResp:
+        status_code = 200
+
+        def json(self):
+            return {'assets': [
+                {'name': 'AudioConverter-Setup-9.9.9.exe',
+                 'browser_download_url': 'https://x/setup.exe'},
+            ]}
+
+    def fake_get(url, **kwargs):
+        class R:
+            status_code = 200
+            content = b'whatever'
+        return R() if url != 'https://feed/releases/latest' else FeedResp()
+
+    monkeypatch.setattr(convert_module.requests, 'get', fake_get)
+    monkeypatch.setattr('app.routes.settings._default_update_feed',
+                        lambda: 'https://feed/releases/latest')
+
+    def fake_stream(url, dest, timeout=600):
+        with open(dest, 'wb') as f:
+            f.write(b'whatever')
+        import hashlib as _hl
+        return _hl.sha256(b'whatever').hexdigest()
+
+    monkeypatch.setattr(convert_module, '_stream_download', fake_stream)
+    launched = []
+    monkeypatch.setattr(convert_module.subprocess, 'Popen',
+                        lambda cmd: launched.append(cmd))
+
+    with client.application.test_request_context():
+        resp, code = convert_module._windows_update_install()
+    assert code == 500
+    assert 'checksum' in resp.get_json()['message']
+    assert launched == []
+
+
+def test_spawn_workers_replaces_dead_ones(monkeypatch):
+    import threading
+    import time
+    orig_desired = convert_module._desired_workers
+    orig_active = convert_module._active_workers
+    convert_module._desired_workers = 2
+    convert_module._active_workers = 0
+    try:
+        convert_module._spawn_workers(2)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            living = [t for t in threading.enumerate()
+                      if t.name.startswith('audio-worker-')]
+            if len(living) >= 2 and convert_module._active_workers >= 2:
+                break
+            time.sleep(0.05)
+        assert convert_module._active_workers >= 2
+    finally:
+        convert_module._desired_workers = 0
+        deadline = time.time() + 10
+        while time.time() < deadline and convert_module._active_workers > 0:
+            time.sleep(0.05)
+        convert_module._desired_workers = orig_desired
+        convert_module._active_workers = orig_active
+
+
+def test_csv_export_neutralizes_formulas(client, tmp_path):
+    evil = tmp_path / "=SUM(1+1).flac"
+    evil.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/evil', format='FLAC',
+            output_path=str(evil), status='completed'))
+        db.session.commit()
+    resp = client.get('/api/library.csv')
+    assert resp.status_code == 200
+    body = resp.data.decode('utf-8')
+    assert "'=SUM(1+1).flac" in body
+    assert '\n=SUM' not in body
+
+
+def test_m3u_export_strips_newlines(client, tmp_path, monkeypatch):
+    track = tmp_path / 'track.flac'
+    track.write_bytes(b'fLaC')
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path=str(tmp_path), status='completed',
+            is_playlist=True, item_count=1, playlist_title='PL')
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/t', format='FLAC',
+            output_path=str(track), status='completed',
+            parent_id=pid, item_index=0))
+        db.session.commit()
+    monkeypatch.setattr(convert_module, '_stored_duration', lambda *a: 10)
+    monkeypatch.setattr(
+        convert_module, '_cached_metadata',
+        lambda path: {'title': 'Evil\n/injected/path', 'artist': 'A\r\nB'})
+    resp = client.get(f'/api/playlist/{pid}/m3u')
+    assert resp.status_code == 200
+    lines = resp.data.decode('utf-8').split('\n')
+    assert not any(l.startswith('/injected') for l in lines)
+    assert any('Evil /injected/path' in l for l in lines)
+
+
+def test_search_escapes_like_wildcards(client):
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/abc', format='FLAC',
+            output_path='/tmp/abc.flac', status='completed',
+            playlist_title='100% hits'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/def', format='FLAC',
+            output_path='/tmp/def.flac', status='completed',
+            playlist_title='100X hits'))
+        db.session.commit()
+    data = client.get('/api/search?q=100%25').get_json()
+    titles = [i['playlist_title'] for i in data['items']]
+    assert '100% hits' in titles
+    assert '100X hits' not in titles
+
+
+def test_conversions_limit_clamped(client):
+    for bad in ('-5', '0', '9999', 'abc'):
+        data = client.get(f'/api/conversions?limit={bad}').get_json()
+        assert isinstance(data, list) and len(data) <= 100
+
+
+def test_file_chapters_parsed(tmp_path):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        __import__('pytest').skip('ffmpeg not on PATH')
+    base = tmp_path / 'base.mp4'
+    r = subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'testsrc=duration=4:size=128x128:rate=10',
+         '-c:v', 'mpeg4', str(base)],
+        capture_output=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    meta = tmp_path / 'chapters.txt'
+    meta.write_text(
+        ';FFMETADATA1\n'
+        '[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Intro\n'
+        '[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4000\ntitle=Main\n')
+    out = tmp_path / 'chapters.mp4'
+    r = subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-i', str(base), '-i', str(meta),
+         '-map_metadata', '1', '-c', 'copy', str(out)],
+        capture_output=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+
+    chapters = convert_module._file_chapters(str(out))
+    assert len(chapters) == 2
+    assert chapters[0]['start'] == 0
+    assert chapters[0]['end'] == 2
+    assert chapters[0]['title'] == 'Intro'
+    assert chapters[1]['title'] == 'Main'
+    assert convert_module._file_chapters(str(base)) == []
+    assert convert_module._file_chapters(str(tmp_path / 'nope.mp4')) == []
+
+
+def test_chapters_endpoint(client, tmp_path):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        __import__('pytest').skip('ffmpeg not on PATH')
+    out = tmp_path / 'ep.mp4'
+    r = subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'testsrc=duration=2:size=128x128:rate=10',
+         '-c:v', 'mpeg4', str(out)],
+        capture_output=True, timeout=120)
+    assert r.returncode == 0
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/ch', format='MP4 Video',
+            output_path=str(out), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/ch').first()
+    data = client.get(f'/api/chapters/{row.id}').get_json()
+    assert data['ok'] is True
+    assert data['chapters'] == []
+    assert client.get('/api/chapters/999999').status_code == 404
+
+
+def test_lrc_parsing():
+    synced = ("[00:12.34] Hello\n"
+              "[01:02.50] World\n"
+              "[malformed line]\n"
+              "[02:00.00]   \n")
+    lines = convert_module._parse_lrc(synced)
+    assert lines == [{'t': 12.34, 'text': 'Hello'},
+                     {'t': 62.5, 'text': 'World'}]
+    assert convert_module._parse_lrc('') == []
+    assert convert_module._parse_lrc(None) == []
+
+
+def test_lyrics_endpoint_uses_stored_tags(client, tmp_path, monkeypatch):
+    track = tmp_path / 'song.flac'
+    track.write_bytes(b'fLaC')
+    seen = {}
+
+    def fake_fetch(artist, title, album='', duration=0):
+        seen.update(artist=artist, title=title, album=album)
+        return {'plain': 'la la', 'synced': [{'t': 1.0, 'text': 'la'}]}
+
+    monkeypatch.setattr(convert_module, '_fetch_lyrics', fake_fetch)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/ly', format='FLAC',
+            output_path=str(track), status='completed',
+            tag_title='Song', tag_artist='Band', tag_album='Rec'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/ly').first()
+    data = client.get(f'/api/lyrics/{row.id}').get_json()
+    assert data['ok'] is True
+    assert data['plain'] == 'la la'
+    assert data['synced'] == [{'t': 1.0, 'text': 'la'}]
+    assert seen == {'artist': 'Band', 'title': 'Song', 'album': 'Rec'}
+    assert client.get('/api/lyrics/999999').status_code == 404
+
+
+def test_rate_endpoint_clamps(client, tmp_path):
+    track = tmp_path / 'r.flac'
+    track.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/rt', format='FLAC',
+            output_path=str(track), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/rt').first().id
+    assert client.post(f'/api/rate/{row}',
+                       json={'rating': 4}).get_json() == {'ok': True, 'rating': 4}
+    assert client.post(f'/api/rate/{row}',
+                       json={'rating': 99}).get_json()['rating'] == 5
+    assert client.post(f'/api/rate/{row}',
+                       json={'rating': -3}).get_json()['rating'] == 0
+    assert client.post('/api/rate/999999',
+                       json={'rating': 3}).status_code == 404
+
+
+def test_smart_mixes_and_group_endpoints(client, tmp_path):
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/s1', format='FLAC',
+            output_path='/tmp/s1.flac', status='completed',
+            tag_artist='Band', tag_album='Rec', play_count=5, rating=5,
+            liked=True))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/s2', format='FLAC',
+            output_path='/tmp/s2.flac', status='completed',
+            tag_artist='Band', tag_album='Rec'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/s3', format='FLAC',
+            output_path='/tmp/s3.flac', status='pending'))
+        db.session.commit()
+    for key in ('played', 'recent', 'unplayed', 'liked', 'rated'):
+        data = client.get(f'/api/smart/{key}').get_json()
+        assert data['ok'] is True and data['key'] == key
+    played = client.get('/api/smart/played').get_json()['items']
+    assert [i['url'] for i in played] == ['https://youtu.be/s1']
+    assert client.get('/api/smart/bogus').status_code == 404
+
+    albums = client.get('/api/albums').get_json()['albums']
+    assert albums[0]['name'] == 'Rec' and albums[0]['tracks'] == 2
+    artists = client.get('/api/artists').get_json()['artists']
+    assert artists[0]['name'] == 'Band'
+    tracks = client.get('/api/album/tracks?name=Rec&by=album').get_json()
+    assert len(tracks['items']) == 2
+    assert client.get('/api/album/tracks?name=Nope&by=album').get_json() == {
+        'ok': True, 'items': []}
+
+
+def test_stats_listening_keys(client):
+    data = client.get('/api/stats').get_json()
+    for key in ('total_plays', 'listened', 'top_artists', 'top_tracks'):
+        assert key in data
+
+
+def test_tag_columns_migrate():
+    from app import _SCHEMA_MIGRATIONS
+    cols = dict(_SCHEMA_MIGRATIONS['conversion_history'])
+    for col in ('tag_title', 'tag_artist', 'tag_album', 'rating'):
+        assert col in cols
+
+
+def test_adopt_folder_and_skip_existing(client, tmp_path):
+    music = tmp_path / 'music'
+    (music / 'sub').mkdir(parents=True)
+    (music / 'a.flac').write_bytes(b'fLaC')
+    (music / 'sub' / 'b.mp3').write_bytes(b'ID3')
+    (music / 'notes.txt').write_bytes(b'nope')
+    (music / '.hidden.flac').write_bytes(b'fLaC')
+    data = client.post('/api/adopt', json={'path': str(music)}).get_json()
+    assert data['ok'] is True
+    assert data['added'] == 2
+    assert data['scanned'] >= 3
+    again = client.post('/api/adopt', json={'path': str(music)}).get_json()
+    assert again['added'] == 0 and again['skipped'] == 2
+    assert client.post('/api/adopt', json={'path': '/nope'}).status_code == 400
+    with client.application.app_context():
+        row = ConversionHistory.query.filter(
+            ConversionHistory.output_path.like('%b.mp3')).first()
+        assert row is not None and row.format == 'MP3'
+        assert row.status == 'completed'
+
+
+def test_upload_imports_files(client, tmp_path):
+    import io
+    data = {
+        'files': [(io.BytesIO(b'fLaC'), 'song.flac'),
+                  (io.BytesIO(b'x'), 'evil.exe')],
+    }
+    resp = client.post('/api/upload', data=data,
+                       content_type='multipart/form-data')
+    body = resp.get_json()
+    assert body['ok'] is True and body['added'] == 1
+    assert body['skipped'] == ['evil.exe']
+
+
+def test_bulk_tags(client, tmp_path):
+    import subprocess as _sp
+    one = tmp_path / 'one.flac'
+    two = tmp_path / 'two.flac'
+    for p in (one, two):
+        _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+                 '-i', 'sine=frequency=440:duration=1', '-c:a', 'flac',
+                 str(p)], check=True)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/b1', format='FLAC',
+            output_path=str(one), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/b2', format='FLAC',
+            output_path=str(two), status='completed'))
+        db.session.commit()
+        ids = [r.id for r in ConversionHistory.query.filter(
+            ConversionHistory.url.like('https://youtu.be/b%')).all()]
+    data = client.post('/api/tags/bulk',
+                       json={'ids': ids, 'artist': 'Band'}).get_json()
+    assert data == {'ok': True, 'updated': 2, 'failed': 0}
+    assert client.post('/api/tags/bulk',
+                       json={'ids': ids}).status_code == 400
+    with client.application.app_context():
+        assert ConversionHistory.query.get(ids[0]).tag_artist == 'Band'
+
+
+def test_tidy_moves_into_artist_album(client, tmp_path, monkeypatch):
+    track = tmp_path / 'song.flac'
+    track.write_bytes(b'fLaC')
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    import app.routes.convert as cm
+    monkeypatch.setattr(cm, 'effective_output_path', lambda: str(outdir))
+    monkeypatch.setattr(cm, '_stored_tags',
+                        lambda row: ('Song', 'Band', 'Rec'))
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/td', format='FLAC',
+            output_path=str(track), status='completed'))
+        db.session.commit()
+    data = client.post('/api/tidy').get_json()
+    assert data == {'ok': True, 'moved': 1, 'skipped': 0, 'already': 0}
+    assert (outdir / 'Band' / 'Rec' / 'song.flac').is_file()
+
+
+def test_pause_resume_cycle(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/pz', format='FLAC',
+            output_path='/tmp/pz.flac', status='downloading'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/pz').first().id
+    assert client.get(f'/api/pause/{row}').get_json() == {
+        'ok': True, 'paused': 1}
+    with client.application.app_context():
+        assert db.session.get(ConversionHistory, row).status == 'paused'
+        assert row in convert_module._paused_jobs
+    assert client.get(f'/api/resume/{row}').get_json() == {
+        'ok': True, 'resumed': 1}
+    with client.application.app_context():
+        assert db.session.get(ConversionHistory, row).status == 'pending'
+        assert row not in convert_module._paused_jobs
+    # Resume drains the requeued job through the (mocked) worker top-check.
+    assert client.get(f'/api/resume/{row}').status_code == 400
+    assert client.get('/api/pause/999999').status_code == 404
+
+
+def test_pause_rejects_finished(client, tmp_path):
+    track = tmp_path / 'done.flac'
+    track.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/dn', format='FLAC',
+            output_path=str(track), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/dn').first().id
+    assert client.get(f'/api/pause/{row}').status_code == 400
+
+
+def test_download_uses_continue_flag(client, monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeStdout:
+        def readline(self):
+            return ''
+
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = FakeStdout()
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        seen['cmd'] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(convert_module.subprocess, 'Popen', fake_popen)
+    target = str(tmp_path / 'part.tmp')
+    convert_module.download_audio(
+        'https://www.youtube.com/watch?v=x', target, job=None)
+    assert '--continue' in seen['cmd']
+
+
+def test_transcode_creates_sibling_row(client, tmp_path):
+    import subprocess as _sp
+    src = tmp_path / 'song.flac'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=2', '-c:a', 'flac',
+             str(src)], check=True)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/tc', format='FLAC',
+            output_path=str(src), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/tc').first().id
+    data = client.post('/api/transcode',
+                       json={'ids': [row], 'format': 'wav'}).get_json()
+    assert data == {'ok': True, 'converted': 1, 'failed': []}
+    wav = tmp_path / 'song.wav'
+    assert wav.is_file()
+    with client.application.app_context():
+        new = ConversionHistory.query.filter_by(
+            output_path=str(wav)).first()
+        assert new is not None and new.format == 'WAV'
+        assert new.duration > 0
+    assert client.post('/api/transcode',
+                       json={'ids': [row], 'format': 'mp3'}).status_code == 400
+    assert client.post('/api/transcode',
+                       json={'ids': [999999], 'format': 'wav'}).get_json() == {
+        'ok': True, 'converted': 0, 'failed': [999999]}
+
+
+def test_resume_interrupted_requeues(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/z1', format='FLAC',
+            output_path='/tmp/z1.flac', status='downloading'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/z2', format='FLAC',
+            output_path='/tmp/z2.flac', status='completed'))
+        db.session.commit()
+    assert convert_module._resume_interrupted() == 1
+    with client.application.app_context():
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/z1').first()
+        assert row.status == 'pending'
+    assert convert_module._resume_interrupted() == 0
+
+
+def test_bandwidth_offpeak_window(client):
+    from datetime import datetime
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.bandwidth_limit = 500
+        settings.offpeak_limit = 100
+        settings.offpeak_start = 22
+        settings.offpeak_end = 7
+        db.session.commit()
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 1, 23, 0)) == 100
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 1, 3, 0)) == 100
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 1, 12, 0)) == 500
+        settings.offpeak_limit = 0
+        db.session.commit()
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 1, 23, 0)) == 500
+
+
+def test_settings_new_fields_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'offpeak_limit': '250',
+        'offpeak_start': '21',
+        'offpeak_end': '6',
+        'auto_update_ytdlp': 'on',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.offpeak_limit == 250
+        assert settings.offpeak_start == 21
+        assert settings.offpeak_end == 6
+        assert settings.auto_update_ytdlp is True
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('name="offpeak_limit"', 'name="offpeak_start"',
+                   'name="offpeak_end"', 'name="auto_update_ytdlp"'):
+        assert marker in page
+
+
+def test_quality_line_parsing():
+    line = convert_module._quality_line(
+        '  Stream #0:0: Audio: flac, 44100 Hz, stereo, s16 (default)')
+    assert line == 'FLAC · 44.1 kHz · stereo'
+    assert convert_module._quality_line('no streams here') == ''
+    assert convert_module._quality_line('') == ''
+
+
+def test_notices_logged_and_served(client):
+    from app.models import Notice
+    with client.application.app_context():
+        convert_module._log_notice('Hello', 'World')
+        assert Notice.query.count() == 1
+    data = client.get('/api/notices').get_json()
+    assert data['ok'] is True and data['unread'] == 1
+    assert data['items'][0]['title'] == 'Hello'
+    assert client.post('/api/notices/read').get_json() == {'ok': True}
+    assert client.get('/api/notices').get_json()['unread'] == 0
+    assert client.post('/api/notices/read?clear=1').get_json() == {'ok': True}
+    with client.application.app_context():
+        assert Notice.query.count() == 0
+
+
+def test_first_run_endpoint(client):
+    assert client.get('/api/first-run').get_json() == {
+        'ok': True, 'first_run': True}
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/x', format='FLAC',
+            output_path='/tmp/x.flac', status='completed'))
+        db.session.commit()
+    assert client.get('/api/first-run').get_json() == {
+        'ok': True, 'first_run': False}
+
+
+def test_default_format_setting(client):
+    from app.models import UserSettings
+    with client.application.app_context():
+        if not UserSettings.query.first():
+            db.session.add(UserSettings(output_path='/tmp/x'))
+            db.session.commit()
+    page = client.get('/').data.decode('utf-8')
+    assert 'option value="flac" selected' in page
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x', 'default_format': 'wav'})
+    assert resp.status_code == 302
+    page = client.get('/').data.decode('utf-8')
+    assert 'option value="wav" selected' in page
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x', 'default_format': 'bogus'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        assert UserSettings.query.first().default_format == 'flac'
+
+
+def test_library_paging_and_search(client, tmp_path):
+    for i in range(3):
+        (tmp_path / f'p{i}.flac').write_bytes(b'fLaC')
+    with client.application.app_context():
+        for i in range(3):
+            db.session.add(ConversionHistory(
+                url=f'https://youtu.be/p{i}', format='FLAC',
+                output_path=str(tmp_path / f'p{i}.flac'), status='completed',
+                tag_title=f'Song {i}', tag_artist='Band'))
+        db.session.commit()
+    data = client.get('/api/library?limit=2').get_json()
+    assert data['ok'] is True and data['total'] == 3
+    assert len(data['items']) == 2
+    data = client.get('/api/library?limit=2&offset=2').get_json()
+    assert len(data['items']) == 1
+    data = client.get('/api/library?q=Song 1').get_json()
+    assert data['total'] == 1
+    data = client.get('/api/library?q=100%').get_json()
+    assert data['total'] == 0
+
+
+def test_cover_cache_pruned(tmp_path, monkeypatch):
+    import os as _os
+    import tempfile
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
+    target = _os.path.join(str(tmp_path), 'audio-converter-covers')
+    _os.makedirs(target, exist_ok=True)
+    for i in range(5):
+        with open(_os.path.join(target, f'{i}.jpg'), 'wb') as f:
+            f.write(b'x')
+    monkeypatch.setattr(convert_module, '_COVER_CACHE_CAP', 3)
+    removed = convert_module._prune_cover_cache()
+    assert removed == 2
+    assert len(_os.listdir(target)) == 3
+
+
+def test_vacuum_endpoint(client, tmp_path):
+    data = client.post('/api/maintenance/vacuum').get_json()
+    assert data['ok'] is True
+    assert data['db_bytes'] > 0
+    assert 'covers_pruned' in data
+
+
+def test_autostart_toggle_linux(client, tmp_path, monkeypatch):
+    import sys as _sys
+    monkeypatch.setattr(_sys, 'platform', 'linux')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    data = client.get('/api/autostart').get_json()
+    assert data == {'ok': True, 'supported': True, 'enabled': False,
+                    'platform': 'linux'}
+    body = client.post('/api/autostart', json={'enabled': True}).get_json()
+    assert body['ok'] is True and body['enabled'] is True
+    desktop_file = (tmp_path / '.config' / 'autostart'
+                    / 'audioconverter.desktop')
+    assert desktop_file.is_file()
+    assert 'Exec=' in desktop_file.read_text()
+    body = client.post('/api/autostart', json={'enabled': False}).get_json()
+    assert body['ok'] is True and body['enabled'] is False
+    assert not desktop_file.exists()
+
+
+def test_clear_covers_endpoint(client, tmp_path, monkeypatch):
+    import os as _os
+    import tempfile
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
+    target = _os.path.join(str(tmp_path), 'audio-converter-covers')
+    _os.makedirs(target, exist_ok=True)
+    for i in range(3):
+        with open(_os.path.join(target, f'{i}.jpg'), 'wb') as f:
+            f.write(b'x')
+    data = client.post('/api/maintenance/clear-covers').get_json()
+    assert data == {'ok': True, 'cleared': 3}
+    assert _os.listdir(target) == []
+
+
+def test_subscription_check_notifies_on_new_tracks(client, monkeypatch):
+    from app.models import Notice, Subscription
+    from datetime import datetime, timedelta
+    monkeypatch.setattr(
+        convert_module, 'check_subscription',
+        lambda sub_id: {'ok': True, 'added': 2})
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path='/tmp/pl', status='completed',
+            is_playlist=True, item_count=0)
+        db.session.add(parent)
+        db.session.commit()
+        sub = Subscription(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path='/tmp/pl', playlist_title='Mix',
+            parent_id=parent.id, interval_hours=24, active=True,
+            last_checked=datetime.utcnow() - timedelta(hours=25))
+        db.session.add(sub)
+        db.session.commit()
+        convert_module._check_due_subscriptions()
+        assert Notice.query.filter(
+            Notice.title == 'New tracks available').count() == 1
+
+
+def test_perform_ytdlp_update_success(tmp_path, monkeypatch):
+    import hashlib
+    import sys as _sys
+    import types
+    new_bytes = b'fresh-ytdlp-binary'
+    digest = hashlib.sha256(new_bytes).hexdigest()
+    if _sys.platform == 'darwin':
+        asset = 'yt-dlp_macos'
+    elif _sys.platform.startswith('win'):
+        asset = 'yt-dlp.exe'
+    else:
+        asset = 'yt-dlp_linux'
+    exe = tmp_path / 'yt-dlp'
+    exe.write_bytes(b'stale-binary')
+
+    monkeypatch.setattr(convert_module, '_find_ytdlp', lambda: str(exe))
+    monkeypatch.setattr(
+        convert_module, '_latest_ytdlp_release',
+        lambda: {'version': '2099.01.01',
+                 'assets': {asset: 'https://x/bin',
+                            'SHA2-256SUMS': 'https://x/sums'}})
+
+    sums = f'{digest}  {asset}\n'
+
+    class FakeResp:
+        status_code = 200
+        text = sums
+
+    class FakeSession:
+        def __init__(self):
+            self.cookies = types.SimpleNamespace(clear=lambda: None)
+
+        def get(self, url, **kwargs):
+            return FakeResp()
+
+    def fake_stream(url, dest, timeout=300):
+        with open(dest, 'wb') as f:
+            f.write(new_bytes)
+        return hashlib.sha256(new_bytes).hexdigest()
+
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    monkeypatch.setattr(convert_module, '_stream_download', fake_stream)
+    ok, message, version = convert_module._perform_ytdlp_update()
+    assert ok is True and version == '2099.01.01'
+    assert '2099.01.01' in message
+    assert exe.read_bytes() == new_bytes
+
+
+def test_version_tuple_edges():
+    from app import _version_tuple
+    assert _version_tuple('v1.2.3') == (1, 2, 3)
+    assert _version_tuple('1.2.3') == (1, 2, 3)
+    assert _version_tuple('2026.08.19') == (2026, 8, 19)
+    assert _version_tuple('garbage') == ()
+    assert _version_tuple('') == ()
+    assert _version_tuple(None) == ()
+    assert _version_tuple('v1.2.3-beta') == ()
+    assert (1, 2) < (1, 2, 3)
+    assert _version_tuple('v1.10.0') > _version_tuple('v1.9.9')
+
+
+def test_find_asset_by_suffix_edges():
+    assert convert_module._find_asset_by_suffix({}, ('.dmg',)) == (None, None)
+    assert convert_module._find_asset_by_suffix({'assets': None}, ('.dmg',)) == (None, None)
+    assert convert_module._find_asset_by_suffix(
+        {'assets': [{'name': 'a.dmg'}]}, ('.dmg',)) == (None, None)
+    assert convert_module._find_asset_by_suffix(
+        {'assets': [{'name': '', 'browser_download_url': 'https://x'}]},
+        ('.dmg',)) == (None, None)
+    assert convert_module._find_asset_by_suffix('not-a-dict', ('.dmg',)) == (None, None)
+
+
+def test_macos_update_install_unfrozen(client):
+    with client.application.test_request_context():
+        resp, code = convert_module._macos_update_install()
+    assert code == 400
+    assert resp.get_json()['ok'] is False
+
+
+def test_update_check_custom_shape(client, monkeypatch):
+    import app.routes.settings as settings_module
+    monkeypatch.setenv('AUDIO_CONVERTER_UPDATE_FEED',
+                       'https://example.com/feed.json')
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {'version': 'v99.0', 'url': 'https://example.com/dl'}
+
+    monkeypatch.setattr(settings_module.requests, 'get',
+                        lambda url, **kw: FakeResp())
+    data = client.get('/api/update-check').get_json()
+    assert data['update_available'] is True
+    assert data['latest'] == 'v99.0'
+    assert data['url'] == 'https://example.com/dl'

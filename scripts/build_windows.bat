@@ -5,6 +5,12 @@ REM Output: dist\AudioConverter-Setup-<version>.exe
 REM
 REM For the person installing: run the Setup file, click through the
 REM wizard, launch from the Start menu. Everything needed is inside.
+REM
+REM Code signing (kills SmartScreen warnings) is automatic when these
+REM environment variables are set (CI secrets of the same names):
+REM   WINDOWS_CERT_BASE64    PFX certificate, base64-encoded
+REM   WINDOWS_CERT_PASSWORD  PFX password
+REM Without them the build stays unsigned and still works.
 setlocal
 cd /d "%~dp0.."
 
@@ -71,6 +77,25 @@ if errorlevel 1 (
 
 echo ==^> Building the Setup wizard
 makensis /DVERSION=%VERSION% scripts\installer.nsi
+
+if not "%WINDOWS_CERT_BASE64%"=="" (
+    echo ==^> Signing binaries ^(Authenticode^)
+    powershell -NoProfile -Command "[IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))"
+    where signtool >nul 2>nul
+    if errorlevel 1 (
+        for /f "delims=" %%S in ('dir /b /s "C:\Program Files (x86)\Windows Kits\signtool.exe" 2^>nul') do set "SIGNTOOL=%%S"
+    ) else (
+        for /f "delims=" %%S in ('where signtool') do set "SIGNTOOL=%%S"
+    )
+    if defined SIGNTOOL (
+        "%SIGNTOOL%" sign /f cert.pfx /p "%WINDOWS_CERT_PASSWORD%" /tr http://timestamp.digicert.com /td sha256 /fd sha256 "dist\AudioConverter\AudioConverter.exe" "dist\AudioConverter-Setup-%VERSION%.exe"
+    ) else (
+        echo WARNING: signtool not found, skipping signing >&2
+    )
+    del cert.pfx 2>nul
+) else (
+    echo ==^> Skipping code signing ^(WINDOWS_CERT_BASE64 not set^)
+)
 
 echo.
 echo Build complete: dist\AudioConverter-Setup-%VERSION%.exe

@@ -5,6 +5,7 @@
     'use strict';
 
     var library = [];
+    var selectedIds = {};
     var userPlaylists = [];
     var lastCoverId = null;
     var lastSnapshotSig = '';
@@ -71,13 +72,17 @@
         if (sortSel) sort = sortSel.value;
         var rows = library.filter(function (item) {
             if (likedOnly && !item.liked) return false;
-            if (q && (trackTitle(item) + ' ' + (item.output_path || '')).toLowerCase().indexOf(q) === -1) {
+            if (q && (trackTitle(item) + ' ' + (item.output_path || '') + ' ' +
+                      (item.tag_title || '') + ' ' + (item.tag_artist || '') + ' ' +
+                      (item.tag_album || '')).toLowerCase().indexOf(q) === -1) {
                 return false;
             }
             return true;
         });
         if (sort === 'played') {
             rows.sort(function (a, b) { return (b.play_count || 0) - (a.play_count || 0); });
+        } else if (sort === 'rated') {
+            rows.sort(function (a, b) { return (b.rating || 0) - (a.rating || 0); });
         } else if (sort === 'name') {
             rows.sort(function (a, b) {
                 return trackTitle(a).localeCompare(trackTitle(b));
@@ -112,6 +117,18 @@
             card.appendChild(info);
             var actions = document.createElement('div');
             actions.className = 'lib-actions';
+            var select = document.createElement('input');
+            select.type = 'checkbox';
+            select.className = 'form-check-input lib-select';
+            select.title = 'Select for bulk tagging';
+            select.checked = !!selectedIds[item.id];
+            select.setAttribute('data-select', item.id);
+            select.addEventListener('change', function () {
+                if (select.checked) selectedIds[item.id] = true;
+                else delete selectedIds[item.id];
+                renderBulkBar();
+            });
+            actions.appendChild(select);
             var play = document.createElement('button');
             play.type = 'button';
             play.className = 'btn btn-sm btn-primary';
@@ -126,6 +143,21 @@
             like.setAttribute('data-like', item.id);
             like.textContent = item.liked ? '♥' : '♡';
             actions.appendChild(like);
+            var stars = document.createElement('span');
+            stars.className = 'lib-stars';
+            stars.title = 'Rate this track';
+            for (var s = 1; s <= 5; s++) {
+                (function (value) {
+                    var star = document.createElement('button');
+                    star.type = 'button';
+                    star.className = 'lib-star' + (value <= (item.rating || 0) ? ' on' : '');
+                    star.textContent = value <= (item.rating || 0) ? '★' : '☆';
+                    star.setAttribute('data-rate', item.id + ':' + value);
+                    star.title = value + ' star' + (value > 1 ? 's' : '');
+                    stars.appendChild(star);
+                })(s);
+            }
+            actions.appendChild(stars);
             if (userPlaylists.length) {
                 var sel = document.createElement('select');
                 sel.className = 'form-select form-select-sm lib-pl-select';
@@ -172,6 +204,375 @@
             });
             grid.appendChild(more);
         }
+    }
+
+    // ------------------------------------------------------------- smart mixes
+
+    var SMART_MIXES = [
+        { key: 'played', label: 'Most played' },
+        { key: 'recent', label: 'Recently added' },
+        { key: 'unplayed', label: 'Unplayed' },
+        { key: 'liked', label: 'Liked' },
+        { key: 'rated', label: 'Top rated' },
+    ];
+
+    function loadSmartMixes() {
+        var box = document.getElementById('tabSmart');
+        if (!box) return;
+        box.innerHTML = '';
+        SMART_MIXES.forEach(function (mix) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm btn-outline-primary';
+            btn.textContent = '\u25B6 ' + mix.label;
+            btn.addEventListener('click', function () {
+                fetch('/api/smart/' + mix.key)
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        var items = (data.items || []).filter(function (it) {
+                            return it.file_exists;
+                        });
+                        if (!items.length) {
+                            if (typeof toast === 'function') toast('Nothing in this mix yet.', 'info');
+                            return;
+                        }
+                        if (window.AudioPlayer) {
+                            window.AudioPlayer.playItems(items, 0, mix.label);
+                        }
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not load this mix.', 'danger');
+                    });
+            });
+            box.appendChild(btn);
+        });
+    }
+
+    // ------------------------------------------------------------- groups
+
+    var libView = 'tracks';
+
+    function fmtDur(seconds) {
+        seconds = Math.max(0, Math.round(Number(seconds) || 0));
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
+        return h ? h + 'h ' + m + 'm' : m + 'm';
+    }
+
+    function renderGroups(kind) {
+        var grid = document.getElementById('libGrid');
+        var groups = document.getElementById('libGroups');
+        if (!grid || !groups) return;
+        grid.classList.add('d-none');
+        groups.classList.remove('d-none');
+        groups.innerHTML = '';
+        var loading = document.createElement('span');
+        loading.className = 'text-muted small';
+        loading.textContent = 'Loading…';
+        groups.appendChild(loading);
+        fetch(kind === 'albums' ? '/api/albums' : '/api/artists')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var list = data.albums || data.artists || [];
+                groups.innerHTML = '';
+                if (!list.length) {
+                    groups.innerHTML = '<span class="text-muted small">Nothing here yet.</span>';
+                    return;
+                }
+                list.forEach(function (g) {
+                    var card = document.createElement('button');
+                    card.type = 'button';
+                    card.className = 'lib-group-card';
+                    var img = document.createElement('img');
+                    img.className = 'lib-cover';
+                    img.alt = '';
+                    img.loading = 'lazy';
+                    img.src = '/api/cover/' + g.cover_id + '?size=thumb';
+                    img.onerror = function () { img.classList.add('d-none'); };
+                    card.appendChild(img);
+                    var info = document.createElement('div');
+                    info.className = 'lib-info';
+                    var name = document.createElement('div');
+                    name.className = 'lib-title';
+                    name.textContent = g.name;
+                    info.appendChild(name);
+                    var sub = document.createElement('div');
+                    sub.className = 'lib-sub text-muted small';
+                    sub.textContent = g.tracks + ' track' + (g.tracks === 1 ? '' : 's') + ' · ' + fmtDur(g.seconds);
+                    info.appendChild(sub);
+                    card.appendChild(info);
+                    card.addEventListener('click', function () {
+                        drillGroup(kind, g.name);
+                    });
+                    groups.appendChild(card);
+                });
+            })
+            .catch(function () {
+                groups.innerHTML = '<span class="text-muted small">Could not load.</span>';
+            });
+    }
+
+    function drillGroup(kind, name) {
+        var groups = document.getElementById('libGroups');
+        if (!groups) return;
+        var by = kind === 'albums' ? 'album' : 'artist';
+        fetch('/api/album/tracks?name=' + encodeURIComponent(name) + '&by=' + by)
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var items = (data.items || []).filter(function (it) { return it.file_exists; });
+                groups.innerHTML = '';
+                var back = document.createElement('button');
+                back.type = 'button';
+                back.className = 'btn btn-sm btn-outline-secondary mb-2';
+                back.textContent = '\u2190 All ' + kind;
+                back.addEventListener('click', function () { renderGroups(kind); });
+                groups.appendChild(back);
+                if (!items.length) {
+                    var none = document.createElement('div');
+                    none.className = 'text-muted small';
+                    none.textContent = 'No playable tracks.';
+                    groups.appendChild(none);
+                    return;
+                }
+                var playAll = document.createElement('button');
+                playAll.type = 'button';
+                playAll.className = 'btn btn-sm btn-primary mb-2 ms-2';
+                playAll.textContent = '\u25B6 Play all (' + items.length + ')';
+                playAll.addEventListener('click', function () {
+                    if (window.AudioPlayer) window.AudioPlayer.playItems(items, 0, name);
+                });
+                groups.appendChild(playAll);
+                var list = document.createElement('ul');
+                list.className = 'list-group list-group-flush tab-queue';
+                items.forEach(function (it, idx) {
+                    var li = document.createElement('li');
+                    li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                    var label = document.createElement('span');
+                    label.className = 'text-truncate';
+                    label.textContent = (idx + 1) + '. ' + trackTitle(it);
+                    li.appendChild(label);
+                    var btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'btn btn-sm btn-outline-secondary';
+                    btn.textContent = '\u25B6';
+                    btn.addEventListener('click', function () {
+                        if (window.AudioPlayer) window.AudioPlayer.playItems(items, idx, name);
+                    });
+                    li.appendChild(btn);
+                    list.appendChild(li);
+                });
+                groups.appendChild(list);
+            })
+            .catch(function () {});
+    }
+
+    function setLibView(view) {
+        libView = view;
+        ['Tracks', 'Albums', 'Artists'].forEach(function (v) {
+            var btn = document.getElementById('libView' + v);
+            if (btn) btn.classList.toggle('active', v.toLowerCase() === view);
+        });
+        var grid = document.getElementById('libGrid');
+        var groups = document.getElementById('libGroups');
+        if (view === 'tracks') {
+            if (groups) groups.classList.add('d-none');
+            if (grid) grid.classList.remove('d-none');
+            renderLibrary();
+        } else {
+            renderGroups(view);
+        }
+    }
+
+    // ------------------------------------------------------------- library tools
+
+    function selectedList() {
+        return Object.keys(selectedIds).map(Number).filter(function (id) {
+            return library.some(function (it) { return it.id === id; });
+        });
+    }
+
+    function renderBulkBar() {
+        var bar = document.getElementById('libBulkBar');
+        var count = document.getElementById('libBulkCount');
+        if (!bar || !count) return;
+        var n = selectedList().length;
+        bar.classList.toggle('d-none', n === 0);
+        count.textContent = n + ' selected';
+    }
+
+    function initLibraryTools() {
+        var adoptBtn = document.getElementById('libAdoptBtn');
+        var adoptForm = document.getElementById('libAdoptForm');
+        if (adoptBtn && adoptForm) {
+            adoptBtn.addEventListener('click', function () {
+                adoptForm.classList.toggle('d-none');
+            });
+            adoptForm.addEventListener('submit', function (e) {
+                e.preventDefault();
+                var input = document.getElementById('libAdoptPath');
+                var path = input ? input.value.trim() : '';
+                if (!path) return;
+                postJSON('/api/adopt', { path: path })
+                    .then(function (res) {
+                        if (typeof toast === 'function') {
+                            toast(res.ok
+                                ? ('Adopted ' + res.added + ' file(s)' +
+                                   (res.skipped ? ', ' + res.skipped + ' already tracked' : '') +
+                                   (res.truncated ? ' (capped — run again for the rest)' : '') + '.')
+                                : (res.message || 'Could not adopt.'), res.ok ? 'success' : 'danger');
+                        }
+                        if (res.ok) loadLibrary();
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not adopt.', 'danger');
+                    });
+            });
+        }
+        var tidyBtn = document.getElementById('libTidyBtn');
+        if (tidyBtn) {
+            tidyBtn.addEventListener('click', function () {
+                if (!confirm('Move library files into Artist / Album folders from their tags?')) return;
+                postJSON('/api/tidy', {})
+                    .then(function (res) {
+                        if (typeof toast === 'function') {
+                            toast(res.ok
+                                ? ('Moved ' + res.moved + ' file(s)' +
+                                   (res.skipped ? ', ' + res.skipped + ' skipped (no tags)' : '') + '.')
+                                : (res.message || 'Could not tidy.'), res.ok ? 'success' : 'danger');
+                        }
+                        if (res.ok) loadLibrary();
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not tidy.', 'danger');
+                    });
+            });
+        }
+        var coversBtn = document.getElementById('libCoversBtn');
+        if (coversBtn) {
+            coversBtn.addEventListener('click', function () {
+                postJSON('/api/covers/backfill', {})
+                    .then(function (res) {
+                        if (typeof toast === 'function') {
+                            toast(res.ok
+                                ? ('Covers: ' + res.filled + ' fetched, ' + res.has_art + ' already had art' +
+                                   (res.missing_url ? ', ' + res.missing_url + ' without source link' : '') + '.')
+                                : (res.message || 'Could not fetch covers.'), res.ok ? 'success' : 'danger');
+                        }
+                        if (res.ok && res.filled) loadLibrary();
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not fetch covers.', 'danger');
+                    });
+            });
+        }
+        var apply = document.getElementById('libBulkApply');
+        if (apply) {
+            apply.addEventListener('click', function () {
+                var ids = selectedList();
+                var artist = document.getElementById('libBulkArtist');
+                var album = document.getElementById('libBulkAlbum');
+                var title = document.getElementById('libBulkTitle');
+                postJSON('/api/tags/bulk', {
+                    ids: ids,
+                    artist: artist ? artist.value : '',
+                    album: album ? album.value : '',
+                    title: title ? title.value : '',
+                })
+                    .then(function (res) {
+                        if (typeof toast === 'function') {
+                            toast(res.ok
+                                ? ('Tagged ' + res.updated + ' track(s)' +
+                                   (res.failed ? ', ' + res.failed + ' failed' : '') + '.')
+                                : (res.message || 'Could not write tags.'), res.ok ? 'success' : 'danger');
+                        }
+                        if (res.ok) {
+                            selectedIds = {};
+                            renderBulkBar();
+                            loadLibrary();
+                        }
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not write tags.', 'danger');
+                    });
+            });
+        }
+        var clear = document.getElementById('libBulkClear');
+        if (clear) {
+            clear.addEventListener('click', function () {
+                selectedIds = {};
+                renderBulkBar();
+                renderLibrary();
+            });
+        }
+        initDropImport();
+    }
+
+    var AUDIO_EXTS = ['flac', 'm4a', 'alac', 'wav', 'ogg', 'opus', 'mp3',
+                      'mp4', 'webm', 'mkv', 'mov', 'avi'];
+
+    function initDropImport() {
+        var grid = document.getElementById('libGrid');
+        if (!grid || grid.dataset.dropInit) return;
+        grid.dataset.dropInit = '1';
+        ['dragenter', 'dragover'].forEach(function (ev) {
+            grid.addEventListener(ev, function (e) {
+                e.preventDefault();
+                grid.classList.add('lib-drop');
+            });
+        });
+        ['dragleave', 'drop'].forEach(function (ev) {
+            grid.addEventListener(ev, function (e) {
+                e.preventDefault();
+                grid.classList.remove('lib-drop');
+            });
+        });
+        grid.addEventListener('drop', function (e) {
+            var files = (e.dataTransfer && e.dataTransfer.files) || [];
+            if (!files.length) return;
+            var lists = [];
+            var uploads = [];
+            Array.from(files).forEach(function (f) {
+                var name = f.name || '';
+                var ext = name.split('.').pop().toLowerCase();
+                if (ext === 'm3u' || ext === 'm3u8') lists.push(f);
+                else if (AUDIO_EXTS.indexOf(ext) >= 0) uploads.push(f);
+            });
+            lists.forEach(function (f) {
+                if (window.AudioPlayer && window.AudioPlayer.importFile) {
+                    window.AudioPlayer.importFile(f);
+                }
+            });
+            if (uploads.length) uploadFiles(uploads);
+            if (!lists.length && !uploads.length && typeof toast === 'function') {
+                toast('Drop audio files or .m3u playlists.', 'info');
+            }
+        });
+    }
+
+    function uploadFiles(files) {
+        var form = new FormData();
+        Array.from(files).slice(0, 50).forEach(function (f) {
+            form.append('files', f, f.name);
+        });
+        var token = '';
+        try {
+            token = typeof csrfToken === 'function' ? csrfToken() : '';
+        } catch (err) {}
+        if (token) form.append('csrf_token', token);
+        fetch('/api/upload', { method: 'POST', body: form })
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
+                if (typeof toast === 'function') {
+                    toast(res.ok
+                        ? ('Imported ' + res.added + ' file(s)' +
+                           (res.skipped && res.skipped.length ? ', skipped: ' + res.skipped.join(', ') : '') + '.')
+                        : (res.message || 'Could not import.'), res.ok ? 'success' : 'danger');
+                }
+                if (res.ok) loadLibrary();
+            })
+            .catch(function () {
+                if (typeof toast === 'function') toast('Could not import.', 'danger');
+            });
     }
 
     // ------------------------------------------------------------- playlists
@@ -456,11 +857,11 @@
                         rm.textContent = 'Delete';
                         rm.title = 'Delete file from disk';
                         rm.addEventListener('click', function () {
-                            if (!confirm('Delete this file from disk?')) return;
+                            if (!confirm('Move this file to the Trash?')) return;
                             postJSON('/api/delete/' + item.id, {})
                                 .then(function (res) {
                                     if (typeof toast === 'function') {
-                                        toast(res.ok ? 'Deleted.' : (res.message || 'Could not delete.'),
+                                        toast(res.ok ? (res.message || 'Deleted.') : (res.message || 'Could not delete.'),
                                               res.ok ? 'success' : 'danger');
                                     }
                                     loadDupes();
@@ -501,6 +902,14 @@
         loadRecent();
         loadDupes();
         loadStats();
+        loadSmartMixes();
+        initLibraryTools();
+        ['Tracks', 'Albums', 'Artists'].forEach(function (v) {
+            var btn = document.getElementById('libView' + v);
+            if (btn) {
+                btn.addEventListener('click', function () { setLibView(v.toLowerCase()); });
+            }
+        });
         wirePlaybackState();
         document.addEventListener('trackplayed', function () {
             setTimeout(loadRecent, 1500);
@@ -546,6 +955,20 @@
     }
 
     document.addEventListener('click', function (e) {
+            const rate = e.target.closest ? e.target.closest('[data-rate]') : null;
+            if (rate) {
+                const parts = String(rate.dataset.rate).split(':');
+                postJSON('/api/rate/' + parts[0], { rating: Number(parts[1]) })
+                    .then(function (res) {
+                        if (!res.ok) return;
+                        const item = library.find(function (it) { return String(it.id) === String(parts[0]); });
+                        if (item) item.rating = res.rating;
+                        renderLibrary();
+                    })
+                    .catch(function () {});
+                e.preventDefault();
+                return;
+            }
             const like = e.target.closest ? e.target.closest('[data-like]') : null;
             if (!like) return;
             postJSON('/api/like/' + like.dataset.like, {})

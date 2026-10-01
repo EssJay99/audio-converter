@@ -19,12 +19,14 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import socket
 import sys
 import threading
 import time
 import urllib.request
+from logging.handlers import RotatingFileHandler
 
 APP_NAME = 'AudioConverter'
 DEFAULT_HOST = '127.0.0.1'
@@ -44,6 +46,36 @@ def get_data_dir():
     xdg = os.environ.get('XDG_DATA_HOME')
     base = xdg or os.path.join(os.path.expanduser('~'), '.local', 'share')
     return os.path.join(base, APP_NAME)
+
+
+def _setup_logging(data_dir):
+    """File logging with rotation, so diagnostics survive restarts.
+
+    Frozen windowed bundles have no console at all; without this, errors
+    vanish. 1 MB per file × 5 backups in <data_dir>/logs/app.log. Console
+    output is preserved — this only adds the file handler.
+    """
+    try:
+        log_dir = os.path.join(data_dir, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        handler = RotatingFileHandler(
+            os.path.join(log_dir, 'app.log'),
+            maxBytes=1024 * 1024, backupCount=5, encoding='utf-8')
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s [%(name)s] %(message)s'))
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+            root.addHandler(handler)
+
+        def _log_uncaught(exc_type, exc_value, exc_tb):
+            logging.getLogger('desktop').exception(
+                'Uncaught exception', exc_info=(exc_type, exc_value, exc_tb))
+
+        sys.excepthook = _log_uncaught
+        return os.path.join(log_dir, 'app.log')
+    except Exception:
+        return None
 
 
 def find_free_port(preferred=None):
@@ -126,6 +158,72 @@ def _close_behavior():
     return 'ask'
 
 
+def _selftest_verifier():
+    """Exercise the installer checksum verifier against a fixture release.
+
+    Serves a fake binary + SHA256SUMS.txt over loopback HTTP and runs the
+    exact function the self-updater uses: valid bytes pass, tampered bytes
+    and a missing sums file must both raise. Returns (ok, detail).
+    """
+    import hashlib
+    import http.server
+    from app.routes.convert import _verify_installer_bytes
+
+    binary = b'audio-converter-fixture-installer'
+    digest = hashlib.sha256(binary).hexdigest()
+    sums = f'{digest}  Fixture-Setup-0.0.0.exe\n{"0" * 64}  decoy.bin\n'
+    blob = {'/setup.exe': binary, '/SHA256SUMS.txt': sums.encode()}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = blob.get(self.path)
+            if body is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body if isinstance(body, bytes) else body.encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f'http://127.0.0.1:{port}'
+        release = {'assets': [
+            {'name': 'Fixture-Setup-0.0.0.exe',
+             'browser_download_url': base + '/setup.exe'},
+            {'name': 'SHA256SUMS.txt',
+             'browser_download_url': base + '/SHA256SUMS.txt'},
+        ]}
+        _verify_installer_bytes(release, 'Fixture-Setup-0.0.0.exe', digest)
+        try:
+            _verify_installer_bytes(release, 'Fixture-Setup-0.0.0.exe',
+                                    '0' * 64)
+        except ValueError as e:
+            if 'mismatch' not in str(e):
+                return False, f'wrong tamper error: {e}'
+        else:
+            return False, 'tampered bytes accepted'
+        try:
+            _verify_installer_bytes({'assets': []}, 'Fixture-Setup-0.0.0.exe',
+                                    digest)
+        except ValueError:
+            pass
+        else:
+            return False, 'missing sums file accepted'
+        return True, 'accept/reject/missing-sums all correct'
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+    finally:
+        server.shutdown()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Launch the Audio Converter desktop app.')
     parser.add_argument('--port', type=int, default=None,
@@ -154,7 +252,12 @@ def main():
     # init_app time).
     data_dir = get_data_dir()
     os.makedirs(data_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(data_dir, 0o700)
+    except Exception:
+        pass
     os.environ['AUDIO_CONVERTER_DB_PATH'] = os.path.join(data_dir, 'config.db')
+    _log_path = _setup_logging(data_dir)
 
     secret_file = os.path.join(data_dir, '.secret_key')
     if os.path.isfile(secret_file):
@@ -165,6 +268,7 @@ def main():
         try:
             with open(secret_file, 'w') as f:
                 f.write(secret_key)
+            os.chmod(secret_file, 0o600)
         except Exception:
             pass
     os.environ['AUDIO_CONVERTER_SECRET_KEY'] = secret_key
@@ -191,16 +295,26 @@ def main():
         print('self-test: db ok, ffmpeg={}, ytdlp={}, templates={}'.format(
             check_ffmpeg(), bool(_find_ytdlp()),
             os.path.isdir(app.template_folder)))
-        return
+        verifier_ok, verifier_detail = _selftest_verifier()
+        print(f'self-test: checksum verifier: {"ok" if verifier_ok else "FAILED"} '
+              f'({verifier_detail})')
+        return 0 if verifier_ok else 1
 
     port = args.port or int(os.environ.get('PORT') or 0) or find_free_port(DEFAULT_PORT)
     thread, server, url = start_server(app, port)
     print('Serving {}'.format(url), file=sys.stderr)
+    logging.getLogger('desktop').info(
+        'Serving %s (data: %s, log: %s)', url, data_dir, _log_path)
 
     try:
         from app.routes.convert import _ensure_scheduler
         with app.app_context():
             _ensure_scheduler()
+            from app.routes.convert import _resume_interrupted
+            resumed = _resume_interrupted()
+            if resumed:
+                logging.getLogger('desktop').info(
+                    'Requeued %d interrupted conversion(s)', resumed)
     except Exception as exc:
         print(f'Scheduler failed to start ({exc}); subscriptions will not auto-check.',
               file=sys.stderr)
@@ -254,4 +368,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)

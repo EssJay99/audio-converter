@@ -4,6 +4,7 @@ import queue
 import re
 import difflib
 import glob
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -14,9 +15,10 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
+from sqlalchemy import or_
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
-from app.models import db, ConversionHistory, UserSettings, effective_output_path
+from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
 
 bp = Blueprint('convert', __name__)
 
@@ -49,6 +51,11 @@ COVER_FORMATS = ('flac', 'alac')
 # ---------------------------------------------------------------- queue ----
 
 _conversion_queue = queue.Queue()
+# Live yt-dlp processes by job id (for pause) and ids the user paused.
+# Membership tests are GIL-atomic; proc objects are only touched by owner.
+_active_downloads = {}
+_paused_jobs = set()
+_paused_lock = threading.Lock()
 # Parallel download workers: several tracks convert at once instead of one
 # at a time. SQLite stays safe via WAL mode (see _setup_db) plus the longer
 # lock timeout in the engine options.
@@ -101,6 +108,46 @@ def _spawn_workers(count):
         t.start()
 
 
+def _queue_has(job_id):
+    """True when a job id is already waiting in memory (no double-queue)."""
+    try:
+        with _conversion_queue.mutex:
+            return job_id in _conversion_queue.queue
+    except Exception:
+        return False
+
+
+def _resume_interrupted():
+    """Requeue conversions orphaned by a restart or crash.
+
+    In-flight rows (downloading/converting) can never finish on their own;
+    reset them to pending. Pending rows lost their in-memory queue slot
+    when the process died, so hand every active row back to the pool —
+    skipping ones already queued. Returns the number set in motion.
+    Safe to call on every launch (idempotent).
+    """
+    try:
+        rows = db.session.query(ConversionHistory).filter(
+            ConversionHistory.status.in_(
+                list(ConversionHistory.ACTIVE_STATUSES))).all()
+    except Exception:
+        return 0
+    count = 0
+    for row in rows:
+        try:
+            if row.status != 'pending':
+                row.status = 'pending'
+                db.session.commit()
+            if not _queue_has(row.id):
+                _conversion_queue.put(row.id)
+                count += 1
+        except Exception:
+            db.session.rollback()
+    if count:
+        _ensure_worker()
+    return count
+
+
 def set_worker_count(count):
     """Change the pool size live: grows immediately, shrinks as workers idle."""
     global _desired_workers
@@ -145,6 +192,19 @@ def _worker_loop():
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
                         continue
+                    if job.status == 'paused':
+                        # Paused between dequeue and start (or requeued while
+                        # paused): nothing downloaded, nothing to clean up.
+                        # Resume requeues when the user is ready.
+                        if job.parent_id:
+                            _refresh_playlist_parent(job.parent_id)
+                        continue
+                    if job.status not in ConversionHistory.ACTIVE_STATUSES:
+                        # Terminal already (e.g. a twice-queued id the first
+                        # run finished): never re-download a done track.
+                        if job.parent_id:
+                            _refresh_playlist_parent(job.parent_id)
+                        continue
 
                     fmt_key = LABEL_TO_KEY.get(job.format)
                     if os.path.isdir(job.output_path):
@@ -175,13 +235,22 @@ def _worker_loop():
                             if result.get('success'):
                                 _cleanup(result.get('filepath'))
                             continue
+                        if job.status == 'paused' or (
+                                job.id in _paused_jobs):
+                            # Paused mid-download: the partial file stays so
+                            # resume continues it (--continue). Never treat
+                            # the killed process as a failure or retry it.
+                            if job.parent_id:
+                                _refresh_playlist_parent(job.parent_id)
+                            continue
                         if result.get('duplicate'):
+                            _store_file_facts(job, result['filepath'])
                             _job_finish(job, status='skipped', progress=100, error='Already exists on disk',
                                         output_path=result['filepath'],
-                                        duration=_probe_duration(result['filepath']))
+                                        duration=job.duration or 0)
                             _invalidate_stat(result['filepath'])
                         elif result['success']:
-                            duration = _probe_duration(result['filepath'])
+                            duration = _store_file_facts(job, result['filepath'])
                             if not _job_finish(job, status='completed', progress=100,
                                                error=None, output_path=result['filepath'],
                                                duration=duration):
@@ -239,6 +308,14 @@ def _worker_loop():
     finally:
         with _pool_lock:
             _active_workers -= 1
+            short = _active_workers < _desired_workers
+        if short:
+            # Died unexpectedly (not a pool shrink, which exits only when
+            # over target): replace so the queue can never stall silently.
+            try:
+                _spawn_workers(_desired_workers)
+            except Exception:
+                pass
 
 
 def _expand_playlist_job(job):
@@ -407,6 +484,7 @@ def _ensure_scheduler():
                                  name='subscription-scheduler')
             t.start()
             _scheduler_started = True
+    _ensure_helper_watch()
 
 
 def _scheduler_loop():
@@ -420,10 +498,108 @@ def _scheduler_loop():
         time.sleep(60)
 
 
+_helper_watch_started = False
+_helper_watch_lock = threading.Lock()
+_tag_backfill_started = False
+_tag_backfill_lock = threading.Lock()
+
+
+def _ensure_helper_watch():
+    """Start the background yt-dlp freshness check (once per process)."""
+    global _helper_watch_started
+    with _helper_watch_lock:
+        if not _helper_watch_started:
+            t = threading.Thread(target=_helper_watch_loop, daemon=True,
+                                 name='helper-watch')
+            t.start()
+            _helper_watch_started = True
+    global _tag_backfill_started
+    with _tag_backfill_lock:
+        if not _tag_backfill_started:
+            t = threading.Thread(target=_tag_backfill_loop, daemon=True,
+                                 name='tag-backfill')
+            t.start()
+            _tag_backfill_started = True
+
+
+def _tag_backfill_loop():
+    """Fill duration/tags for pre-upgrade rows without stalling requests.
+
+    New conversions store facts at completion; this covers older rows one
+    probe at a time in the background so the first library render after
+    upgrading doesn't pay for hundreds of ffmpeg spawns at once.
+    """
+    from app import app as flask_app
+    time.sleep(60)
+    while True:
+        try:
+            with flask_app.app_context():
+                rows = db.session.query(ConversionHistory).filter(
+                    ConversionHistory.status.in_(['completed', 'skipped']),
+                    ConversionHistory.output_path.isnot(None),
+                    (ConversionHistory.tag_title.is_(None) |
+                     (ConversionHistory.tag_title == ''))).limit(25).all()
+                if not rows:
+                    return
+                for row in rows:
+                    try:
+                        path = row.output_path or ''
+                        if path and os.path.isfile(path):
+                            _store_file_facts(row, path)
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+def _helper_watch_loop():
+    """Nudge the health banner when a newer yt-dlp release exists.
+
+    YouTube changes break old downloaders silently; waiting for a failed
+    conversion to notice wastes the user's time. First check runs a few
+    minutes after startup (never on the launch path), then every 6 hours.
+    Failures are silent — offline just means no nudge.
+    """
+    from app import _version_tuple, app as flask_app
+    time.sleep(300)
+    while True:
+        try:
+            current = _ytdlp_version()
+            latest = _latest_ytdlp_release()
+            if (latest and current and
+                    _version_tuple(latest['version']) > _version_tuple(current)):
+                auto = False
+                try:
+                    with flask_app.app_context():
+                        settings = UserSettings.query.first()
+                        auto = bool(getattr(settings, 'auto_update_ytdlp', False))
+                except Exception:
+                    auto = False
+                if auto:
+                    ok, message, _version = _perform_ytdlp_update()
+                    if ok:
+                        try:
+                            with flask_app.app_context():
+                                _notify('Downloader updated', message)
+                        except Exception:
+                            pass
+                    else:
+                        _stale_helper_event.set()
+                else:
+                    _stale_helper_event.set()
+            else:
+                _stale_helper_event.clear()
+        except Exception:
+            pass
+        time.sleep(6 * 3600)
+
+
 def _due_subscriptions():
     from app.models import Subscription
     from datetime import datetime, timedelta
-    now = datetime.utcnow()
+    now = utcnow()
     due = []
     for sub in Subscription.query.filter_by(active=True).all():
         interval = sub.interval_hours if sub.interval_hours in SUBSCRIPTION_INTERVALS else 24
@@ -436,11 +612,17 @@ def _check_due_subscriptions():
     from datetime import datetime
     for sub in _due_subscriptions():
         try:
-            check_subscription(sub.id)
+            result = check_subscription(sub.id)
+            added = result.get('added', 0) if isinstance(result, dict) else 0
+            if added:
+                title = (getattr(sub, 'playlist_title', '') or
+                         getattr(sub, 'url', '') or 'Subscription')
+                _notify('New tracks available',
+                        f'{title}: {added} new track(s) queued.')
         except Exception:
             pass
         try:
-            sub.last_checked = datetime.utcnow()
+            sub.last_checked = utcnow()
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -553,8 +735,29 @@ def _notifications_enabled():
         return True
 
 
+def _log_notice(title, message):
+    """Persist a copy for the in-app notification bell (best-effort)."""
+    try:
+        from app.models import Notice
+        db.session.add(Notice(title=str(title or '')[:200],
+                              body=str(message or '')[:500]))
+        db.session.commit()
+        stale = db.session.query(Notice).order_by(
+            Notice.id.desc()).offset(200).all()
+        for old in stale:
+            db.session.delete(old)
+        if stale:
+            db.session.commit()
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
 def _notify(title, message):
     """Best-effort OS notification. Never raises, never blocks the worker."""
+    _log_notice(title, message)
     try:
         if not _notifications_enabled():
             return
@@ -621,30 +824,35 @@ def _job_progress(job, pct):
 # Filesystem stat cache: staleness-tolerant existence/size lookups so list
 # and polling endpoints never block on slow (cloud-synced, network) paths.
 _stat_cache = {}
+_stat_lock = threading.Lock()
 
 
 def _cached_stat(path, ttl=30.0):
     """(exists, size) for `path`, rechecked at most once per `ttl` seconds."""
     now = time.monotonic()
-    entry = _stat_cache.get(path)
-    if entry is not None and now - entry[2] < ttl:
-        return entry[0], entry[1]
+    with _stat_lock:
+        entry = _stat_cache.get(path)
+        if entry is not None and now - entry[2] < ttl:
+            return entry[0], entry[1]
     try:
         exists = os.path.isfile(path)
         size = os.path.getsize(path) if exists else 0
     except OSError:
         exists, size = False, 0
-    _stat_cache[path] = (exists, size, now)
-    # Bound memory: drop the oldest entries past a comfortable size.
-    if len(_stat_cache) > 2000:
-        oldest = sorted(_stat_cache, key=lambda k: _stat_cache[k][2])[:500]
-        for key in oldest:
-            _stat_cache.pop(key, None)
+    with _stat_lock:
+        _stat_cache[path] = (exists, size, now)
+        # Bound memory: drop the oldest entries past a comfortable size.
+        if len(_stat_cache) > 2000:
+            oldest = sorted(_stat_cache,
+                            key=lambda k: _stat_cache[k][2])[:500]
+            for key in oldest:
+                _stat_cache.pop(key, None)
     return exists, size
 
 
 def _invalidate_stat(path):
-    _stat_cache.pop(path, None)
+    with _stat_lock:
+        _stat_cache.pop(path, None)
     _invalidate_storage()
 
 
@@ -807,6 +1015,11 @@ def convert():
         flash('Please provide both a URL and a format', 'error')
         return redirect(url_for('home.index'))
 
+    if not _is_supported_url(url):
+        flash('That link is not from a supported site — use YouTube, '
+              'SoundCloud, Spotify, Apple Music, or Tidal', 'error')
+        return redirect(url_for('home.index'))
+
     if not output_path:
         output_path = effective_output_path()
 
@@ -966,23 +1179,48 @@ def record_played(conversion_id):
     if not history:
         return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
     history.play_count = (history.play_count or 0) + 1
-    history.last_played_at = datetime.utcnow()
+    history.last_played_at = utcnow()
     db.session.commit()
     return jsonify({'ok': True, 'play_count': history.play_count})
 
 
 @bp.route('/api/library')
 def api_library():
-    """Every playable track, for the Player tab library view."""
-    rows = db.session.query(ConversionHistory).filter(
-        ConversionHistory.status.in_(['completed', 'skipped'])
-    ).order_by(ConversionHistory.created_at.desc()).limit(1000).all()
+    """Playable tracks for the Player tab library view.
+
+    Optional paging for large libraries: ?limit= (default 1000, max 5000),
+    ?offset=, and ?q= to pre-filter on filename/tags server-side. Always
+    returns {items, total} so clients can show "showing X of Y".
+    """
+    try:
+        limit = int(request.args.get('limit', 1000))
+    except (TypeError, ValueError):
+        limit = 1000
+    limit = min(5000, max(1, limit))
+    try:
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+    query = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped']))
+    q = (request.args.get('q') or '').strip()
+    if q:
+        escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        like = f'%{escaped}%'
+        query = query.filter(or_(
+            ConversionHistory.tag_title.ilike(like, escape='\\'),
+            ConversionHistory.tag_artist.ilike(like, escape='\\'),
+            ConversionHistory.tag_album.ilike(like, escape='\\')))
+    total = query.count()
+    rows = query.order_by(
+        ConversionHistory.created_at.desc()).offset(offset).limit(limit).all()
     items = []
     for row in rows:
         if not row.output_path or not os.path.isfile(row.output_path):
             continue
         items.append(_serialize(row))
-    return jsonify({'ok': True, 'items': items})
+    return jsonify({'ok': True, 'items': items, 'total': total})
 
 
 def _serialize_user_playlist(pl):
@@ -1175,6 +1413,37 @@ def rename_file(conversion_id):
                     'output_path': target})
 
 
+def _write_tags(path, tags):
+    """Rewrite a file's embedded title/artist/album tags, atomically.
+
+    Returns (ok, error_message). Only non-empty tag values are written;
+    other tags on the file are preserved.
+    """
+    clean = {key: str(tags.get(key) or '').strip()[:100]
+             for key in ('title', 'artist', 'album')}
+    if not any(clean.values()):
+        return False, 'Provide at least one tag'
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=os.path.splitext(path)[1] or '.tmp')
+    os.close(fd)
+    try:
+        args = ['ffmpeg', '-y', '-i', path, '-map', '0', '-c', 'copy']
+        for key, value in clean.items():
+            if value:
+                args += ['-metadata', f'{key}={value}']
+        args.append(tmp_path)
+        result = subprocess.run(args, capture_output=True, text=True,
+                                timeout=120)
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            return False, 'Could not write tags to this file'
+        os.replace(tmp_path, path)
+    except Exception as e:
+        _cleanup(tmp_path)
+        return False, str(e)
+    _meta_cache.pop(path, None)
+    return True, ''
+
+
 @bp.route('/api/metadata/<int:conversion_id>', methods=['POST'])
 def edit_metadata(conversion_id):
     """Rewrite a converted file's embedded title/artist/album tags."""
@@ -1183,31 +1452,78 @@ def edit_metadata(conversion_id):
         return jsonify({'ok': False, 'message': 'No playable file'}), 404
 
     payload = request.get_json(silent=True) or {}
+    ok, error = _write_tags(history.output_path,
+                            {key: payload.get(key)
+                             for key in ('title', 'artist', 'album')})
+    if not ok:
+        return jsonify({'ok': False, 'message': error}), 400
+    _store_file_facts(history, history.output_path)
+    return jsonify({'ok': True, 'meta': _probe_metadata(history.output_path)})
+
+
+@bp.route('/api/tags/bulk', methods=['POST'])
+def bulk_edit_tags():
+    """Apply the same title/artist/album tags to many tracks at once.
+
+    Only provided (non-empty) fields are written; each file keeps its other
+    tags. Returns per-track results so one bad file never blocks the rest.
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        ids = [int(i) for i in (payload.get('ids') or [])][:200]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Invalid track list'}), 400
     tags = {key: str(payload.get(key) or '').strip()[:100]
             for key in ('title', 'artist', 'album')}
+    if not ids:
+        return jsonify({'ok': False, 'message': 'No tracks selected'}), 400
     if not any(tags.values()):
         return jsonify({'ok': False, 'message': 'Provide at least one tag'}), 400
+    updated, failed = 0, 0
+    for track_id in ids:
+        history = db.session.get(ConversionHistory, track_id)
+        if (not history or history.status not in ('completed', 'skipped')
+                or not history.output_path
+                or not os.path.isfile(history.output_path)):
+            failed += 1
+            continue
+        ok, _error = _write_tags(history.output_path, tags)
+        if ok:
+            _store_file_facts(history, history.output_path)
+            updated += 1
+        else:
+            failed += 1
+    return jsonify({'ok': True, 'updated': updated, 'failed': failed})
 
-    fd, tmp_path = tempfile.mkstemp(
-        suffix=os.path.splitext(history.output_path)[1] or '.tmp')
-    os.close(fd)
+
+_COVER_CACHE_CAP = 500
+
+
+def _prune_cover_cache():
+    """Bound the thumbnail cache (LRU by mtime): it otherwise grows forever
+    in system temp, one pair of JPEGs per track played."""
     try:
-        args = ['ffmpeg', '-y', '-i', history.output_path, '-map', '0',
-                '-c', 'copy']
-        for key, value in tags.items():
-            if value:
-                args += ['-metadata', f'{key}={value}']
-        args.append(tmp_path)
-        result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=120)
-        if result.returncode != 0 or not os.path.exists(tmp_path):
-            return jsonify({'ok': False,
-                            'message': 'Could not write tags to this file'}), 500
-        os.replace(tmp_path, history.output_path)
-    except Exception as e:
-        _cleanup(tmp_path)
-        return jsonify({'ok': False, 'message': str(e)}), 500
-    return jsonify({'ok': True, 'meta': _probe_metadata(history.output_path)})
+        cache_dir = os.path.join(tempfile.gettempdir(),
+                                 'audio-converter-covers')
+        names = os.listdir(cache_dir)
+    except OSError:
+        return 0
+    if len(names) <= _COVER_CACHE_CAP:
+        return 0
+    try:
+        ranked = sorted(
+            ((os.path.getmtime(os.path.join(cache_dir, n)), n) for n in names
+             if os.path.isfile(os.path.join(cache_dir, n))))
+    except OSError:
+        return 0
+    removed = 0
+    for _mtime, name in ranked[:len(ranked) - _COVER_CACHE_CAP]:
+        try:
+            os.remove(os.path.join(cache_dir, name))
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 @bp.route('/api/cover/<int:conversion_id>')
@@ -1271,9 +1587,188 @@ def cover_art(conversion_id):
             frame_ok = subprocess.run(
                 grab, capture_output=True, text=True, timeout=30)
             if frame_ok.returncode == 0 and os.path.isfile(frame):
+                _prune_cover_cache()
                 return send_file(frame, mimetype='image/jpeg')
         abort(404)
+    _prune_cover_cache()
     return send_file(cached, mimetype='image/jpeg')
+
+
+@bp.route('/api/maintenance/clear-covers', methods=['POST'])
+def api_clear_covers():
+    """Wipe the entire cover-thumbnail cache (it rebuilds on demand)."""
+    cleared = 0
+    try:
+        cache_dir = os.path.join(tempfile.gettempdir(),
+                                 'audio-converter-covers')
+        for name in os.listdir(cache_dir):
+            try:
+                os.remove(os.path.join(cache_dir, name))
+                cleared += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return jsonify({'ok': True, 'cleared': cleared})
+
+
+_AUTOSTART_LABEL = 'com.audioconverter.app'
+
+
+def _autostart_command():
+    """How to launch this app again: the frozen binary, or dev interpreter."""
+    if getattr(sys, 'frozen', False):
+        return [sys.executable]
+    script = os.path.join(os.path.dirname(__file__), '..', 'desktop.py')
+    return [sys.executable, os.path.abspath(script)]
+
+
+def _autostart_paths():
+    """(kind, target) describing this platform's autostart slot."""
+    home = os.path.expanduser('~')
+    if sys.platform == 'darwin':
+        return ('launchd', os.path.join(
+            home, 'Library', 'LaunchAgents',
+            _AUTOSTART_LABEL + '.plist'))
+    if sys.platform.startswith('win'):
+        return ('registry', None)
+    return ('desktop-file', os.path.join(
+        home, '.config', 'autostart', 'audioconverter.desktop'))
+
+
+def _autostart_enabled():
+    """Whether launch-at-login is currently switched on."""
+    kind, target = _autostart_paths()
+    try:
+        if kind == 'registry':
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                0, winreg.KEY_READ) as key:
+                winreg.QueryValueEx(key, 'AudioConverter')
+            return True
+        return bool(target and os.path.isfile(target))
+    except Exception:
+        return False
+
+
+def _set_autostart(enabled):
+    """Switch launch-at-login on/off. Returns (ok, message)."""
+    kind, target = _autostart_paths()
+    try:
+        if kind == 'launchd':
+            agents = os.path.dirname(target)
+            if enabled:
+                os.makedirs(agents, exist_ok=True)
+                from xml.sax.saxutils import escape as _xml_escape
+                args = ''.join(
+                    f'        <string>{_xml_escape(a)}</string>\n'
+                    for a in _autostart_command())
+                plist = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                    '<plist version="1.0">\n<dict>\n'
+                    f'    <key>Label</key>\n    <string>{_AUTOSTART_LABEL}</string>\n'
+                    '    <key>ProgramArguments</key>\n    <array>\n'
+                    f'{args}'
+                    '    </array>\n'
+                    '    <key>RunAtLoad</key>\n    <true/>\n'
+                    '</dict>\n</plist>\n')
+                with open(target, 'w', encoding='utf-8') as f:
+                    f.write(plist)
+                subprocess.run(
+                    ['launchctl', 'load', target],
+                    capture_output=True, timeout=15)
+            else:
+                subprocess.run(
+                    ['launchctl', 'unload', target],
+                    capture_output=True, timeout=15)
+                if os.path.isfile(target):
+                    os.remove(target)
+            return True, 'Login item updated.'
+        if kind == 'registry':
+            import winreg
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r'Software\Microsoft\Windows\CurrentVersion\Run',
+                    0, winreg.KEY_SET_VALUE) as key:
+                if enabled:
+                    winreg.SetValueEx(key, 'AudioConverter', 0,
+                                      winreg.REG_SZ,
+                                      subprocess.list2cmdline(
+                                          _autostart_command()))
+                else:
+                    try:
+                        winreg.DeleteValue(key, 'AudioConverter')
+                    except FileNotFoundError:
+                        pass
+            return True, 'Login item updated.'
+        if enabled:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, 'w', encoding='utf-8') as f:
+                f.write('[Desktop Entry]\nType=Application\n'
+                        'Name=Audio Converter\n'
+                        f'Exec={" ".join(_autostart_command())}\n'
+                        'Terminal=false\nX-GNOME-Autostart-enabled=true\n')
+        elif os.path.isfile(target):
+            os.remove(target)
+        return True, 'Login item updated.'
+    except Exception as e:
+        return False, f'Could not change login item: {str(e)}'
+
+
+@bp.route('/api/autostart')
+def api_autostart():
+    """Launch-at-login state for the maintenance panel."""
+    return jsonify({'ok': True, 'supported': True,
+                    'enabled': _autostart_enabled(),
+                    'platform': sys.platform})
+
+
+@bp.route('/api/autostart', methods=['POST'])
+def api_set_autostart():
+    """Flip launch-at-login on/off."""
+    payload = request.get_json(silent=True) or {}
+    ok, message = _set_autostart(bool(payload.get('enabled', False)))
+    if not ok:
+        return jsonify({'ok': False, 'message': message}), 500
+    return jsonify({'ok': True, 'enabled': _autostart_enabled(),
+                    'message': message})
+
+
+@bp.route('/api/maintenance/vacuum', methods=['POST'])
+def api_vacuum():
+    """Compact the library database (VACUUM) plus prune the cover cache.
+
+    WAL databases never shrink on their own; this reclaims space after
+    heavy delete/prune sessions. Runs in a worker-safe way: VACUUM needs
+    no other writer mid-flight, so failures roll back to a retryable
+    message instead of risking the live DB.
+    """
+    pruned = _prune_cover_cache()
+    try:
+        db_path = db.engine.url.database
+    except Exception:
+        db_path = None
+    if not db_path or db_path == ':memory:' or not os.path.isfile(db_path):
+        return jsonify({'ok': False, 'message': 'No local database found'}), 404
+    try:
+        import sqlite3
+        con = sqlite3.connect(db_path, timeout=30)
+        try:
+            con.execute('VACUUM')
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        return jsonify({'ok': False,
+                        'message': f'Vacuum failed (try again when idle): {str(e)}'}), 500
+    try:
+        size = os.path.getsize(db_path)
+    except OSError:
+        size = 0
+    return jsonify({'ok': True, 'db_bytes': size, 'covers_pruned': pruned})
 
 
 @bp.route('/api/subs/<int:conversion_id>')
@@ -1353,7 +1848,11 @@ def download_and_convert(url, format_type, output_path, job=None):
                 expected_title = getattr(job, 'expected_title', '') or ''
             if not expected_title:
                 expected_title = meta.get('title') or ''
+            if job is not None and job.id in _paused_jobs:
+                return {'success': False, 'error': 'Paused'}
             for alternate in find_alternate_sources(url, meta, expected_title):
+                if job is not None and job.id in _paused_jobs:
+                    return {'success': False, 'error': 'Paused'}
                 alt_meta = extract_metadata(alternate)
                 if expected_title and not _titles_match(
                         expected_title, alt_meta.get('title', '')):
@@ -1400,6 +1899,12 @@ def download_and_convert(url, format_type, output_path, job=None):
             _cleanup(output_file)
             return {'success': False, 'error': reason}
 
+        if job is not None:
+            try:
+                job.cover_url = str(meta.get('thumbnail') or '')[:1000]
+                db.session.flush()
+            except Exception:
+                db.session.rollback()
         return {'success': True, 'filepath': output_file, 'filename': os.path.basename(output_file),
                 'via': downloaded_from}
 
@@ -1410,7 +1915,9 @@ def download_and_convert(url, format_type, output_path, job=None):
     except Exception as e:
         return {'success': False, 'error': f'Conversion failed: {str(e)}'}
     finally:
-        _cleanup(temp_audio)
+        # A paused job keeps its partial download so resume continues it.
+        if job is None or job.id not in _paused_jobs:
+            _cleanup(temp_audio)
         _cleanup(cover_file)
 
 
@@ -1465,6 +1972,63 @@ _YT_KEEP_PARAMS = frozenset({'v', 'list', 'index', 't', 'start', 'end'})
 _SC_KEEP_PARAMS = frozenset()
 
 
+# Hosts the app knows how to convert or import from. Anything else is
+# rejected at submit time: an arbitrary URL would just burn a worker on a
+# yt-dlp failure, and intranet/metadata addresses must never reach it.
+_SUPPORTED_HOST_SUFFIXES = (
+    'youtube.com', 'youtu.be', 'music.youtube.com',
+    'soundcloud.com',
+    'open.spotify.com', 'music.apple.com', 'tidal.com',
+)
+
+
+def _is_supported_url(url):
+    """http(s) URL on a supported content host, nothing else."""
+    try:
+        parts = urlparse(url or '')
+    except Exception:
+        return False
+    if parts.scheme not in ('http', 'https'):
+        return False
+    host = (parts.hostname or '').lower()
+    if not host:
+        return False
+    return any(host == suffix or host.endswith('.' + suffix)
+               for suffix in _SUPPORTED_HOST_SUFFIXES)
+
+
+def _is_public_http_url(url, timeout=5):
+    """True when a URL is safe for the server itself to fetch.
+
+    Blocks non-http(s) schemes, literal private/loopback/link-local IPs, and
+    hostnames that resolve to non-public addresses, so cover-art and metadata
+    fetches can't be steered at the local network or cloud metadata endpoints.
+    """
+    import ipaddress
+    import socket
+    try:
+        parts = urlparse(url or '')
+    except Exception:
+        return False
+    if parts.scheme not in ('http', 'https'):
+        return False
+    host = (parts.hostname or '').strip()
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, parts.port or 443, type=socket.SOCK_STREAM)
+    except Exception:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except Exception:
+            return False
+        if not ip.is_global:
+            return False
+    return True
+
+
 def sanitize_url(url):
     """Strip tracking/ad identifiers from a pasted URL, keeping content address.
 
@@ -1504,6 +2068,8 @@ def _fetch_thumbnail(url):
     gets no cookies, no referer, and no browser-like fingerprint.
     """
     if not url:
+        return None
+    if not _is_public_http_url(url):
         return None
     if not _privacy_on():
         try:
@@ -1766,17 +2332,34 @@ def _http_proxies():
     return {'http': proxy, 'https': proxy} if proxy else None
 
 
+def _active_bandwidth_limit(now=None):
+    """Effective download cap in KB/s: the off-peak override wins inside
+    its window ([start, end), wrapping past midnight), else the flat limit.
+    `now` is injectable for tests."""
+    try:
+        settings = UserSettings.query.first()
+        limit = int(getattr(settings, 'bandwidth_limit', 0) or 0)
+        off = int(getattr(settings, 'offpeak_limit', 0) or 0)
+        start = int(getattr(settings, 'offpeak_start', 22) or 0)
+        end = int(getattr(settings, 'offpeak_end', 7) or 0)
+    except Exception:
+        return 0
+    if off > 0:
+        from datetime import datetime as _dt
+        hour = (now or _dt.now()).hour
+        in_window = (start <= hour < end) if start <= end else (hour >= start or hour < end)
+        if in_window:
+            return off
+    return limit
+
+
 def _ytdlp_net_args():
     """Proxy + speed-limit flags for yt-dlp. Safe without an app context."""
     args = []
     proxy = _get_proxy()
     if proxy:
         args += ['--proxy', proxy]
-    try:
-        settings = UserSettings.query.first()
-        limit = int(getattr(settings, 'bandwidth_limit', 0) or 0)
-    except Exception:
-        limit = 0
+    limit = _active_bandwidth_limit()
     if limit > 0:
         args += ['--limit-rate', f'{limit}K']
     return args
@@ -1846,7 +2429,8 @@ def download_audio(url, temp_audio, job=None):
     """Download best-quality audio (or video), reporting live progress."""
     selector = _download_selector(job)
     base = (list(_YTDLP_PRIVACY_FLAGS) + _ytdlp_net_args()
-            + ['--no-playlist', '-f', selector, '--newline', '-o', temp_audio])
+            + ['--no-playlist', '--continue', '-f', selector,
+               '--newline', '-o', temp_audio])
     if _download_kind(job) == 'video':
         if _want_sponsorblock():
             base += ['--sponsorblock-remove', 'sponsor,intro,outro,selfpromo,interaction']
@@ -1855,8 +2439,12 @@ def download_audio(url, temp_audio, job=None):
                      '--sub-langs', 'all,-live_chat', '--convert-subs', 'vtt']
     cmd = _ytdlp_command() + base + [url]
 
+    proc = None
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
+    if job is not None:
+        with _paused_lock:
+            _active_downloads[job.id] = proc
     try:
         for line in iter(proc.stdout.readline, ''):
             match = re.search(r'(?:^|\s)\[download\]', line)
@@ -1875,6 +2463,11 @@ def download_audio(url, temp_audio, job=None):
         except Exception:
             pass
         raise
+    finally:
+        if job is not None:
+            with _paused_lock:
+                if _active_downloads.get(job.id) is proc:
+                    del _active_downloads[job.id]
 
     if proc.returncode != 0 and _is_youtube(url):
         fallback = (_active_privacy_flags() + _ytdlp_net_args()
@@ -1999,7 +2592,7 @@ def _latest_ytdlp_release():
     """Latest upstream yt-dlp release: {'version', 'assets': {name: url}}."""
     try:
         resp = requests.get(
-            'https://api.github.com/yt-dlp/yt-dlp/releases/latest',
+            'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest',
             timeout=15, headers={'Accept': 'application/vnd.github+json',
                                  'User-Agent': 'AudioConverter/1.0'})
     except Exception:
@@ -2041,24 +2634,23 @@ def api_helpers():
     })
 
 
-@bp.route('/api/helpers/update-ytdlp', methods=['POST'])
-def api_update_ytdlp():
+def _perform_ytdlp_update():
     """Replace the yt-dlp helper binary with the latest release build.
 
-    Only touches the standalone binary (bundled app or a PATH install that
-    is a real file we can write); pip-based installs are left alone with
-    guidance instead of a risky in-place pip upgrade.
+    Shared by the manual endpoint and the opt-in auto-updater. Returns
+    (ok, message, version_or_None). Only touches the standalone binary
+    (bundled app or a PATH install that is a real file we can write);
+    pip-based installs are left alone with guidance instead of a risky
+    in-place pip upgrade.
     """
     exe = _find_ytdlp()
     if not exe or not os.path.isfile(exe):
-        return jsonify({'ok': False,
-                        'message': 'No standalone yt-dlp binary found to update'}), 400
+        return False, 'No standalone yt-dlp binary found to update', None
     try:
         if not os.access(exe, os.W_OK):
             raise OSError('not writable')
     except OSError:
-        return jsonify({'ok': False,
-                        'message': 'yt-dlp is managed by pip here; run: pip install -U yt-dlp'}), 400
+        return False, 'yt-dlp is managed by pip here; run: pip install -U yt-dlp', None
 
     if sys.platform == 'darwin':
         asset = 'yt-dlp_macos'
@@ -2069,26 +2661,111 @@ def api_update_ytdlp():
 
     latest = _latest_ytdlp_release()
     if not latest or asset not in latest.get('assets', {}):
-        return jsonify({'ok': False,
-                        'message': 'Could not find a fresh yt-dlp build'}), 502
+        return False, 'Could not find a fresh yt-dlp build', None
+    tmp_path = ''
     try:
-        session = requests.Session()
-        session.cookies.clear()
-        resp = session.get(latest['assets'][asset], timeout=300,
-                           headers={'User-Agent': 'AudioConverter/1.0'})
-        if resp.status_code != 200 or not resp.content:
-            raise ValueError('download failed')
+        expected = _asset_sha256(latest.get('assets', {}), asset)
+        if not expected:
+            raise ValueError('no published checksum for this build — '
+                             'refusing to install an unverified binary')
         fd, tmp_path = tempfile.mkstemp(prefix='ytdlp-update-')
-        with os.fdopen(fd, 'wb') as f:
-            f.write(resp.content)
+        os.close(fd)
+        actual = _stream_download(latest['assets'][asset], tmp_path,
+                                  timeout=300)
+        if actual != expected:
+            raise ValueError('checksum mismatch — the download may be '
+                             'corrupt or tampered with')
         os.chmod(tmp_path, 0o755)
         os.replace(tmp_path, exe)
     except Exception as e:
-        _cleanup(locals().get('tmp_path', ''))
-        return jsonify({'ok': False, 'message': f'Update failed: {str(e)}'}), 500
+        _cleanup(tmp_path)
+        return False, f'Update failed: {str(e)}', None
     _stale_helper_event.clear()
-    return jsonify({'ok': True, 'version': latest['version'],
-                    'message': f"yt-dlp updated to {latest['version']}."})
+    return True, f"yt-dlp updated to {latest['version']}.", latest['version']
+
+
+@bp.route('/api/helpers/update-ytdlp', methods=['POST'])
+def api_update_ytdlp():
+    """Replace the yt-dlp helper binary with the latest release build."""
+    ok, message, version = _perform_ytdlp_update()
+    if not ok:
+        return jsonify({'ok': False, 'message': message}), 400
+    return jsonify({'ok': True, 'version': version, 'message': message})
+
+
+def _asset_sha256(assets, name, sums_asset='SHA2-256SUMS', timeout=60):
+    """Expected SHA-256 of a release asset per the published checksums file.
+
+    Returns the hex digest, or None when the sums file is missing/unparseable.
+    `sums_asset` is 'SHA2-256SUMS' for yt-dlp releases and 'SHA256SUMS.txt'
+    for our own installer releases (same `<hash>  <filename>` format).
+    """
+    sums_url = assets.get(sums_asset)
+    if not sums_url:
+        return None
+    try:
+        session = requests.Session()
+        session.cookies.clear()
+        resp = session.get(sums_url, timeout=timeout,
+                           headers={'User-Agent': 'AudioConverter/1.0'})
+        if resp.status_code != 200 or not resp.text:
+            return None
+    except Exception:
+        return None
+    for line in resp.text.splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[1].lstrip('*') == name:
+            digest = parts[0].lower()
+            if len(digest) == 64 and all(c in '0123456789abcdef' for c in digest):
+                return digest
+    return None
+
+
+def _stream_download(url, dest, timeout=600):
+    """Stream a URL to `dest` without buffering it in RAM.
+
+    Installers are hundreds of MB; holding them in memory risks swapping
+    or OOM on small machines. Returns the SHA-256 hex digest so callers
+    can verify before trusting the file. Raises on HTTP errors or empty
+    bodies.
+    """
+    digest = hashlib.sha256()
+    total = 0
+    session = requests.Session()
+    session.cookies.clear()
+    with session.get(url, timeout=timeout, stream=True,
+                     headers={'User-Agent': 'AudioConverter/1.0'}) as resp:
+        if resp.status_code != 200:
+            raise ValueError('download failed')
+        with open(dest, 'wb') as f:
+            for piece in resp.iter_content(chunk_size=1024 * 1024):
+                if not piece:
+                    continue
+                f.write(piece)
+                digest.update(piece)
+                total += len(piece)
+    if not total:
+        raise ValueError('download failed')
+    return digest.hexdigest()
+
+
+def _verify_installer_bytes(release, name, digest):
+    """Raise ValueError unless `digest` matches the release's SHA256SUMS.txt.
+
+    Refuses when the checksums file is absent: releases published by the
+    updated build workflow always carry one, so a missing file means the
+    payload can't be trusted, not that verification is optional.
+    """
+    assets = release.get('assets') if isinstance(release, dict) else None
+    asset_map = {str(a.get('name') or ''): a.get('browser_download_url') or ''
+                 for a in (assets or [])}
+    expected = _asset_sha256(asset_map, name, sums_asset='SHA256SUMS.txt')
+    if not expected:
+        raise ValueError('no published checksum for this installer — '
+                         'download it from the release page instead')
+    if digest != expected:
+        raise ValueError('checksum mismatch — the installer may be corrupt '
+                         'or tampered with')
 
 
 def _running_bundle_dir():
@@ -2106,54 +2783,63 @@ def _running_bundle_dir():
     return bundle
 
 
-def _find_dmg_asset(release):
-    """Pick the macOS disk image out of a release payload, if present."""
+@bp.route('/api/update-install', methods=['POST'])
+def api_update_install():
+    """Install the latest release with the least possible friction.
+
+    macOS bundle in /Applications: downloads the disk image, swaps the app
+    in, and relaunches. Windows: downloads the Setup wizard and opens it
+    (it handles elevation itself). Anything else gets the manual link,
+    because a failed self-replace is the one unrecoverable state.
+    """
+    from app.routes.settings import _default_update_feed
+    if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
+        return _macos_update_install()
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('win'):
+        return _windows_update_install()
+    return jsonify({'ok': False,
+                    'message': 'Automatic install works from the installed '
+                               'macOS (/Applications) or Windows app. Download '
+                               'the installer from the release page instead.'}), 400
+
+
+def _find_asset_by_suffix(release, suffixes):
     assets = release.get('assets') if isinstance(release, dict) else None
     for asset in assets or []:
         name = str(asset.get('name') or '')
         url = asset.get('browser_download_url') or ''
-        if name.endswith('.dmg') and url:
+        if url and any(name.endswith(suffix) for suffix in suffixes):
             return name, url
     return None, None
 
 
-@bp.route('/api/update-install', methods=['POST'])
-def api_update_install():
-    """Download the latest release and install it over this app, then quit.
-
-    Deliberately narrow: only a frozen macOS bundle running from
-    /Applications. Anything else gets instructions instead of a half-done
-    install, because a failed self-replace is the one unrecoverable state.
-    """
+def _macos_update_install():
+    """Swap the /Applications bundle for the latest disk image contents."""
     from app.routes.settings import _default_update_feed
     bundle = _running_bundle_dir()
     if bundle is None:
         return jsonify({'ok': False,
                         'message': 'Automatic install works from the '
-                                   'Applications copy of the app. Download '
-                                   'the installer from the release page instead.'}), 400
+                                   'Applications copy of the app.'}), 400
     try:
         resp = requests.get(_default_update_feed(), timeout=20,
                             headers={'Accept': 'application/json'})
         release = resp.json() if resp.status_code == 200 else {}
     except Exception:
         release = {}
-    _name, url = _find_dmg_asset(release)
+    _name, url = _find_asset_by_suffix(release, ('.dmg',))
     if not url:
         return jsonify({'ok': False,
                         'message': 'No macOS installer found in the latest release.'}), 502
+    dmg_name = _name
 
     workdir = tempfile.mkdtemp(prefix='audio-converter-update-')
     dmg_path = os.path.join(workdir, 'update.dmg')
     mount = os.path.join(workdir, 'mnt')
     os.makedirs(mount, exist_ok=True)
     try:
-        dl = requests.get(url, timeout=600,
-                          headers={'User-Agent': 'AudioConverter/1.0'})
-        if dl.status_code != 200 or not dl.content:
-            raise ValueError('download failed')
-        with open(dmg_path, 'wb') as f:
-            f.write(dl.content)
+        digest = _stream_download(url, dmg_path, timeout=600)
+        _verify_installer_bytes(release, dmg_name, digest)
         attached = subprocess.run(
             ['hdiutil', 'attach', '-nobrowse', '-readonly',
              '-mountpoint', mount, dmg_path],
@@ -2200,6 +2886,388 @@ def api_update_install():
                     'message': 'Installed. Restarting into the new version…'})
 
 
+def _windows_update_install():
+    """Download the Setup wizard and open it; elevation is its own business.
+
+    Unlike macOS the running app is left alone: the wizard installs over it
+    and the user relaunches when ready.
+    """
+    from app.routes.settings import _default_update_feed
+    try:
+        resp = requests.get(_default_update_feed(), timeout=20,
+                            headers={'Accept': 'application/json'})
+        release = resp.json() if resp.status_code == 200 else {}
+    except Exception:
+        release = {}
+    name, url = _find_asset_by_suffix(release, ('.exe',))
+    if not url:
+        return jsonify({'ok': False,
+                        'message': 'No Windows installer found in the latest release.'}), 502
+    try:
+        downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
+        os.makedirs(downloads, exist_ok=True)
+        dest = os.path.join(downloads, name)
+        digest = _stream_download(url, dest, timeout=600)
+        _verify_installer_bytes(release, name, digest)
+        subprocess.Popen([dest])
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'Install failed: {str(e)}'}), 500
+    return jsonify({'ok': True,
+                    'message': 'Installer downloaded and opened — follow the wizard, then relaunch.'})
+
+
+# Audio extensions the library understands, mapped to display labels for
+# adopted files (which were never converted through a format choice).
+_ADOPT_FORMATS = {
+    '.flac': 'FLAC', '.m4a': 'ALAC', '.alac': 'ALAC', '.wav': 'WAV',
+    '.ogg': 'OGG Vorbis', '.opus': 'OGG Vorbis', '.mp3': 'MP3',
+    '.mp4': 'MP4 Video', '.webm': 'WebM Video', '.mkv': 'MKV Video',
+    '.mov': 'MOV Video', '.avi': 'AVI Video',
+}
+_ADOPT_SCAN_CAP = 5000
+_ADOPT_ADD_CAP = 300
+
+
+def _adopt_row(path, existing):
+    """Build (not yet added) a library row for a local audio/video file.
+
+    Returns the row, or None when already adopted. Duration/tags fill in
+    via the background backfill so adopting stays fast.
+    """
+    real = os.path.realpath(path)
+    if real in existing:
+        return None
+    ext = os.path.splitext(real)[1].lower()
+    if ext not in _ADOPT_FORMATS:
+        return None
+    return ConversionHistory(
+        url='local:' + real, format=_ADOPT_FORMATS[ext],
+        output_path=real, status='completed', progress=100)
+
+
+@bp.route('/api/adopt', methods=['POST'])
+def api_adopt():
+    """Adopt a folder of existing audio/video files into the library.
+
+    Scans recursively (hidden folders skipped), creates finished rows for
+    anything not already tracked. Facts backfill in the background.
+    """
+    payload = request.get_json(silent=True) or {}
+    folder = (payload.get('path') or '').strip()
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'ok': False,
+                        'message': 'Choose an existing folder'}), 400
+    existing = {row[0] for row in
+                db.session.query(ConversionHistory.output_path).all()
+                if row[0]}
+    scanned = 0
+    added = 0
+    skipped = 0
+    truncated = False
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for name in sorted(files):
+            if name.startswith('.'):
+                continue
+            scanned += 1
+            if scanned > _ADOPT_SCAN_CAP:
+                truncated = True
+                break
+            if os.path.splitext(name)[1].lower() not in _ADOPT_FORMATS:
+                continue
+            if added >= _ADOPT_ADD_CAP:
+                truncated = True
+                break
+            row = _adopt_row(os.path.join(root, name), existing)
+            if row is None:
+                skipped += 1
+                continue
+            db.session.add(row)
+            existing.add(os.path.realpath(os.path.join(root, name)))
+            added += 1
+        if truncated:
+            break
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False,
+                        'message': 'Could not save the adopted files'}), 500
+    return jsonify({'ok': True, 'added': added, 'skipped': skipped,
+                    'scanned': scanned, 'truncated': truncated})
+
+
+@bp.route('/api/upload', methods=['POST'])
+def api_upload():
+    """Import dropped audio files: save into the output folder + adopt.
+
+    Browsers don't reveal local paths on file drop, so the bytes come up
+    multipart and land as new library rows. Audio/video extensions only.
+    """
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'ok': False, 'message': 'No files received'}), 400
+    try:
+        dest_dir = effective_output_path()
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError:
+        return jsonify({'ok': False,
+                        'message': 'Output folder is not writable'}), 400
+    existing = {row[0] for row in
+                db.session.query(ConversionHistory.output_path).all()
+                if row[0]}
+    added, skipped = 0, []
+    for upload in files[:50]:
+        name = sanitize_filename(
+            os.path.basename(upload.filename or ''))[:200]
+        ext = os.path.splitext(name)[1].lower()
+        if not name or ext not in _ADOPT_FORMATS:
+            skipped.append(os.path.basename(upload.filename or ''))
+            continue
+        dest = os.path.join(dest_dir, name)
+        stem, suffix = os.path.splitext(dest)
+        counter = 2
+        while os.path.exists(dest):
+            dest = f'{stem} ({counter}){suffix}'
+            counter += 1
+        try:
+            upload.save(dest)
+        except Exception:
+            skipped.append(name)
+            continue
+        row = _adopt_row(dest, existing)
+        if row is None:
+            skipped.append(name)
+            continue
+        db.session.add(row)
+        existing.add(os.path.realpath(dest))
+        added += 1
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False,
+                        'message': 'Could not save the uploads'}), 500
+    return jsonify({'ok': True, 'added': added, 'skipped': skipped})
+
+
+@bp.route('/api/tidy', methods=['POST'])
+def api_tidy():
+    """Move library files into Artist/Album folders from their tags.
+
+    Rows without usable tags are reported, not touched. Sidecar covers
+    move with their track. Collisions keep the existing file in place.
+    """
+    try:
+        base = effective_output_path()
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        return jsonify({'ok': False,
+                        'message': 'Output folder is not writable'}), 400
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).limit(500).all()
+    moved, skipped, already = 0, 0, 0
+    for row in rows:
+        if row.is_playlist:
+            continue
+        path = row.output_path or ''
+        if not path or not os.path.isfile(path):
+            continue
+        _title, artist, album = _stored_tags(row)
+        artist = (artist or '').strip()
+        album = (album or '').strip()
+        if not artist or not album:
+            skipped += 1
+            continue
+        target_dir = os.path.join(base, sanitize_filename(artist)[:100],
+                                  sanitize_filename(album)[:100])
+        target = os.path.join(target_dir, os.path.basename(path))
+        if os.path.abspath(target) == os.path.abspath(path):
+            already += 1
+            continue
+        if os.path.exists(target):
+            skipped += 1
+            continue
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            try:
+                os.replace(path, target)
+            except OSError:
+                shutil.move(path, target)
+            sidecar = os.path.splitext(path)[0] + '.cover.jpg'
+            if os.path.isfile(sidecar):
+                try:
+                    os.replace(sidecar,
+                               os.path.splitext(target)[0] + '.cover.jpg')
+                except OSError:
+                    pass
+            row.output_path = target
+            _invalidate_stat(path)
+            _meta_cache.pop(path, None)
+            db.session.commit()
+            moved += 1
+        except Exception:
+            db.session.rollback()
+            skipped += 1
+    return jsonify({'ok': True, 'moved': moved, 'skipped': skipped,
+                    'already': already})
+
+
+def _has_embedded_art(path):
+    """True when ffmpeg can extract a picture stream from the file."""
+    fd, tmp = tempfile.mkstemp(suffix='.jpg')
+    os.close(fd)
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-y', '-v', 'error', '-i', path, '-an',
+             '-vcodec', 'copy', tmp],
+            capture_output=True, text=True, timeout=30)
+        return (res.returncode == 0 and os.path.isfile(tmp)
+                and os.path.getsize(tmp) > 0)
+    except Exception:
+        return False
+    finally:
+        _cleanup(tmp)
+
+
+@bp.route('/api/covers/backfill', methods=['POST'])
+def api_backfill_covers():
+    """Fetch missing cover art from each track's stored thumbnail URL.
+
+    Videos already get a poster frame from the cover endpoint, so only
+    audio rows are considered. Sidecars are written next to the track.
+    """
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).limit(50).all()
+    filled, has_art, missing_url, failed = 0, 0, 0, 0
+    for row in rows:
+        if row.is_playlist:
+            continue
+        path = row.output_path or ''
+        if not path or not os.path.isfile(path):
+            continue
+        if os.path.splitext(path)[1].lower() in (
+                '.mp4', '.webm', '.mkv', '.mov', '.avi'):
+            has_art += 1
+            continue
+        if os.path.isfile(os.path.splitext(path)[0] + '.cover.jpg'):
+            has_art += 1
+            continue
+        if _has_embedded_art(path):
+            has_art += 1
+            continue
+        url = getattr(row, 'cover_url', '') or ''
+        if not url:
+            missing_url += 1
+            continue
+        try:
+            fetched = _fetch_thumbnail(url)
+            if not fetched:
+                failed += 1
+                continue
+            shutil.copyfile(fetched, os.path.splitext(path)[0] + '.cover.jpg')
+            _cleanup(fetched)
+            filled += 1
+        except Exception:
+            failed += 1
+    return jsonify({'ok': True, 'filled': filled, 'has_art': has_art,
+                    'missing_url': missing_url, 'failed': failed})
+
+
+@bp.route('/api/transcode', methods=['POST'])
+def api_transcode():
+    """Convert finished tracks to another audio format without re-downloading.
+
+    Creates a sibling file (same folder, new extension) plus a new library
+    row; the original is untouched. Tags carry over, covers re-attach for
+    formats that hold them (or copy as sidecars otherwise).
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        ids = [int(i) for i in (payload.get('ids') or [])][:50]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Invalid track list'}), 400
+    fmt_key = str(payload.get('format') or '').strip()
+    if not ids:
+        return jsonify({'ok': False, 'message': 'No tracks selected'}), 400
+    if not is_valid_format(fmt_key):
+        return jsonify({'ok': False, 'message': 'Invalid format'}), 400
+    if _download_kind_for(fmt_key) == 'video':
+        return jsonify({'ok': False,
+                        'message': 'Transcoding targets audio formats'}), 400
+    fmt = VALID_FORMATS[fmt_key]
+    converted, failed = 0, []
+    for track_id in ids:
+        history = db.session.get(ConversionHistory, track_id)
+        src = (history.output_path or '') if history else ''
+        if (not history or history.status not in ('completed', 'skipped')
+                or not src or not os.path.isfile(src)):
+            failed.append(track_id)
+            continue
+        directory = os.path.dirname(src)
+        stem = os.path.splitext(os.path.basename(src))[0]
+        dest = os.path.join(directory, f'{stem}.{fmt["ext"]}')
+        counter = 2
+        base_stem = stem
+        while os.path.exists(dest):
+            dest = os.path.join(directory, f'{base_stem} ({counter}).{fmt["ext"]}')
+            counter += 1
+        title, artist, album = _stored_tags(history)
+        meta = {'title': title, 'artist': artist, 'album': album}
+        cover = None
+        sidecar_src = os.path.splitext(src)[0] + '.cover.jpg'
+        if fmt_key in COVER_FORMATS and os.path.isfile(sidecar_src):
+            cover = sidecar_src
+        try:
+            result = convert_audio_file(src, fmt_key, dest, meta, cover)
+        except Exception as e:
+            result = {'success': False, 'error': str(e)}
+        if not result.get('success'):
+            _cleanup(dest)
+            failed.append(track_id)
+            continue
+        if fmt_key not in COVER_FORMATS and os.path.isfile(sidecar_src):
+            try:
+                shutil.copyfile(sidecar_src,
+                                os.path.splitext(dest)[0] + '.cover.jpg')
+            except OSError:
+                pass
+        row = ConversionHistory(
+            url=history.url, format=fmt['label'], output_path=dest,
+            status='completed', progress=100,
+            cover_url=getattr(history, 'cover_url', '') or '')
+        db.session.add(row)
+        db.session.commit()
+        _store_file_facts(row, dest)
+        _invalidate_stat(dest)
+        converted += 1
+    return jsonify({'ok': True, 'converted': converted, 'failed': failed})
+
+
+def _download_kind_for(fmt_key):
+    """'video' for video target formats, else 'audio'."""
+    return VALID_FORMATS.get(fmt_key, {}).get('kind', 'audio')
+
+
+def _trash_path(path):
+    """Move a user file to the OS trash; fall back to deleting it.
+
+    Returns (gone_from_place, used_trash). Temp files keep using plain
+    removal via _cleanup — the trash is only for deliberate deletes.
+    """
+    try:
+        from send2trash import send2trash
+        send2trash(path)
+        return True, True
+    except Exception:
+        pass
+    try:
+        os.remove(path)
+        return True, False
+    except OSError:
+        return False, False
+
+
 def is_valid_format(format_type):
     return format_type.lower() in VALID_FORMATS
 
@@ -2236,7 +3304,12 @@ def _serialize(item):
         'retry_attempts': item.retry_attempts,
         'liked': bool(getattr(item, 'liked', False)),
         'play_count': getattr(item, 'play_count', 0) or 0,
+        'rating': getattr(item, 'rating', 0) or 0,
+        'quality': getattr(item, 'quality', '') or '',
         'duration': getattr(item, 'duration', 0) or 0,
+        'tag_title': getattr(item, 'tag_title', '') or '',
+        'tag_artist': getattr(item, 'tag_artist', '') or '',
+        'tag_album': getattr(item, 'tag_album', '') or '',
         'error': item.error or '',
         'created_at': str(item.created_at) if item.created_at else '',
     }
@@ -2294,9 +3367,53 @@ def api_queue_status():
 
 @bp.route('/api/health')
 def api_health():
-    """Client-visible warnings: stale downloader suspicion."""
+    """Client-visible warnings: downloader health and output writability."""
+    output_ok = False
+    disk_free = None
+    try:
+        target = effective_output_path()
+        os.makedirs(target, exist_ok=True)
+        output_ok = os.access(target, os.W_OK)
+        disk_free = shutil.disk_usage(target).free
+    except OSError:
+        pass
     return jsonify({'ok': True,
-                    'stale_helper_suspected': _stale_helper_event.is_set()})
+                    'stale_helper_suspected': _stale_helper_event.is_set(),
+                    'ffmpeg': check_ffmpeg(),
+                    'ytdlp': bool(_find_ytdlp()),
+                    'output_writable': output_ok,
+                    'disk_free_bytes': disk_free})
+
+
+@bp.route('/api/prune-missing', methods=['POST'])
+def api_prune_missing():
+    """Drop history rows whose files are gone from disk.
+
+    Only finished rows are considered; active downloads are never touched.
+    Playlist parents are removed once none of their tracks remain.
+    """
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).all()
+    removed = 0
+    for row in rows:
+        if row.is_playlist:
+            continue
+        path = row.output_path or ''
+        if path and not os.path.isfile(path):
+            db.session.delete(row)
+            removed += 1
+    db.session.commit()
+    orphaned = 0
+    for parent in db.session.query(ConversionHistory).filter_by(
+            is_playlist=True).all():
+        remaining = db.session.query(ConversionHistory).filter_by(
+            parent_id=parent.id).count()
+        if remaining == 0:
+            db.session.delete(parent)
+            orphaned += 1
+    db.session.commit()
+    _invalidate_storage()
+    return jsonify({'ok': True, 'removed': removed + orphaned})
 
 
 @bp.route('/api/skip/<int:conversion_id>')
@@ -2340,6 +3457,58 @@ def skip_job(conversion_id):
     if history.parent_id:
         _refresh_playlist_parent(history.parent_id)
     return jsonify({'ok': True, 'skipped': 1})
+
+
+@bp.route('/api/pause/<int:conversion_id>')
+@_same_origin_required
+def pause_job(conversion_id):
+    """Pause an active download, keeping its partial file for resume.
+
+    The running yt-dlp process is terminated; the worker notices the
+    paused status and stands down without failing or retrying the job.
+    Resuming continues the same partial file (--continue).
+    """
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history:
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    if history.status not in ('downloading', 'converting', 'pending'):
+        return jsonify({'ok': False,
+                        'message': 'Only active conversions can be paused'}), 400
+    with _paused_lock:
+        _paused_jobs.add(history.id)
+        proc = _active_downloads.get(history.id)
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    history.status = 'paused'
+    db.session.commit()
+    if history.parent_id:
+        _refresh_playlist_parent(history.parent_id)
+    return jsonify({'ok': True, 'paused': 1})
+
+
+@bp.route('/api/resume/<int:conversion_id>')
+@_same_origin_required
+def resume_job(conversion_id):
+    """Resume a paused download from its partial file."""
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history:
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    if history.status != 'paused':
+        return jsonify({'ok': False,
+                        'message': 'Only paused conversions can be resumed'}), 400
+    with _paused_lock:
+        _paused_jobs.discard(history.id)
+    history.status = 'pending'
+    db.session.commit()
+    if not _queue_has(history.id):
+        _conversion_queue.put(history.id)
+    _ensure_worker()
+    if history.parent_id:
+        _refresh_playlist_parent(history.parent_id)
+    return jsonify({'ok': True, 'resumed': 1})
 
 
 @bp.route('/api/diagnostics')
@@ -2396,10 +3565,33 @@ def api_diagnostics():
             'close_behavior': getattr(settings, 'close_behavior', 'ask'),
             'tray_icon': bool(getattr(settings, 'tray_icon', True)),
         },
+        'recent_log': _recent_log_tail(),
     }
     return Response(json.dumps(bundle, indent=2), mimetype='application/json',
                     headers={'Content-Disposition':
                              'attachment; filename="audio-converter-diagnostics.json"'})
+
+
+def _recent_log_tail(limit=40):
+    """Last log lines for the support bundle, with embedded credentials cut.
+
+    The desktop launcher rotates <data_dir>/logs/app.log; without it this
+    is just []. Never includes tokens: userinfo in URLs is masked.
+    """
+    try:
+        db_path = db.engine.url.database
+    except Exception:
+        return []
+    if not db_path or db_path == ':memory:':
+        return []
+    log_path = os.path.join(os.path.dirname(db_path), 'logs', 'app.log')
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()[-limit:]
+    except OSError:
+        return []
+    return [re.sub(r'(://)[^/@\s]+@', r'\1***@', line.rstrip('\n'))
+            for line in lines]
 
 
 @bp.route('/api/backup')
@@ -2459,16 +3651,24 @@ def delete_playlist(parent_id):
                                    'skip or wait for them first'}), 400
 
     removed_files = 0
+    trashed_files = 0
+    kept_files = 0
+    doomed = {c.id for c in children} | {parent.id}
     folder = parent.output_path or ''
     for child in children:
         path = child.output_path or ''
         if path and os.path.isfile(path):
-            try:
-                os.remove(path)
-                removed_files += 1
-                _invalidate_stat(path)
-            except OSError:
-                pass
+            shared = db.session.query(ConversionHistory).filter(
+                ConversionHistory.output_path == path,
+                ~ConversionHistory.id.in_(doomed)).first() is not None
+            if shared:
+                kept_files += 1
+            else:
+                gone, trashed = _trash_path(path)
+                if gone:
+                    removed_files += 1
+                    trashed_files += 1 if trashed else 0
+                    _invalidate_stat(path)
         db.session.delete(child)
     db.session.delete(parent)
     db.session.commit()
@@ -2480,7 +3680,9 @@ def delete_playlist(parent_id):
     except OSError:
         pass
     return jsonify({'ok': True, 'removed_tracks': len(children),
-                    'removed_files': removed_files})
+                    'removed_files': removed_files,
+                    'trashed_files': trashed_files,
+                    'kept_files': kept_files})
 
 
 @bp.route('/api/delete/<int:conversion_id>', methods=['POST'])
@@ -2497,22 +3699,35 @@ def delete_job(conversion_id):
                         'message': 'Skip the track first before deleting it'}), 400
 
     removed = False
+    trashed = False
+    shared = False
     path = history.output_path or ''
     if path and os.path.isfile(path):
-        try:
-            os.remove(path)
-            removed = True
-            _invalidate_stat(path)
-        except OSError as e:
-            return jsonify({'ok': False,
-                            'message': f'Could not delete file: {str(e)}'}), 500
+        shared = db.session.query(ConversionHistory).filter(
+            ConversionHistory.id != history.id,
+            ConversionHistory.output_path == path).first() is not None
+        if not shared:
+            removed, trashed = _trash_path(path)
+            if removed:
+                _invalidate_stat(path)
+            else:
+                return jsonify({'ok': False,
+                                'message': 'Could not delete file'}), 500
 
     parent_id = history.parent_id
     db.session.delete(history)
     db.session.commit()
     if parent_id:
         _refresh_playlist_parent(parent_id)
-    return jsonify({'ok': True, 'removed_file': removed})
+    if shared:
+        return jsonify({'ok': True, 'removed_file': False,
+                        'trashed': False,
+                        'message': 'History entry removed. File kept — '
+                                   'another entry still points at it.'})
+    if removed and trashed:
+        return jsonify({'ok': True, 'removed_file': True, 'trashed': True,
+                        'message': 'Moved to Trash.'})
+    return jsonify({'ok': True, 'removed_file': removed, 'trashed': False})
 
 
 def _readable_bytes(num):
@@ -3333,9 +4548,10 @@ def _should_skip_duplicates():
 def _ffmpeg_file_info(path):
     """Run `ffmpeg -i` on a file and parse its Duration plus metadata tags.
 
-    Returns (duration_seconds, tags_dict). Unparseable files yield (0.0, {}).
-    Using ffmpeg instead of ffprobe keeps the app down to a single binary
-    dependency (static ffmpeg builds often ship without ffprobe).
+    Returns (duration_seconds, tags_dict, quality_string). Unparseable
+    files yield (0.0, {}, ''). Using ffmpeg instead of ffprobe keeps the
+    app down to a single binary dependency (static ffmpeg builds often
+    ship without ffprobe).
     """
     try:
         res = subprocess.run(
@@ -3343,7 +4559,7 @@ def _ffmpeg_file_info(path):
             capture_output=True, text=True, timeout=20,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0.0, {}
+        return 0.0, {}, ''
     out = res.stderr or ''
     duration = 0.0
     match = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', out)
@@ -3359,17 +4575,304 @@ def _ffmpeg_file_info(path):
         tag = re.search(r'(?im)^\s*' + key + r'\s*:\s*(.+?)\s*$', out)
         if tag:
             tags[key] = tag.group(1)
-    return duration, tags
+    return duration, tags, _quality_line(out)
+
+
+def _file_chapters(path):
+    """Chapter markers (start/end seconds + title) parsed from ffmpeg output.
+
+    Uses plain `ffmpeg -i` (no ffprobe dependency): chapters print as
+    `Chapter #0:1: start 60.000000, end 120.000000` with an optional
+    indented `title:` line beneath. Returns [] for chapterless files.
+    """
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', path],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    chapters = []
+    current = None
+    for line in (res.stderr or '').splitlines():
+        match = re.search(
+            r'Chapter #\d+:\d+:\s*start\s*([\d.]+),\s*end\s*([\d.]+)', line)
+        if match:
+            try:
+                current = {'start': float(match.group(1)),
+                           'end': float(match.group(2)), 'title': ''}
+            except ValueError:
+                current = None
+            if current is not None:
+                chapters.append(current)
+            continue
+        if current is not None:
+            title = re.search(r'(?i)^\s*title\s*:\s*(.+?)\s*$', line)
+            if title:
+                current['title'] = title.group(1)
+                current = None
+    return [c for c in chapters if c['end'] > c['start'] >= 0]
+
+
+def _parse_lrc(synced):
+    """Parse synced `[mm:ss.xx] line` lyrics into [{t, text}]."""
+    lines = []
+    for raw in (synced or '').splitlines():
+        match = re.match(r'\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$', raw.strip())
+        if not match:
+            continue
+        try:
+            t = int(match.group(1)) * 60 + float(match.group(2))
+        except ValueError:
+            continue
+        text = match.group(3).strip()
+        if text:
+            lines.append({'t': t, 'text': text})
+    return lines
+
+
+_lyrics_cache = {}
+
+
+def _fetch_lyrics(artist, title, album='', duration=0):
+    """Look up plain + synced lyrics from LRCLIB (no key needed).
+
+    Only ever called from the explicit lyrics button, so the third-party
+    lookup is always user-initiated. Results are cached in memory.
+    """
+    key = (artist or '', title or '', album or '')
+    if key in _lyrics_cache:
+        return _lyrics_cache[key]
+    result = {'plain': '', 'synced': []}
+    if not (title or '').strip():
+        return result
+    try:
+        params = {'track_name': title, 'artist_name': artist or '',
+                  'album_name': album or ''}
+        if duration:
+            params['duration'] = int(duration)
+        resp = requests.get('https://lrclib.net/api/get', params=params,
+                            timeout=15,
+                            headers={'User-Agent': 'AudioConverter/1.0'})
+        if resp.status_code == 200:
+            data = resp.json()
+            result = {'plain': data.get('plainLyrics') or '',
+                      'synced': _parse_lrc(data.get('syncedLyrics') or '')}
+    except Exception:
+        pass
+    _lyrics_cache[key] = result
+    if len(_lyrics_cache) > 200:
+        for old in list(_lyrics_cache)[:50]:
+            _lyrics_cache.pop(old, None)
+    return result
+
+
+@bp.route('/api/lyrics/<int:conversion_id>')
+def api_lyrics(conversion_id):
+    """Plain + synced lyrics for the lyrics overlay, looked up on demand."""
+    history = _playable_file_or_404(conversion_id)
+    if not history:
+        abort(404)
+    title, artist, album = _stored_tags(history)
+    if not title:
+        title = os.path.splitext(
+            os.path.basename(history.output_path or ''))[0]
+    data = _fetch_lyrics(artist, title, album,
+                         _stored_duration(history))
+    return jsonify({'ok': True, 'title': title, 'artist': artist,
+                    'plain': data['plain'], 'synced': data['synced']})
+
+
+@bp.route('/api/rate/<int:conversion_id>', methods=['POST'])
+def api_rate(conversion_id):
+    """Set a personal 0–5 star rating on a finished track."""
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history or history.status not in ('completed', 'skipped'):
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        rating = int(payload.get('rating', 0))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Invalid rating'}), 400
+    history.rating = max(0, min(5, rating))
+    db.session.commit()
+    return jsonify({'ok': True, 'rating': history.rating})
+
+
+def _smart_items(key, limit=50):
+    """Track rows for a smart mix. Keys: played, recent, unplayed,
+    liked, rated."""
+    base = ConversionHistory.status.in_(['completed', 'skipped'])
+    query = db.session.query(ConversionHistory).filter(base)
+    if key == 'played':
+        query = query.filter(ConversionHistory.play_count > 0).order_by(
+            ConversionHistory.play_count.desc())
+    elif key == 'recent':
+        query = query.order_by(ConversionHistory.created_at.desc())
+    elif key == 'unplayed':
+        query = query.filter((ConversionHistory.play_count.is_(None)) |
+                              (ConversionHistory.play_count == 0)).order_by(
+            ConversionHistory.created_at.desc())
+    elif key == 'liked':
+        query = query.filter(ConversionHistory.liked.is_(True)).order_by(
+            ConversionHistory.created_at.desc())
+    elif key == 'rated':
+        query = query.filter(ConversionHistory.rating > 0).order_by(
+            ConversionHistory.rating.desc(),
+            ConversionHistory.play_count.desc())
+    else:
+        return None
+    return query.limit(limit).all()
+
+
+@bp.route('/api/smart/<key>')
+def api_smart(key):
+    """A smart mix: auto-built track lists (most played, recent, ...)."""
+    items = _smart_items(key)
+    if items is None:
+        abort(404)
+    return jsonify({'ok': True, 'key': key,
+                    'items': [_serialize(i) for i in items]})
+
+
+def _grouped_tracks(column, limit_groups=200):
+    """[{name, tracks, seconds, cover_id}] grouped by a tag column."""
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).all()
+    groups = {}
+    for row in rows:
+        if row.is_playlist:
+            continue
+        name = (getattr(row, column, '') or '').strip() or 'Unknown'
+        entry = groups.setdefault(name, {'tracks': 0, 'seconds': 0.0,
+                                         'cover_id': row.id,
+                                         'last': row.created_at})
+        entry['tracks'] += 1
+        try:
+            entry['seconds'] += float(row.duration or 0)
+        except (TypeError, ValueError):
+            pass
+        if row.created_at and (not entry['last'] or row.created_at > entry['last']):
+            entry['cover_id'] = row.id
+            entry['last'] = row.created_at
+    result = [{'name': name, 'tracks': e['tracks'],
+               'seconds': e['seconds'], 'cover_id': e['cover_id']}
+              for name, e in groups.items()]
+    result.sort(key=lambda e: (-e['tracks'], e['name'].lower()))
+    return result[:limit_groups]
+
+
+@bp.route('/api/albums')
+def api_albums():
+    """Album browser: name, track count, length, newest track's cover."""
+    return jsonify({'ok': True, 'albums': _grouped_tracks('tag_album')})
+
+
+@bp.route('/api/artists')
+def api_artists():
+    """Artist browser, same shape as /api/albums."""
+    return jsonify({'ok': True, 'artists': _grouped_tracks('tag_artist')})
+
+
+@bp.route('/api/album/tracks')
+def api_album_tracks():
+    """Tracks of one album (or artist) for drill-down + play-all."""
+    name = (request.args.get('name') or '').strip()
+    by = request.args.get('by', 'album')
+    column = ConversionHistory.tag_album if by == 'album' else ConversionHistory.tag_artist
+    if not name:
+        return jsonify({'ok': True, 'items': []})
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped']),
+        column == name).order_by(ConversionHistory.created_at.desc()).all()
+    return jsonify({'ok': True, 'items': [_serialize(r) for r in rows]})
+
+
+@bp.route('/api/notices')
+def api_notices():
+    """In-app notification center: recent notices, newest first."""
+    from app.models import Notice
+    try:
+        items = db.session.query(Notice).order_by(
+            Notice.id.desc()).limit(50).all()
+    except Exception:
+        return jsonify({'ok': True, 'items': [], 'unread': 0})
+    return jsonify({'ok': True,
+                    'items': [{'id': n.id, 'title': n.title, 'body': n.body,
+                               'read': bool(n.read),
+                               'created_at': str(n.created_at) if n.created_at else ''}
+                              for n in items],
+                    'unread': sum(1 for n in items if not n.read)})
+
+
+@bp.route('/api/notices/read', methods=['POST'])
+def api_notices_read():
+    """Mark all notices read (or clear them with ?clear=1)."""
+    from app.models import Notice
+    try:
+        if request.args.get('clear'):
+            db.session.query(Notice).delete()
+        else:
+            db.session.query(Notice).filter_by(read=False).update({'read': True})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/first-run')
+def api_first_run():
+    """True until the first conversion exists: drives the welcome wizard."""
+    try:
+        has_rows = db.session.query(ConversionHistory).first() is not None
+    except Exception:
+        has_rows = True
+    return jsonify({'ok': True, 'first_run': not has_rows})
+
+
+@bp.route('/api/chapters/<int:conversion_id>')
+def api_chapters(conversion_id):
+    """Chapter markers for long videos/audiobooks in the theater view."""
+    history = _playable_file_or_404(conversion_id)
+    if not history:
+        abort(404)
+    return jsonify({'ok': True, 'chapters': _file_chapters(history.output_path)})
+
+
+def _quality_line(ffmpeg_stderr):
+    """Human source-quality line from `ffmpeg -i` output.
+
+    Parses the first audio stream (`Audio: flac, 44100 Hz, stereo, s16`)
+    into e.g. 'FLAC · 44.1 kHz · stereo'. Returns '' when unparseable.
+    """
+    match = re.search(r'(?im)^\s*Stream #\d+:\d+.*?:\s*Audio:\s*([^,\n]+)'
+                      r'(?:,\s*(\d+)\s*Hz)?(?:,\s*([^,\n]+))?', ffmpeg_stderr or '')
+    if not match:
+        return ''
+    codec = (match.group(1) or '').strip().split()[0].upper()
+    parts = [codec] if codec else []
+    try:
+        rate = int(match.group(2) or 0)
+        if rate > 0:
+            khz = rate / 1000
+            parts.append(f'{khz:g} kHz')
+    except (TypeError, ValueError):
+        pass
+    layout = (match.group(3) or '').strip().split('(')[0].strip()
+    if layout:
+        parts.append(layout)
+    return ' · '.join(parts)
 
 
 def _probe_metadata(path):
-    """Extract title, artist, album, and duration from a converted file."""
-    duration, tags = _ffmpeg_file_info(path)
+    """Extract title, artist, album, duration, and quality from a file."""
+    duration, tags, quality = _ffmpeg_file_info(path)
     return {
         'title': tags.get('title', ''),
         'artist': tags.get('artist', ''),
         'album': tags.get('album', ''),
         'duration': duration,
+        'quality': quality,
     }
 
 
@@ -3398,8 +4901,47 @@ def _is_valid_audio(path):
 
 def _probe_duration(path):
     """Return a file's audio duration in seconds, or 0 if unreadable."""
-    duration, _tags = _ffmpeg_file_info(path)
+    duration, _tags, _quality = _ffmpeg_file_info(path)
     return duration
+
+
+def _store_file_facts(row, path):
+    """Fill a finished row's duration + embedded tags, probing at most once.
+
+    New conversions call this at completion; old rows get filled lazily by
+    _stored_tags the first time they are rendered. Either way listings,
+    stats, and grouping views never spawn ffmpeg per row.
+    """
+    try:
+        meta = _cached_metadata(path)
+    except Exception:
+        return 0.0
+    try:
+        row.duration = float(meta.get('duration') or 0)
+        row.tag_title = str(meta.get('title') or '')[:500]
+        row.tag_artist = str(meta.get('artist') or '')[:500]
+        row.tag_album = str(meta.get('album') or '')[:500]
+        row.quality = str(meta.get('quality') or '')[:100]
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return float(meta.get('duration') or 0)
+
+
+def _stored_tags(row):
+    """(title, artist, album) for a row, backfilling pre-upgrade rows once."""
+    title = getattr(row, 'tag_title', '') or ''
+    artist = getattr(row, 'tag_artist', '') or ''
+    album = getattr(row, 'tag_album', '') or ''
+    if title or artist or album:
+        return title, artist, album
+    path = getattr(row, 'output_path', '') or ''
+    if not path or not os.path.isfile(path):
+        return '', '', ''
+    _store_file_facts(row, path)
+    return (getattr(row, 'tag_title', '') or '',
+            getattr(row, 'tag_artist', '') or '',
+            getattr(row, 'tag_album', '') or '')
 
 
 def _stored_duration(row):

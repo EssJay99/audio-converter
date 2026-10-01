@@ -6,9 +6,11 @@ import requests
 
 bp = Blueprint('settings', __name__)
 
-SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression')
+SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression',
+                  'default_format')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
-                  'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',)
+                  'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
+                  'auto_update_ytdlp',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -48,12 +50,17 @@ def get_settings_dict():
         'subtitles': True,
         'sponsorblock': True,
         'normalize_audio': False,
+        'auto_update_ytdlp': False,
+        'offpeak_limit': 0,
+        'offpeak_start': 22,
+        'offpeak_end': 7,
         'tidal_client_id': '',
         'tidal_client_secret': '',
         'tidal_connected': False,
         'desktop_notifications': True,
         'close_behavior': 'ask',
         'tray_icon': True,
+        'default_format': 'flac',
     }
     user_settings = UserSettings.query.first()
     if user_settings:
@@ -71,6 +78,12 @@ def get_settings_dict():
             defaults['job_timeout'] = user_settings.job_timeout
         if getattr(user_settings, 'bandwidth_limit', None) is not None:
             defaults['bandwidth_limit'] = user_settings.bandwidth_limit
+        if getattr(user_settings, 'offpeak_limit', None) is not None:
+            defaults['offpeak_limit'] = user_settings.offpeak_limit
+        if getattr(user_settings, 'offpeak_start', None) is not None:
+            defaults['offpeak_start'] = user_settings.offpeak_start
+        if getattr(user_settings, 'offpeak_end', None) is not None:
+            defaults['offpeak_end'] = user_settings.offpeak_end
         defaults['proxy'] = getattr(user_settings, 'proxy', None) or ''
         if getattr(user_settings, 'worker_count', None) is not None:
             defaults['worker_count'] = user_settings.worker_count
@@ -94,6 +107,9 @@ def save_settings():
     data['retry_count'] = _int_from_form(request, 'retry_count', 3, 0, 10)
     data['job_timeout'] = _int_from_form(request, 'job_timeout', 300, 30, 3600)
     data['bandwidth_limit'] = _int_from_form(request, 'bandwidth_limit', 0, 0, 100000)
+    data['offpeak_limit'] = _int_from_form(request, 'offpeak_limit', 0, 0, 100000)
+    data['offpeak_start'] = _int_from_form(request, 'offpeak_start', 22, 0, 23)
+    data['offpeak_end'] = _int_from_form(request, 'offpeak_end', 7, 0, 23)
     data['proxy'] = request.form.get('proxy', '').strip()
     data['worker_count'] = _int_from_form(request, 'worker_count', 3, 1, 8)
     data['tidal_client_id'] = request.form.get('tidal_client_id', '').strip()
@@ -101,6 +117,8 @@ def save_settings():
     data['close_behavior'] = request.form.get('close_behavior', 'ask').strip()
     if data['close_behavior'] not in ('ask', 'quit'):
         data['close_behavior'] = 'ask'
+    if data.get('default_format') not in ('flac', 'alac', 'wav', 'ogg_vorbis'):
+        data['default_format'] = 'flac'
 
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')
@@ -115,6 +133,9 @@ def save_settings():
         user_settings.retry_count = data['retry_count']
         user_settings.job_timeout = data['job_timeout']
         user_settings.bandwidth_limit = data['bandwidth_limit']
+        user_settings.offpeak_limit = data['offpeak_limit']
+        user_settings.offpeak_start = data['offpeak_start']
+        user_settings.offpeak_end = data['offpeak_end']
         user_settings.proxy = data['proxy']
         user_settings.worker_count = data['worker_count']
         # New Tidal credentials wipe stored tokens (they belong to the old app).
@@ -155,7 +176,7 @@ def _default_update_feed():
     override = os.environ.get('AUDIO_CONVERTER_UPDATE_FEED', '').strip()
     if override:
         return override
-    return 'https://api.github.com/EssJay99/audio-converter/releases/latest'
+    return 'https://api.github.com/repos/EssJay99/audio-converter/releases/latest'
 
 
 def _parse_feed_payload(data):

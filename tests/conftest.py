@@ -22,6 +22,20 @@ def fresh_db():
     with app.app_context():
         db.drop_all()
         db.create_all()
+        # The in-memory work queue is global: drain it so one test's
+        # un-consumed job ids can't leak into another test's assertions.
+        # (Worker threads are mocked out in most tests, so nothing drains
+        # it otherwise.)
+        import app.routes.convert as convert_module
+        try:
+            while True:
+                convert_module._conversion_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            convert_module._paused_jobs.clear()
+        except Exception:
+            pass
         yield
         db.session.remove()
         db.drop_all()

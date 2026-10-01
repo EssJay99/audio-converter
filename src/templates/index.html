@@ -41,6 +41,36 @@
 
         <div class="row">
             <div class="col-lg-5">
+                <div class="card p-4 shadow-sm border-0 rounded d-none" id="firstRun">
+                    <h3>Welcome 👋</h3>
+                    <p class="text-muted small">Three quick choices and your first download is on its way. Everything stays on this Mac.</p>
+                    <form method="POST" action="/convert" id="firstRunForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="mb-2">
+                            <label class="form-label small" for="firstRunPath">Save music to</label>
+                            <input type="text" class="form-control" id="firstRunPath" name="output_path"
+                                   value="{{ default_output_path }}" data-path-browser autocomplete="off">
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="firstRunFormat">Format</label>
+                            <select class="form-select" id="firstRunFormat" name="format">
+                                <option value="flac">FLAC — best quality</option>
+                                <option value="alac">ALAC — for Apple devices</option>
+                                <option value="wav">WAV — uncompressed</option>
+                                <option value="ogg_vorbis">OGG — smaller files</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small" for="firstRunUrl">Paste a YouTube or SoundCloud link</label>
+                            <input type="text" class="form-control" id="firstRunUrl" name="url" required
+                                   placeholder="https://…" autocomplete="off" spellcheck="false">
+                        </div>
+                        <div class="d-flex gap-2">
+                            <button type="submit" class="btn btn-primary">Download my first track</button>
+                            <button type="button" class="btn btn-link btn-sm" id="firstRunSkip">Skip tour</button>
+                        </div>
+                    </form>
+                </div>
                 <div class="card p-4 shadow-sm border-0 rounded">
                     <h3>Convert Audio</h3>
                     <form method="POST" action="/convert" id="homeConvertForm">
@@ -55,10 +85,10 @@
                         <div class="mb-3">
                             <label for="format" class="form-label">Output Format</label>
                             <select class="form-select form-control-lg" id="format" name="format" required>
-                                <option value="flac">FLAC (Free Lossless Audio Codec)</option>
-                                <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
-                                <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
-                                <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
+                                <option value="flac"{% if default_format == 'flac' %} selected{% endif %}>FLAC (Free Lossless Audio Codec)</option>
+                                <option value="alac"{% if default_format == 'alac' %} selected{% endif %}>ALAC (Apple Lossless Audio Codec)</option>
+                                <option value="wav"{% if default_format == 'wav' %} selected{% endif %}>WAV (Uncompressed PCM - truly lossless)</option>
+                                <option value="ogg_vorbis"{% if default_format == 'ogg_vorbis' %} selected{% endif %}>OGG Vorbis (High-quality lossy)</option>
                                                                                                                             </select>
                         </div>
 
@@ -148,9 +178,9 @@
         <div class="row mt-3">
             <div class="col-12">
                 <div id="healthBanner" class="alert alert-warning alert-dismissible d-none" role="alert">
-                    <strong>Downloads keep failing.</strong>
-                    <span id="healthBannerText">This looks like an outdated downloader.</span>
-                    <a href="/settings" class="alert-link">Update yt-dlp in Settings › Helpers</a>.
+                    <strong>Heads up.</strong>
+                    <span id="healthBannerText"></span>
+                    <a href="/settings" class="alert-link">Open Settings</a>.
                     <button type="button" class="btn-close" data-hide-health aria-label="Dismiss"></button>
                 </div>
                 {% if history %}
@@ -177,6 +207,14 @@
                                 <span id="bulkBar" class="d-none align-items-center gap-2">
                                     <span id="bulkCount" class="small text-muted"></span>
                                     <button type="button" id="bulkRetry" class="btn btn-sm btn-outline-info" title="Retry all failed selections">Retry</button>
+                                    <button type="button" id="bulkQueue" class="btn btn-sm btn-outline-secondary" title="Add all playable selections to the player queue">Queue</button>
+                                    <select id="bulkFormat" class="form-select form-select-sm" title="Target format for transcoding" aria-label="Transcode format" style="width:auto;">
+                                        <option value="flac">FLAC</option>
+                                        <option value="alac">ALAC</option>
+                                        <option value="wav">WAV</option>
+                                        <option value="ogg_vorbis">OGG</option>
+                                    </select>
+                                    <button type="button" id="bulkTranscode" class="btn btn-sm btn-outline-secondary" title="Convert selections to the chosen format without re-downloading">Transcode</button>
                                     <button type="button" id="bulkDelete" class="btn btn-sm btn-outline-danger" title="Delete all selections from disk">Delete</button>
                                     <button type="button" id="bulkClear" class="btn btn-sm btn-outline-secondary">Clear</button>
                                 </span>
@@ -190,6 +228,7 @@
                                     <option value="pending">Pending</option>
                                     <option value="downloading">Downloading</option>
                                     <option value="converting">Converting</option>
+                                    <option value="paused">Paused</option>
                                     <option value="completed">Completed</option>
                                     <option value="skipped">Skipped</option>
                                     <option value="failed">Failed</option>
@@ -326,6 +365,13 @@
                                                             {% endif %}
                                                     {% else %}
                                                         {% if item.status in ['pending', 'downloading', 'converting'] %}
+                                                            <button type="button" class="btn btn-sm btn-outline-info pause-btn me-1"
+                                                                    data-pause="{{ item.id }}" title="Pause this download (resumable)">Pause</button>
+                                                            <button type="button" class="btn btn-sm btn-outline-warning skip-btn"
+                                                                    data-skip="{{ item.id }}" title="Skip this track">Skip</button>
+                                                        {% elif item.status == 'paused' %}
+                                                            <button type="button" class="btn btn-sm btn-outline-success resume-btn me-1"
+                                                                    data-resume="{{ item.id }}" title="Resume this download">Resume</button>
                                                             <button type="button" class="btn btn-sm btn-outline-warning skip-btn"
                                                                     data-skip="{{ item.id }}" title="Skip this track">Skip</button>
                                                         {% elif item.status == 'failed' %}
@@ -430,7 +476,12 @@
                         }
                         if (item.status === 'failed' && fileCell && !fileCell.querySelector('span')) {
                             if (item.error) {
-                                fileCell.innerHTML = '<span class="text-danger small" title="' + item.error.replace(/"/g, '&quot;') + '">Error</span>';
+                                const badge = document.createElement('span');
+                                badge.className = 'text-danger small';
+                                badge.textContent = 'Error';
+                                badge.title = item.error;
+                                fileCell.innerHTML = '';
+                                fileCell.appendChild(badge);
                             }
                         }
                     });

@@ -41,6 +41,9 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 db_path = os.environ.get('AUDIO_CONVERTER_DB_PATH') or os.path.join(basedir, '..', 'config.db')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + db_path
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# File uploads (adopt-a-file drops) stream to disk, but cap the total so a
+# runaway post can't fill the volume. Breaches land on the 413 handler.
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 # The worker thread writes to SQLite on a separate connection; raise the lock timeout
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'connect_args': {'timeout': 15}}
 
@@ -56,9 +59,23 @@ if not secret_key:
     try:
         with open(secret_file, 'w') as f:
             f.write(secret_key)
+        os.chmod(secret_file, 0o600)
     except Exception:
         pass
 app.secret_key = secret_key
+# The session cookie only carries the CSRF token and flash messages, but
+# lock it down anyway: unreadable to JS, never sent cross-site.
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+
+@app.after_request
+def _security_headers(response):
+    """Defense-in-depth headers for a local-only app opened in a browser."""
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return response
 
 
 from app.models import db
@@ -95,6 +112,12 @@ _SCHEMA_MIGRATIONS = {
         ('play_count', 'INTEGER DEFAULT 0'),
         ('last_played_at', 'DATETIME'),
         ('duration', 'FLOAT DEFAULT 0'),
+        ('tag_title', 'VARCHAR(500) DEFAULT ""'),
+        ('tag_artist', 'VARCHAR(500) DEFAULT ""'),
+        ('tag_album', 'VARCHAR(500) DEFAULT ""'),
+        ('rating', 'INTEGER DEFAULT 0'),
+        ('cover_url', 'VARCHAR(1000) DEFAULT ""'),
+        ('quality', 'VARCHAR(100) DEFAULT ""'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),
@@ -103,10 +126,15 @@ _SCHEMA_MIGRATIONS = {
         ('job_timeout', 'INTEGER DEFAULT 300'),
         ('bandwidth_limit', 'INTEGER DEFAULT 0'),
         ('proxy', 'VARCHAR(500) DEFAULT ""'),
+        ('offpeak_limit', 'INTEGER DEFAULT 0'),
+        ('offpeak_start', 'INTEGER DEFAULT 22'),
+        ('offpeak_end', 'INTEGER DEFAULT 7'),
         ('worker_count', 'INTEGER DEFAULT 3'),
         ('subtitles', 'BOOLEAN DEFAULT 1'),
         ('sponsorblock', 'BOOLEAN DEFAULT 1'),
         ('normalize_audio', 'BOOLEAN DEFAULT 0'),
+        ('auto_update_ytdlp', 'BOOLEAN DEFAULT 0'),
+        ('default_format', 'VARCHAR(20) DEFAULT "flac"'),
         ('tidal_client_id', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_client_secret', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),
@@ -127,9 +155,13 @@ _SCHEMA_INDEXES = {
 
 
 def _backup_database(db_path, keep=5):
-    """Copy the database aside before migrations touch it. Keeps `keep`."""
+    """Copy the database aside before migrations touch it. Keeps `keep`.
+
+    Uses the SQLite backup API rather than a file copy: with WAL mode the
+    live database spans two files, and a plain copy can catch an
+    inconsistent snapshot.
+    """
     import datetime
-    import shutil
     try:
         if not db_path or db_path == ':memory:' or not os.path.isfile(db_path):
             return None
@@ -137,7 +169,17 @@ def _backup_database(db_path, keep=5):
         os.makedirs(backup_dir, exist_ok=True)
         stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
         dest = os.path.join(backup_dir, f'config-{stamp}.db')
-        shutil.copy2(db_path, dest)
+        import sqlite3
+        src = sqlite3.connect('file:{}?mode=ro'.format(db_path), uri=True,
+                              timeout=15)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
         existing = sorted(f for f in os.listdir(backup_dir) if f.endswith('.db'))
         for stale in existing[:-keep]:
             try:
@@ -161,6 +203,9 @@ def _setup_db():
             # WAL mode lets the parallel download workers write concurrently
             # instead of serializing on the database lock.
             conn.execute(text('PRAGMA journal_mode=WAL'))
+            # Refresh the query planner's statistics; cheap, recommended
+            # periodically for databases whose content churns.
+            conn.execute(text('PRAGMA optimize'))
     except Exception as exc:
         logger.warning('Could not enable WAL mode: %s', exc)
     # Figure out up front whether any migration is pending so at most one
@@ -223,6 +268,13 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     return render_template('error_500.html', message="Internal Server Error"), 500
+
+
+@app.errorhandler(413)
+def too_large(error):
+    # Only file uploads can hit this; they always expect JSON.
+    return {'ok': False,
+            'message': 'File too large (1 GB limit).'}, 413
 
 
 @app.template_filter('basename')

@@ -190,6 +190,23 @@
                                min="0" max="100000" value="{{ bandwidth_limit }}">
                         <small class="form-text text-muted">0 = unlimited. Good for overnight runs.</small>
                     </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="offpeak_limit" class="form-label">Off-peak limit (KB/s)</label>
+                        <input type="number" class="form-control" id="offpeak_limit" name="offpeak_limit"
+                               min="0" max="100000" value="{{ offpeak_limit }}">
+                        <small class="form-text text-muted">0 = same as above.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 8rem;">
+                        <label for="offpeak_start" class="form-label">Off-peak from (h)</label>
+                        <input type="number" class="form-control" id="offpeak_start" name="offpeak_start"
+                               min="0" max="23" value="{{ offpeak_start }}">
+                    </div>
+                    <div class="col-md-4" style="max-width: 8rem;">
+                        <label for="offpeak_end" class="form-label">Off-peak until (h)</label>
+                        <input type="number" class="form-control" id="offpeak_end" name="offpeak_end"
+                               min="0" max="23" value="{{ offpeak_end }}">
+                        <small class="form-text text-muted">Hours 0–23, may wrap midnight.</small>
+                    </div>
                     <div class="col-12">
                         <label for="proxy" class="form-label">Proxy (optional)</label>
                         <input type="text" class="form-control" id="proxy" name="proxy"
@@ -270,10 +287,28 @@
                 </li>
             </ul>
             <small id="helpersNote" class="text-muted"></small>
+            <div class="form-check form-switch mt-2">
+                <input class="form-check-input" type="checkbox" id="auto_update_ytdlp" name="auto_update_ytdlp" value="on"
+                       {% if auto_update_ytdlp %}checked{% endif %}>
+                <label class="form-check-label" for="auto_update_ytdlp">Update yt-dlp automatically when a newer release appears</label>
+            </div>
             <div class="mt-2">
                 <a href="/api/diagnostics" class="btn btn-sm btn-outline-secondary">Download diagnostics</a>
                 <small class="text-muted d-block mt-1">Versions, counts, and settings for troubleshooting. Never includes tokens, secrets, or proxy credentials.</small>
             </div>
+        </div>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h3>Maintenance</h3>
+            <p class="text-muted small">One-click housekeeping. Nothing here touches your music unless it says so.</p>
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" id="maintVerify" class="btn btn-sm btn-outline-secondary">Verify files</button>
+                <button type="button" id="maintPrune" class="btn btn-sm btn-outline-secondary">Prune missing</button>
+                <button type="button" id="maintVacuum" class="btn btn-sm btn-outline-secondary">Vacuum database</button>
+                <button type="button" id="maintCovers" class="btn btn-sm btn-outline-secondary">Clear cover cache</button>
+                <button type="button" id="maintAutostart" class="btn btn-sm btn-outline-secondary">Start at login: …</button>
+            </div>
+            <small id="maintNote" class="text-muted d-block mt-2"></small>
         </div>
     </div>
 
@@ -315,7 +350,7 @@
                     if (!data.update_available) return;
                     const token = document.querySelector('meta[name="csrf-token"]');
                     const headers = { 'X-CSRFToken': token ? token.getAttribute('content') : '' };
-                    if (confirm('Install version ' + data.latest + ' now? Only works from the Applications copy on macOS.')) {
+                    if (confirm('Install version ' + data.latest + ' now? Only works from the installed macOS or Windows app.')) {
                         toast('Installing update in the background…', 'info');
                         fetch('/api/update-install', { method: 'POST', headers: headers })
                             .then((r) => r.json())
@@ -350,6 +385,57 @@
                 .catch(() => {});
         };
         document.getElementById('helpersCheck').addEventListener('click', refreshHelpers);
+        const maintNote = (msg) => {
+            document.getElementById('maintNote').textContent = msg;
+        };
+        const maintPost = (url, body, done) => {
+            const token = document.querySelector('meta[name="csrf-token"]');
+            fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': token ? token.getAttribute('content') : '',
+                },
+                body: JSON.stringify(body || {}),
+            })
+                .then((r) => r.json())
+                .then((d) => maintNote(d.ok ? done(d) : (d.message || 'Failed.')))
+                .catch(() => maintNote('Failed.'));
+        };
+        document.getElementById('maintVerify').addEventListener('click', () => {
+            maintNote('Verifying…');
+            maintPost('/api/verify-files', {}, () => 'Verification running in the background.');
+        });
+        document.getElementById('maintPrune').addEventListener('click', () => {
+            maintNote('Pruning…');
+            maintPost('/api/prune-missing', {}, (d) => 'Removed ' + d.removed + ' missing-file row(s).');
+        });
+        document.getElementById('maintVacuum').addEventListener('click', () => {
+            maintNote('Vacuuming…');
+            maintPost('/api/maintenance/vacuum', {}, (d) => 'Database compacted.');
+        });
+        document.getElementById('maintCovers').addEventListener('click', () => {
+            maintPost('/api/maintenance/clear-covers', {}, (d) => 'Cleared ' + d.cleared + ' cached cover(s).');
+        });
+        const autostartBtn = document.getElementById('maintAutostart');
+        const refreshAutostart = () => {
+            fetch('/api/autostart')
+                .then((r) => r.json())
+                .then((d) => {
+                    autostartBtn.textContent = 'Start at login: ' + (d.enabled ? 'on' : 'off');
+                })
+                .catch(() => {});
+        };
+        autostartBtn.addEventListener('click', () => {
+            fetch('/api/autostart')
+                .then((r) => r.json())
+                .then((d) => maintPost('/api/autostart', { enabled: !d.enabled }, (r) => {
+                    refreshAutostart();
+                    return r.message || 'Login item updated.';
+                }))
+                .catch(() => maintNote('Failed.'));
+        });
+        refreshAutostart();
         document.getElementById('helpersUpdate').addEventListener('click', function () {
             const btn = this;
             btn.disabled = true;

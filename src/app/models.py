@@ -1,8 +1,14 @@
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 db = SQLAlchemy()
+
+
+def utcnow():
+    """Naive UTC now: same semantics as the old utcnow() without
+    the deprecation. Stays naive so stored timestamps keep comparing."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def default_output_path():
@@ -32,11 +38,20 @@ class UserSettings(db.Model):
     job_timeout = db.Column(db.Integer, nullable=False, default=300)
     bandwidth_limit = db.Column(db.Integer, nullable=False, default=0)
     proxy = db.Column(db.String(500), nullable=False, default='')
+    # Off-peak override: when the current hour falls in [start, end),
+    # this cap replaces bandwidth_limit (0 = no override).
+    offpeak_limit = db.Column(db.Integer, nullable=False, default=0)
+    offpeak_start = db.Column(db.Integer, nullable=False, default=22)
+    offpeak_end = db.Column(db.Integer, nullable=False, default=7)
     # Parallel downloads; applied live when settings are saved.
     worker_count = db.Column(db.Integer, nullable=False, default=3)
     subtitles = db.Column(db.Boolean, nullable=False, default=True)
     sponsorblock = db.Column(db.Boolean, nullable=False, default=True)
     normalize_audio = db.Column(db.Boolean, nullable=False, default=False)
+    # Update the yt-dlp helper automatically when a newer release appears.
+    auto_update_ytdlp = db.Column(db.Boolean, nullable=False, default=False)
+    # Preselected format on the convert forms.
+    default_format = db.Column(db.String(20), nullable=False, default='flac')
     # Tidal login (all optional). Client id/secret come from the user's own
     # free app at developer.tidal.com; tokens are filled in by the login flow.
     tidal_client_id = db.Column(db.String(200), nullable=False, default='')
@@ -48,8 +63,8 @@ class UserSettings(db.Model):
     desktop_notifications = db.Column(db.Boolean, nullable=False, default=True)
     close_behavior = db.Column(db.String(10), nullable=False, default='ask')
     tray_icon = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, onupdate=utcnow)
 
     def __repr__(self):
         return f'<UserSettings {self.id}>'
@@ -63,7 +78,7 @@ class ConversionHistory(db.Model):
     status = db.Column(db.String(50), nullable=False, default='pending')
     progress = db.Column(db.Integer, nullable=False, default=0)
     error = db.Column(db.String(1000), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     # Playlist support: a parent row (is_playlist=True) represents a whole
     # playlist; one child row (parent_id set) is created per track, and all
@@ -96,6 +111,18 @@ class ConversionHistory(db.Model):
     # Length in seconds, probed once at conversion time so listings, stats,
     # and playlists never re-spawn ffmpeg just to read it back.
     duration = db.Column(db.Float, nullable=False, default=0)
+    # Embedded tags, stored at conversion time (same reason). Powers album /
+    # artist views, top-artist stats, metadata search, and lyrics lookup.
+    tag_title = db.Column(db.String(500), nullable=False, default='')
+    tag_artist = db.Column(db.String(500), nullable=False, default='')
+    tag_album = db.Column(db.String(500), nullable=False, default='')
+    # Personal rating, 0 (unrated) through 5.
+    rating = db.Column(db.Integer, nullable=False, default=0)
+    # Source quality line ("FLAC · 44.1 kHz · stereo") parsed at completion.
+    quality = db.Column(db.String(100), nullable=False, default='')
+    # Source cover-art URL (YouTube/SoundCloud thumbnail), kept so missing
+    # artwork can be backfilled later without re-resolving the track.
+    cover_url = db.Column(db.String(1000), nullable=False, default='')
 
     ACTIVE_STATUSES = ('pending', 'downloading', 'converting')
 
@@ -116,7 +143,7 @@ class Subscription(db.Model):
     interval_hours = db.Column(db.Integer, nullable=False, default=24)
     active = db.Column(db.Boolean, nullable=False, default=True)
     last_checked = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     def __repr__(self):
         return f'<Subscription {self.id}>'
@@ -126,7 +153,7 @@ class PlayerPlaylist(db.Model):
     """A user-built playlist for the Player tab (not a conversion batch)."""
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(200), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=utcnow)
 
     def __repr__(self):
         return f'<PlayerPlaylist {self.id}>'
@@ -143,3 +170,15 @@ class PlayerPlaylistItem(db.Model):
 
     def __repr__(self):
         return f'<PlayerPlaylistItem {self.id}>'
+
+
+class Notice(db.Model):
+    """Persistent copy of desktop notifications for the in-app bell."""
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False, default='')
+    body = db.Column(db.String(500), nullable=False, default='')
+    read = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(db.DateTime, default=utcnow)
+
+    def __repr__(self):
+        return f'<Notice {self.id}>'
