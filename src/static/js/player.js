@@ -509,6 +509,23 @@
         show();
         Player.ui.title.textContent = title;
         video.poster = '/api/cover/' + item.id;
+        Array.from(video.querySelectorAll('track')).forEach(function (el) {
+            el.remove();
+        });
+        fetch('/api/subs/' + item.id)
+            .then(function (r) { return r.json(); })
+            .then(function (subs) {
+                (subs.subs || []).forEach(function (sub, i) {
+                    const track = document.createElement('track');
+                    track.kind = 'subtitles';
+                    track.label = sub.lang;
+                    track.srclang = sub.lang;
+                    track.src = sub.url;
+                    if (i === 0) track.default = true;
+                    video.appendChild(track);
+                });
+            })
+            .catch(function () {});
         video.src = '/audio/' + item.id;
         overlay.classList.remove('d-none');
         document.body.classList.add('theater-open');

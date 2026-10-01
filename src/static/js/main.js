@@ -452,6 +452,13 @@ function renderHistoryRow(item) {
 
     const statusTd = document.createElement('td');
     statusTd.className = 'row-status';
+    const select = document.createElement('input');
+    select.type = 'checkbox';
+    select.className = 'form-check-input row-select me-1';
+    select.title = 'Select row';
+    select.setAttribute('aria-label', 'Select row');
+    select.setAttribute('data-bulk', item.id);
+    statusTd.appendChild(select);
     const badge = document.createElement('span');
     badge.className = 'badge status-badge status-' + item.status;
     badge.textContent = item.status;
@@ -826,6 +833,143 @@ function loadStats() {
 }
 
 document.addEventListener('DOMContentLoaded', loadStats);
+
+// --- Bulk selection: retry or delete many rows at once --------------------
+
+function selectedRows() {
+    return Array.from(document.querySelectorAll('#historyBody .row-select'))
+        .filter((box) => box.checked)
+        .map((box) => {
+            const tr = box.closest('tr');
+            const badge = tr ? tr.querySelector('.status-badge') : null;
+            return {
+                id: box.dataset.bulk,
+                status: badge ? badge.textContent.trim() : '',
+                isPlaylist: tr ? tr.classList.contains('playlist-row') : false,
+                row: tr,
+            };
+        })
+        .filter((item) => item.id && item.row);
+}
+
+function refreshBulkBar() {
+    const bar = document.getElementById('bulkBar');
+    const count = document.getElementById('bulkCount');
+    const all = document.getElementById('selectAll');
+    if (!bar) return;
+    const items = selectedRows();
+    bar.classList.toggle('on', items.length > 0);
+    if (count) count.textContent = items.length ? items.length + ' selected' : '';
+    if (all) {
+        const visible = Array.from(
+            document.querySelectorAll('#historyBody > tr:not(.playlist-children)'))
+            .filter((tr) => !tr.hidden)
+            .map((tr) => tr.querySelector('.row-select'))
+            .filter(Boolean);
+        all.checked = visible.length > 0 && visible.every((box) => box.checked);
+    }
+}
+
+function postOne(url) {
+    return fetch(url, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrfToken() },
+    }).then((r) => r.json().catch(() => ({ ok: false })));
+}
+
+function initBulkActions() {
+    const body = document.getElementById('historyBody');
+    if (!body) return;
+    const all = document.getElementById('selectAll');
+    if (all) {
+        all.addEventListener('change', () => {
+            Array.from(body.querySelectorAll(':scope > tr:not(.playlist-children)'))
+                .filter((tr) => !tr.hidden)
+                .forEach((tr) => {
+                    const box = tr.querySelector('.row-select');
+                    if (box) box.checked = all.checked;
+                });
+            refreshBulkBar();
+        });
+    }
+    body.addEventListener('change', (e) => {
+        if (e.target.closest && e.target.closest('.row-select')) refreshBulkBar();
+    });
+    const clear = document.getElementById('bulkClear');
+    if (clear) {
+        clear.addEventListener('click', () => {
+            Array.from(body.querySelectorAll('.row-select')).forEach((box) => { box.checked = false; });
+            refreshBulkBar();
+        });
+    }
+    const retry = document.getElementById('bulkRetry');
+    if (retry) {
+        retry.addEventListener('click', () => {
+            const items = selectedRows().filter((item) => item.status === 'failed');
+            if (!items.length) {
+                toast('Nothing failed among the selection.', 'info');
+                return;
+            }
+            retry.disabled = true;
+            let done = 0;
+            let okCount = 0;
+            const step = () => {
+                if (done >= items.length) {
+                    retry.disabled = false;
+                    toast('Re-queued ' + okCount + ' of ' + items.length + ' failed track(s).',
+                          okCount ? 'success' : 'danger');
+                    if (typeof refreshTable === 'function') refreshTable();
+                    return;
+                }
+                const item = items[done];
+                done += 1;
+                retry.textContent = 'Retry (' + done + '/' + items.length + ')';
+                postOne('/api/retry/' + item.id).then((data) => {
+                    if (data.ok) okCount += 1;
+                    step();
+                }).catch(step);
+            };
+            step();
+        });
+    }
+    const del = document.getElementById('bulkDelete');
+    if (del) {
+        del.addEventListener('click', () => {
+            const items = selectedRows();
+            if (!items.length) return;
+            if (!confirm('Delete ' + items.length + ' selected item(s) from disk and history?')) return;
+            del.disabled = true;
+            let done = 0;
+            let okCount = 0;
+            const step = () => {
+                if (done >= items.length) {
+                    del.disabled = false;
+                    del.textContent = 'Delete';
+                    toast('Deleted ' + okCount + ' of ' + items.length + ' selected item(s).',
+                          okCount ? 'success' : 'danger');
+                    refreshBulkBar();
+                    refreshStorageInfo();
+                    if (typeof refreshTable === 'function') refreshTable();
+                    return;
+                }
+                const item = items[done];
+                done += 1;
+                del.textContent = 'Delete (' + done + '/' + items.length + ')';
+                const url = item.isPlaylist ? '/api/delete-playlist/' + item.id : '/api/delete/' + item.id;
+                postOne(url).then((data) => {
+                    if (data.ok) {
+                        okCount += 1;
+                        if (item.row) item.row.remove();
+                    }
+                    step();
+                }).catch(step);
+            };
+            step();
+        });
+    }
+}
+
+document.addEventListener('DOMContentLoaded', initBulkActions);
 
 document.addEventListener('click', (e) => {
     const expandBtn = e.target.closest('[data-expand-playlist]');

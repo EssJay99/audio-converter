@@ -397,6 +397,14 @@ footer {
     max-width: 12rem;
 }
 
+#bulkBar {
+    display: none;
+}
+
+#bulkBar.on {
+    display: inline-flex;
+}
+
 .search-results {
     position: absolute;
     top: 100%;

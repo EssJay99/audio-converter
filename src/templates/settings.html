@@ -197,6 +197,23 @@
                                autocomplete="off" spellcheck="false">
                         <small class="form-text text-muted">Route downloads through a proxy (e.g. Tor at the address above) so streaming sites see the proxy's address instead of yours. Leave blank for a direct connection.</small>
                     </div>
+                    <div class="col-12">
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="subtitles" name="subtitles" value="on"
+                                   {% if subtitles %}checked{% endif %}>
+                            <label class="form-check-label" for="subtitles">Download subtitles for videos</label>
+                        </div>
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="sponsorblock" name="sponsorblock" value="on"
+                                   {% if sponsorblock %}checked{% endif %}>
+                            <label class="form-check-label" for="sponsorblock">Skip sponsor, intro, and outro segments</label>
+                        </div>
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="normalize_audio" name="normalize_audio" value="on"
+                                   {% if normalize_audio %}checked{% endif %}>
+                            <label class="form-check-label" for="normalize_audio">Normalize volume across tracks (EBU R128)</label>
+                        </div>
+                    </div>
                 </div>
             </div>
 

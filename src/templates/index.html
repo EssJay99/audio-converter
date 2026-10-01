@@ -173,6 +173,13 @@
                             {% endif %}
 
                             <div class="history-toolbar d-flex flex-wrap gap-2 align-items-center mb-2">
+                                <input type="checkbox" id="selectAll" class="form-check-input" title="Select all visible rows" aria-label="Select all visible rows">
+                                <span id="bulkBar" class="d-none align-items-center gap-2">
+                                    <span id="bulkCount" class="small text-muted"></span>
+                                    <button type="button" id="bulkRetry" class="btn btn-sm btn-outline-info" title="Retry all failed selections">Retry</button>
+                                    <button type="button" id="bulkDelete" class="btn btn-sm btn-outline-danger" title="Delete all selections from disk">Delete</button>
+                                    <button type="button" id="bulkClear" class="btn btn-sm btn-outline-secondary">Clear</button>
+                                </span>
                                 <div class="history-search-wrap">
                                     <input type="search" id="historySearch" class="form-control form-control-sm history-search"
                                            placeholder="Search conversions…" aria-label="Search conversions" autocomplete="off">
@@ -221,6 +228,7 @@
                                         {% if item.is_playlist %}
                                             <tr id="row-{{ item.id }}" class="playlist-row" data-folder="{{ item.output_path }}">
                                                     <td class="row-status">
+                                                        <input type="checkbox" class="form-check-input row-select me-1" data-bulk="{{ item.id }}" title="Select row" aria-label="Select row">
                                                         <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
                                                         <div class="progress mt-1 row-progress" style="height:4px;">
                                                             <div class="progress-bar row-progress-bar bg-primary" role="progressbar"
@@ -279,6 +287,7 @@
                                         {% else %}
                                             <tr id="row-{{ item.id }}" data-folder="{{ item.output_path }}">
                                                     <td class="row-status">
+                                                        <input type="checkbox" class="form-check-input row-select me-1" data-bulk="{{ item.id }}" title="Select row" aria-label="Select row">
                                                         <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
                                                         <div class="progress mt-1 row-progress" style="height:4px;">
                                                             <div class="progress-bar row-progress-bar bg-primary" role="progressbar"

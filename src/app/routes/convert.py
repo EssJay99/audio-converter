@@ -1259,8 +1259,48 @@ def cover_art(conversion_id):
                     return send_file(scaled, mimetype='image/jpeg')
             else:
                 return send_file(sidecar, mimetype='image/jpeg')
+        # Last resort for videos: grab the first frame as the poster.
+        ext = os.path.splitext(history.output_path)[1].lower().lstrip('.')
+        if ext in BROWSER_VIDEO_EXTS + ('mkv', 'mov', 'avi'):
+            frame = os.path.join(
+                cache_dir, f'{history.id}-frame{"-thumb" if thumb else ""}.jpg')
+            grab = ['ffmpeg', '-y', '-v', 'error', '-i', history.output_path]
+            if thumb:
+                grab += ['-vf', 'scale=160:-1']
+            grab += ['-vframes', '1', frame]
+            frame_ok = subprocess.run(
+                grab, capture_output=True, text=True, timeout=30)
+            if frame_ok.returncode == 0 and os.path.isfile(frame):
+                return send_file(frame, mimetype='image/jpeg')
         abort(404)
     return send_file(cached, mimetype='image/jpeg')
+
+
+@bp.route('/api/subs/<int:conversion_id>')
+def api_subs_list(conversion_id):
+    """Subtitle tracks sitting next to a converted video."""
+    history = _playable_file_or_404(conversion_id)
+    if not history:
+        abort(404)
+    subs = [{'lang': lang,
+             'url': f'/api/subs/{conversion_id}/{lang}'}
+            for lang, _path in _subtitle_tracks(history.output_path)]
+    return jsonify({'ok': True, 'subs': subs})
+
+
+@bp.route('/api/subs/<int:conversion_id>/<lang>')
+def api_sub_file(conversion_id, lang):
+    """Serve one subtitle sidecar. The language tag is strictly validated
+    so this can never escape the track's own folder."""
+    history = _playable_file_or_404(conversion_id)
+    if not history or not re.fullmatch(r'[A-Za-z-]{2,12}', lang or ''):
+        abort(404)
+    stem = os.path.splitext(history.output_path)[0]
+    for ext, mimetype in (('.vtt', 'text/vtt'), ('.srt', 'text/plain')):
+        path = f'{stem}.{lang}{ext}'
+        if os.path.isfile(path):
+            return send_file(path, mimetype=mimetype)
+    abort(404)
 
 
 # ------------------------------------------------------ conversion engine --
@@ -1330,6 +1370,8 @@ def download_and_convert(url, format_type, output_path, job=None):
             return dl
         if not os.path.exists(temp_audio):
             return {'success': False, 'error': 'Downloaded file not found'}
+
+        _collect_subtitles(temp_audio, output_file)
 
         cover_file = _fetch_thumbnail(meta.get('thumbnail'))
 
@@ -1507,6 +1549,9 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
         args += ['-map', '1:v', '-c:v', 'copy', '-disposition:v', 'attached_pic']
 
     args += _format_args(format_type)
+    if _want_normalize():
+        # Single-pass EBU R128 normalization so playlists play at even volume.
+        args += ['-filter:a', 'loudnorm']
 
     for key in ('title', 'artist', 'album', 'date'):
         value = meta.get(key)
@@ -1537,9 +1582,17 @@ def convert_video_file(input_file, format_type, output_file, meta):
     """
     fmt = VALID_FORMATS[format_type]
     args = ['ffmpeg', '-y', '-i', input_file]
+    normalize = _want_normalize()
     if fmt['ext'] == 'mp4':
         args += ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
                  '-c:a', 'aac', '-movflags', '+faststart']
+        if normalize:
+            args += ['-filter:a', 'loudnorm']
+    elif normalize:
+        # A filter forces a re-encode, so copy paths pick per-container
+        # codecs instead of failing on `-c copy` plus a filter.
+        audio_codec = 'libopus' if fmt['ext'] == 'webm' else 'aac'
+        args += ['-c:v', 'copy', '-c:a', audio_codec, '-filter:a', 'loudnorm']
     else:
         args += ['-c', 'copy']
 
@@ -1665,6 +1718,39 @@ def _active_privacy_flags():
 MIN_FREE_BYTES = 200 * 1024 * 1024
 
 
+def _want_sponsorblock():
+    """Context-safe read of the sponsor-skipping toggle (default on)."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            return True
+        return bool(getattr(settings, 'sponsorblock', True))
+    except Exception:
+        return True
+
+
+def _want_normalize():
+    """Context-safe read of the loudness toggle (default off)."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            return False
+        return bool(getattr(settings, 'normalize_audio', False))
+    except Exception:
+        return False
+
+
+def _want_subtitles():
+    """Context-safe read of the subtitle toggle (default on)."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            return True
+        return bool(getattr(settings, 'subtitles', True))
+    except Exception:
+        return True
+
+
 def _get_proxy():
     """Configured proxy URL, or '' for a direct connection. Context-safe."""
     try:
@@ -1761,6 +1847,12 @@ def download_audio(url, temp_audio, job=None):
     selector = _download_selector(job)
     base = (list(_YTDLP_PRIVACY_FLAGS) + _ytdlp_net_args()
             + ['--no-playlist', '-f', selector, '--newline', '-o', temp_audio])
+    if _download_kind(job) == 'video':
+        if _want_sponsorblock():
+            base += ['--sponsorblock-remove', 'sponsor,intro,outro,selfpromo,interaction']
+        if _want_subtitles():
+            base += ['--write-subs', '--write-auto-subs',
+                     '--sub-langs', 'all,-live_chat', '--convert-subs', 'vtt']
     cmd = _ytdlp_command() + base + [url]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1802,6 +1894,49 @@ def download_audio(url, temp_audio, job=None):
         return {'success': True}
 
     return {'success': False, 'error': 'No audio file was downloaded'}
+
+
+def _collect_subtitles(temp_audio, output_file):
+    """Move downloaded subtitle sidecars next to the finished file.
+
+    yt-dlp writes `<temp>.<lang>.vtt`; these become `<title>.<lang>.vtt`
+    beside the output so players (and our theater) pick them up.
+    Returns the list of (lang, path) moved.
+    """
+    moved = []
+    stem = os.path.splitext(output_file)[0]
+    for candidate in sorted(glob.glob(temp_audio + '.*.vtt') +
+                            glob.glob(temp_audio + '.*.srt')):
+        base = os.path.basename(candidate)
+        parts = base.split('.')
+        if len(parts) < 3:
+            continue
+        lang = parts[-2]
+        if not re.fullmatch(r'[A-Za-z-]{2,12}', lang):
+            continue
+        ext = '.vtt' if candidate.endswith('.vtt') else '.srt'
+        target = stem + '.' + lang + ext
+        try:
+            if os.path.abspath(target) != os.path.abspath(candidate):
+                if os.path.exists(target):
+                    os.remove(target)
+                os.replace(candidate, target)
+            moved.append((lang, target))
+        except OSError:
+            pass
+    return moved
+
+
+def _subtitle_tracks(output_path):
+    """(lang, path) subtitle sidecars already sitting next to a file."""
+    stem = os.path.splitext(output_path)[0]
+    found = []
+    for candidate in sorted(glob.glob(stem + '.*.vtt') +
+                            glob.glob(stem + '.*.srt')):
+        parts = os.path.basename(candidate).split('.')
+        if len(parts) >= 3 and re.fullmatch(r'[A-Za-z-]{2,12}', parts[-2]):
+            found.append((parts[-2], candidate))
+    return found
 
 
 def _normalize_download(temp_audio):

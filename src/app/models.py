@@ -34,6 +34,9 @@ class UserSettings(db.Model):
     proxy = db.Column(db.String(500), nullable=False, default='')
     # Parallel downloads; applied live when settings are saved.
     worker_count = db.Column(db.Integer, nullable=False, default=3)
+    subtitles = db.Column(db.Boolean, nullable=False, default=True)
+    sponsorblock = db.Column(db.Boolean, nullable=False, default=True)
+    normalize_audio = db.Column(db.Boolean, nullable=False, default=False)
     # Tidal login (all optional). Client id/secret come from the user's own
     # free app at developer.tidal.com; tokens are filled in by the login flow.
     tidal_client_id = db.Column(db.String(200), nullable=False, default='')

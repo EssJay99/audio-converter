@@ -3778,3 +3778,44 @@ def test_diagnostics_redacts_secrets(client):
 
 def test_player_tab_markers_present(client):
     assert client.get('/player').status_code == 200
+
+
+# ------------------------------------------------------- video tab ----
+
+def test_video_page_video_only(client):
+    page = client.get('/video')
+    assert page.status_code == 200
+    html = page.data.decode('utf-8')
+    for value in ('video_mp4', 'video_webm', 'video_mkv'):
+        assert f'value="{value}"' in html
+    for value in ('value="flac"', 'value="alac"', 'value="wav"',
+                  'value="ogg_vorbis"'):
+        assert value not in html
+
+
+def test_theater_markup_present(client):
+    for path in ('/', '/player'):
+        html = client.get(path).data.decode('utf-8')
+        for marker in ('id="appTheater"', 'id="appTheaterVideo"',
+                       'id="appTheaterClose"'):
+            assert marker in html
+
+
+# ------------------------------------------------------- bulk UI ----
+
+def test_history_has_bulk_controls(client):
+    page = _home_with_history(client)
+    for marker in (b'id="selectAll"', b'id="bulkBar"', b'id="bulkRetry"',
+                   b'id="bulkDelete"', b'class="form-check-input row-select'):
+        assert marker in page.data
+
+
+# ------------------------------------------------------- failure plan ----
+
+def test_failure_plan_branches():
+    plan = convert_module._failure_plan
+    assert plan(0, 3, 'yt-dlp download failed')[0] == 'retry'
+    assert plan(0, 3, 'No space left on device')[0] == 'fail'
+    assert plan(0, 3, 'Not enough free disk space')[0] == 'fail'
+    action, attempts, message = plan(3, 3, 'boom')
+    assert action == 'fail' and 'Max retries' in message

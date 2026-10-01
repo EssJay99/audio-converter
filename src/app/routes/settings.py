@@ -8,7 +8,7 @@ bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
-                  'tray_icon',)
+                  'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -45,6 +45,9 @@ def get_settings_dict():
         'bandwidth_limit': 0,
         'proxy': '',
         'worker_count': 3,
+        'subtitles': True,
+        'sponsorblock': True,
+        'normalize_audio': False,
         'tidal_client_id': '',
         'tidal_client_secret': '',
         'tidal_connected': False,
