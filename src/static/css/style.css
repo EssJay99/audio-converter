@@ -438,6 +438,59 @@ footer {
     outline-offset: -2px;
 }
 
+/* Theater mode: video overlay */
+.app-theater {
+    position: fixed;
+    inset: 0;
+    z-index: 2500;
+    background: rgba(10, 14, 20, 0.88);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+}
+
+.app-theater-box {
+    width: min(960px, 100%);
+    background: #141a24;
+    border-radius: 0.6rem;
+    padding: 1rem 1.1rem 1.1rem;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.app-theater-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    color: #e9ecef;
+    margin-bottom: 0.6rem;
+}
+
+.app-theater-head strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-theater-box video {
+    width: 100%;
+    max-height: 70vh;
+    background: #000;
+    border-radius: 0.35rem;
+}
+
+.app-theater-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.6rem;
+}
+
+body.theater-open {
+    overflow: hidden;
+}
+
 /* Library stats tiles */
 .stat-tile {
     background: #f6f8fa;
@@ -595,6 +648,166 @@ body.dark-mode hr {
 
 body.dark-mode footer {
     color: #7d8791;
+}
+
+/* Player tab: library, now playing, user playlists */
+.tab-cover {
+    width: 96px;
+    height: 96px;
+    object-fit: cover;
+    border-radius: 0.5rem;
+    flex: 0 0 auto;
+}
+
+.min-w-0 {
+    min-width: 0;
+}
+
+.viz-canvas {
+    width: 100%;
+    height: 140px;
+    background: #141a24;
+    border-radius: 0.4rem;
+}
+
+.tab-queue {
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.tab-queue-item {
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tab-queue-item.active {
+    background: rgba(52, 152, 219, 0.18);
+}
+
+.lib-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+}
+
+.lib-card {
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    padding: 0.6rem;
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    min-width: 0;
+}
+
+.lib-cover {
+    width: 52px;
+    height: 52px;
+    object-fit: cover;
+    border-radius: 0.35rem;
+    flex: 0 0 auto;
+    background: #e9ecef;
+}
+
+.lib-info {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.lib-title {
+    font-weight: 600;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lib-actions {
+    display: flex;
+    gap: 0.25rem;
+    flex: 0 0 auto;
+    align-items: center;
+}
+
+.lib-pl-select {
+    max-width: 7rem;
+}
+
+.lib-like.liked {
+    color: #dc3545;
+    border-color: #dc3545;
+}
+
+.user-pl {
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    margin-bottom: 0.6rem;
+}
+
+.user-pl-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.3rem;
+}
+
+.user-pl-tracks {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.user-pl-tracks li {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0.15rem 0;
+}
+
+.user-pl-jump {
+    flex: 1 1 auto;
+    border: none;
+    background: transparent;
+    text-align: left;
+    padding: 0.2rem 0.3rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: inherit;
+}
+
+.user-pl-jump:hover {
+    background: #f1f3f5;
+}
+
+.user-pl-move,
+.user-pl-remove {
+    text-decoration: none;
+    padding: 0 0.3rem;
+}
+
+body.dark-mode .lib-card,
+body.dark-mode .user-pl {
+    border-color: #333f52;
+    background: #1a212d;
+}
+
+body.dark-mode .lib-cover {
+    background: #333f52;
+}
+
+body.dark-mode .user-pl-jump:hover {
+    background: #242e3d;
+}
+
+body.dark-mode .viz-canvas {
+    background: #0d1117;
 }
 
 .history-table th {

@@ -35,6 +35,15 @@ def index():
     )
 
 
+@bp.route('/player')
+def player():
+    return render_template(
+        'player.html',
+        request_path=request.path,
+        app_version=APP_VERSION,
+    )
+
+
 @bp.route('/about')
 def about():
     return render_template('about.html', request_path=request.path)

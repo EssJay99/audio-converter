@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Player - Audio Converter</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="/">Audio Converter</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navMenu">
+                    <div class="navbar-nav">
+                        <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
+                        <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
+                        <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/player' %}active{% endif %}" href="/player">Player</a>
+                        <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <div class="row">
+            <div class="col-lg-5">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h3>Now Playing</h3>
+                    <div class="d-flex gap-3 align-items-center">
+                        <img id="tabCover" class="tab-cover d-none" alt="Cover art">
+                        <div class="flex-grow-1 min-w-0">
+                            <h5 id="tabTitle" class="mb-1 text-truncate">Nothing playing</h5>
+                            <div id="tabArtist" class="text-muted small"></div>
+                        </div>
+                    </div>
+                    <canvas id="viz" class="viz-canvas mt-3" width="600" height="140" aria-label="Audio visualizer"></canvas>
+                    <div class="d-flex gap-2 justify-content-center mt-3" role="group" aria-label="Transport">
+                        <button type="button" class="btn btn-outline-secondary" data-ptab="prev" title="Previous track">&#9198;</button>
+                        <button type="button" class="btn btn-primary" data-ptab="toggle" title="Play / pause">&#9654; / &#10074;&#10074;</button>
+                        <button type="button" class="btn btn-outline-secondary" data-ptab="next" title="Next track">&#9197;</button>
+                    </div>
+                    <h5 class="mt-4">Up Next</h5>
+                    <ul id="tabQueue" class="list-group list-group-flush tab-queue"></ul>
+                </div>
+
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h5>My Playlists</h5>
+                    <form id="tabPlaylistCreate" class="d-flex gap-2 mb-2">
+                        <input type="text" id="tabPlaylistName" class="form-control" placeholder="New playlist name" maxlength="200" autocomplete="off">
+                        <button type="submit" class="btn btn-outline-primary">Create</button>
+                    </form>
+                    <div id="tabPlaylists"></div>
+                </div>
+            </div>
+
+            <div class="col-lg-7">
+                <div class="card p-4 shadow-sm border-0 rounded">
+                    <h3>Library</h3>
+                    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+                        <input type="search" id="tabSearch" class="form-control history-search" placeholder="Search title, artist, file…" aria-label="Search library" autocomplete="off">
+                        <select id="tabSort" class="form-select history-status" aria-label="Sort library" style="width:auto;">
+                            <option value="recent">Recently added</option>
+                            <option value="played">Most played</option>
+                            <option value="name">Name A–Z</option>
+                        </select>
+                        <div class="form-check ms-auto">
+                            <input class="form-check-input" type="checkbox" id="tabLikedOnly">
+                            <label class="form-check-label small" for="tabLikedOnly">Liked only ♥</label>
+                        </div>
+                    </div>
+                    <div id="libGrid" class="lib-grid"></div>
+                </div>
+            </div>
+        </div>
+
+        <hr class="mt-4">
+        <footer class="text-center text-muted small mb-3">
+            YouTube/SoundCloud to Lossless Audio Converter &bull; Built with Flask &amp; FFmpeg &bull; v{{ app_version }}<br>
+        </footer>
+    </div>
+
+    {% include '_player.html' %}
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player_tab.js') }}"></script>
+</body>
+</html>

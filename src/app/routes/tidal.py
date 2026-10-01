@@ -19,6 +19,7 @@ from flask import (Blueprint, request, redirect, url_for, flash, jsonify,
                    session as flask_session)
 
 from app.models import db, UserSettings
+from app.routes.convert import _same_origin_required
 
 bp = Blueprint('tidal', __name__)
 
@@ -86,6 +87,7 @@ def _valid_token():
 
 
 @bp.route('/api/tidal/login')
+@_same_origin_required
 def tidal_login():
     """Start the Tidal login: redirect to Tidal's consent page."""
     settings = _settings()
@@ -165,6 +167,7 @@ def tidal_callback():
 
 
 @bp.route('/api/tidal/logout')
+@_same_origin_required
 def tidal_logout():
     """Forget Tidal tokens (the client ID/secret stay saved)."""
     settings = _settings()

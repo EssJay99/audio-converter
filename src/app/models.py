@@ -78,6 +78,10 @@ class ConversionHistory(db.Model):
     # Subscription this track belongs to (followed playlists/channels).
     subscription_id = db.Column(db.Integer, db.ForeignKey('subscription.id'),
                                nullable=True)
+    # Player library state.
+    liked = db.Column(db.Boolean, nullable=False, default=False)
+    play_count = db.Column(db.Integer, nullable=False, default=0)
+    last_played_at = db.Column(db.DateTime, nullable=True)
 
     ACTIVE_STATUSES = ('pending', 'downloading', 'converting')
 
@@ -102,3 +106,26 @@ class Subscription(db.Model):
 
     def __repr__(self):
         return f'<Subscription {self.id}>'
+
+
+class PlayerPlaylist(db.Model):
+    """A user-built playlist for the Player tab (not a conversion batch)."""
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<PlayerPlaylist {self.id}>'
+
+
+class PlayerPlaylistItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    playlist_id = db.Column(db.Integer, db.ForeignKey('player_playlist.id'),
+                            nullable=False)
+    conversion_id = db.Column(db.Integer,
+                              db.ForeignKey('conversion_history.id'),
+                              nullable=False)
+    position = db.Column(db.Integer, nullable=False, default=0)
+
+    def __repr__(self):
+        return f'<PlayerPlaylistItem {self.id}>'

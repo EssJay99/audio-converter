@@ -58,6 +58,20 @@
     <ul id="appPlayerQueueList" class="app-player-queue-list"></ul>
 </div>
 
+<div id="appTheater" class="app-theater d-none" role="dialog" aria-label="Video player">
+    <div class="app-theater-box">
+        <div class="app-theater-head">
+            <strong id="appTheaterTitle">Video</strong>
+            <button type="button" id="appTheaterClose" class="app-player-btn app-player-close" aria-label="Close video">&times;</button>
+        </div>
+        <video id="appTheaterVideo" controls playsinline preload="metadata"></video>
+        <div class="app-theater-foot">
+            <a id="appTheaterDownload" class="btn btn-sm btn-success" href="#">Download</a>
+            <span id="appTheaterMeta" class="text-muted small"></span>
+        </div>
+    </div>
+</div>
+
 <div id="appPlayerEQBox" class="app-player-eq d-none" aria-label="Equalizer">
     <div class="app-player-eq-head">Equalizer <button type="button" id="appPlayerEQReset" class="btn btn-sm btn-link">Reset</button></div>
     <div class="app-player-eq-sliders">

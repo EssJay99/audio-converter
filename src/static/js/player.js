@@ -72,6 +72,21 @@
             Player.ui.play.setAttribute('aria-label', 'Play');
         });
         Player.audio.addEventListener('ended', () => next());
+        const theaterVideo = $('appTheaterVideo');
+        if (theaterVideo) {
+            theaterVideo.addEventListener('ended', () => next());
+            theaterVideo.addEventListener('error', () => {
+                const dl = $('appTheaterDownload');
+                if (typeof toast === 'function') {
+                    toast('This video format will not play here — use Download.', 'info');
+                }
+                if (dl) dl.focus();
+            });
+        }
+        const theaterClose = $('appTheaterClose');
+        if (theaterClose) {
+            theaterClose.addEventListener('click', () => closeTheater(false));
+        }
         Player.audio.addEventListener('error', () => {
             Player.ui.title.textContent = 'Cannot play this format in the browser';
             Player.ui.artist.textContent = '';
@@ -238,6 +253,10 @@
 
     // ----------------------------------------------------------------- load
 
+    function isVideoFormat(format) {
+        return /video$/i.test(format || '');
+    }
+
     function loadCurrent() {
         const item = Player.queue[Player.index];
         if (!item) return;
@@ -247,6 +266,12 @@
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (!data.ok) throw new Error(data.message || 'unavailable');
+                recordPlayed(item.id);
+                if (data.item && isVideoFormat(data.item.format)) {
+                    openTheater(item, data);
+                    return;
+                }
+                closeTheater(true);
                 Player.ui.title.textContent = data.meta && data.meta.title ? data.meta.title : item.display;
                 Player.ui.artist.textContent = (data.meta && data.meta.artist) || '';
                 Player.ui.artist.classList.toggle('d-none', !Player.ui.artist.textContent);
@@ -372,6 +397,69 @@
         }
     }
 
+    // ------------------------------------------------- theater ----
+
+    // Theater mode plays video items in an overlay instead of the audio
+    // bar. Formats the browser cannot decode fail on the video element and
+    // fall back to a straight download link.
+    function openTheater(item, data) {
+        const overlay = $('appTheater');
+        const video = $('appTheaterVideo');
+        if (!overlay || !video) {
+            if (typeof toast === 'function') {
+                toast('This video needs an external player — use Download.', 'info');
+            }
+            return;
+        }
+        Player.audio.pause();
+        const title = (data.meta && data.meta.title) || item.display;
+        $('appTheaterTitle').textContent = title;
+        const dl = $('appTheaterDownload');
+        if (dl) dl.href = '/download/' + item.id;
+        const meta = $('appTheaterMeta');
+        if (meta) {
+            const artist = (data.meta && data.meta.artist) || '';
+            meta.textContent = artist ? artist + ' · ' + item.format : item.format;
+        }
+        show();
+        Player.ui.title.textContent = title;
+        video.poster = '/api/cover/' + item.id;
+        video.src = '/audio/' + item.id;
+        overlay.classList.remove('d-none');
+        document.body.classList.add('theater-open');
+        const play = video.play();
+        if (play && play.catch) play.catch(function () {});
+    }
+
+    function closeTheater(silent) {
+        const overlay = $('appTheater');
+        const video = $('appTheaterVideo');
+        if (!overlay || overlay.classList.contains('d-none')) return;
+        try { video.pause(); } catch (err) { /* ignore */ }
+        video.removeAttribute('src');
+        video.load();
+        overlay.classList.add('d-none');
+        document.body.classList.remove('theater-open');
+        if (!silent && Player.audio.src) play();
+    }
+
+    function isTheaterOpen() {
+        const overlay = $('appTheater');
+        return !!overlay && !overlay.classList.contains('d-none');
+    }
+
+    function recordPlayed(id) {
+        let token = '';
+        try {
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            token = meta ? meta.getAttribute('content') : '';
+        } catch (err) { /* ignore */ }
+        fetch('/api/played/' + id, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': token },
+        }).catch(function () {});
+    }
+
     // -------------------------------------------------------------- controls
 
     function show() {
@@ -480,7 +568,11 @@
                 return filter;
             });
             node.connect(ctx.destination);
-            eqNodes = { ctx: ctx, filters: filters };
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 128;
+            node.connect(analyser);
+            analyser.connect(ctx.destination);
+            eqNodes = { ctx: ctx, filters: filters, analyser: analyser };
             applyEQGains(currentEQGains());
         } catch (err) { eqNodes = null; }
     }
@@ -590,6 +682,37 @@
     }
 
     document.addEventListener('DOMContentLoaded', init);
+
+    // Small public surface for the Player tab (transport mirror, queue
+    // management, visualizer). The bottom bar remains the single owner of
+    // playback state; these just drive it.
+    window.AudioPlayer = {
+        toggle: togglePlay,
+        next: next,
+        prev: prev,
+        playIndex: function (i) {
+            if (i >= 0 && i < Player.queue.length) {
+                Player.index = i;
+                saveQueue();
+                loadCurrent();
+            }
+        },
+        removeAt: removeFromQueue,
+        playItems: function (items, startIndex, label) {
+            buildLinearQueue(items, startIndex || 0, label || '');
+        },
+        snapshot: function () {
+            return {
+                queue: Player.queue.slice(),
+                index: Player.index,
+                context: Player.contextLabel,
+                repeat: Player.repeat,
+            };
+        },
+        getAnalyser: function () {
+            return (typeof eqNodes !== 'undefined' && eqNodes) ? eqNodes.analyser || null : null;
+        },
+    };
 
     // Keyboard shortcuts: Space toggles, arrows seek/volume. Ignored while
     // typing in a field so search boxes and forms keep working.

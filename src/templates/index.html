@@ -21,6 +21,7 @@
                         <a class="nav-link {% if request_path == '/' or request_path == '' %}active{% endif %}" href="/">Home</a>
                         <a class="nav-link {% if request_path == '/convert' %}active{% endif %}" href="/convert">Convert</a>
                         <a class="nav-link {% if request_path == '/history' %}active{% endif %}" href="/history">History</a>
+                        <a class="nav-link {% if request_path == '/player' %}active{% endif %}" href="/player">Player</a>
                         <a class="nav-link {% if request_path == '/settings' %}active{% endif %}" href="/settings">Settings</a>
                     </div>
                 </div>
@@ -58,6 +59,9 @@
                                 <option value="alac">ALAC (Apple Lossless Audio Codec)</option>
                                 <option value="wav">WAV (Uncompressed PCM - truly lossless)</option>
                                 <option value="ogg_vorbis">OGG Vorbis (High-quality lossy)</option>
+                                <option value="video_mp4">MP4 Video (plays everywhere)</option>
+                                <option value="video_webm">WebM Video (small files)</option>
+                                <option value="video_mkv">MKV Video (archival, external players)</option>
                             </select>
                         </div>
 

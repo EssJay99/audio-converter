@@ -3,6 +3,7 @@ import os
 import queue
 import re
 import difflib
+import glob
 import shutil
 import subprocess
 import sys
@@ -20,15 +21,25 @@ from app.models import db, ConversionHistory, UserSettings
 bp = Blueprint('convert', __name__)
 
 VALID_FORMATS = {
-    'flac': {'ext': 'flac', 'label': 'FLAC',
+    'flac': {'ext': 'flac', 'label': 'FLAC', 'kind': 'audio',
              'base_args': ['-c:a', 'flac']},
-    'alac': {'ext': 'm4a', 'label': 'ALAC',
+    'alac': {'ext': 'm4a', 'label': 'ALAC', 'kind': 'audio',
              'base_args': ['-c:a', 'alac']},
-    'wav': {'ext': 'wav', 'label': 'WAV',
+    'wav': {'ext': 'wav', 'label': 'WAV', 'kind': 'audio',
             'base_args': ['-c:a', 'pcm_s16le']},
-    'ogg_vorbis': {'ext': 'ogg', 'label': 'OGG Vorbis',
+    'ogg_vorbis': {'ext': 'ogg', 'label': 'OGG Vorbis', 'kind': 'audio',
                    'base_args': ['-c:a', 'vorbis', '-q:a', '8', '-strict', 'experimental']},
+    'video_mp4': {'ext': 'mp4', 'label': 'MP4 Video', 'kind': 'video',
+                  'base_args': []},
+    'video_webm': {'ext': 'webm', 'label': 'WebM Video', 'kind': 'video',
+                   'base_args': []},
+    'video_mkv': {'ext': 'mkv', 'label': 'MKV Video', 'kind': 'video',
+                  'base_args': []},
 }
+
+# Containers browsers can play natively in a <video> element. Anything else
+# downloads for external players and the theater offers a download instead.
+BROWSER_VIDEO_EXTS = ('mp4', 'm4v', 'webm', 'ogv')
 
 LABEL_TO_KEY = {v['label']: k for k, v in VALID_FORMATS.items()}
 
@@ -677,6 +688,39 @@ def _note_stale_helper(error_text):
     return message
 
 
+def _is_safe_origin():
+    """True when a state-changing GET comes from this app (or has no origin).
+
+    Browsers attach Origin/Referer to cross-site requests, so an evil.com
+    <img> or link aimed at localhost carries a foreign origin and is
+    rejected. Direct curl/address-bar use sends neither and keeps working.
+    """
+    for header in (request.headers.get('Origin'), request.headers.get('Referer')):
+        if not header:
+            continue
+        try:
+            host = urlparse(header).netloc.lower()
+        except Exception:
+            return False
+        name = host.split(':')[0]
+        if name not in ('127.0.0.1', 'localhost', '[::1]'):
+            return False
+    return True
+
+
+def _same_origin_required(view):
+    """Reject cross-site GETs that would otherwise trigger local actions."""
+    from functools import wraps
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not _is_safe_origin():
+            return jsonify({'ok': False,
+                            'message': 'Cross-site requests are not allowed'}), 403
+        return view(*args, **kwargs)
+    return wrapper
+
+
 def _job_finish(job, **fields):
     """Apply a terminal update only if the job is still actively converting.
 
@@ -876,6 +920,189 @@ def api_track(conversion_id):
         'item': _serialize(history),
         'meta': _cached_metadata(history.output_path),
     })
+
+
+@bp.route('/api/like/<int:conversion_id>', methods=['POST'])
+def toggle_like(conversion_id):
+    """Heart/unheart a track for the Player tab library."""
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history:
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    history.liked = not history.liked
+    db.session.commit()
+    return jsonify({'ok': True, 'liked': bool(history.liked)})
+
+
+@bp.route('/api/played/<int:conversion_id>', methods=['POST'])
+def record_played(conversion_id):
+    """Count a listen (called once per playback start by the player)."""
+    from datetime import datetime
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history:
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    history.play_count = (history.play_count or 0) + 1
+    history.last_played_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'ok': True, 'play_count': history.play_count})
+
+
+@bp.route('/api/library')
+def api_library():
+    """Every playable track, for the Player tab library view."""
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])
+    ).order_by(ConversionHistory.created_at.desc()).limit(1000).all()
+    items = []
+    for row in rows:
+        if not row.output_path or not os.path.isfile(row.output_path):
+            continue
+        items.append(_serialize(row))
+    return jsonify({'ok': True, 'items': items})
+
+
+def _serialize_user_playlist(pl):
+    from app.models import PlayerPlaylistItem
+    items = db.session.query(PlayerPlaylistItem).filter_by(
+        playlist_id=pl.id).order_by(PlayerPlaylistItem.position.asc()).all()
+    tracks = []
+    for i in items:
+        track = db.session.get(ConversionHistory, i.conversion_id)
+        if track is None:
+            title = 'Missing track'
+        elif track.output_path:
+            title = os.path.splitext(os.path.basename(track.output_path))[0]
+        else:
+            title = track.playlist_title or 'Track'
+        tracks.append({'item_id': i.id, 'conversion_id': i.conversion_id,
+                       'title': title})
+    return {'id': pl.id, 'name': pl.name, 'tracks': tracks,
+            'count': len(tracks)}
+
+
+@bp.route('/api/playlists')
+def api_user_playlists():
+    """List the user's Player-tab playlists."""
+    from app.models import PlayerPlaylist
+    playlists = db.session.query(PlayerPlaylist).order_by(
+        PlayerPlaylist.created_at.asc()).all()
+    return jsonify({'ok': True,
+                    'items': [_serialize_user_playlist(p) for p in playlists]})
+
+
+@bp.route('/api/playlists', methods=['POST'])
+def api_playlist_create():
+    """Create a user playlist."""
+    from app.models import PlayerPlaylist
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get('name') or '').strip()[:200]
+    if not name:
+        return jsonify({'ok': False, 'message': 'Name the playlist'}), 400
+    pl = PlayerPlaylist(name=name)
+    db.session.add(pl)
+    db.session.commit()
+    return jsonify({'ok': True, 'playlist': _serialize_user_playlist(pl)})
+
+
+@bp.route('/api/playlists/<int:playlist_id>')
+def api_user_playlist_items(playlist_id):
+    """A user playlist's tracks in order, playable ones first-class."""
+    from app.models import PlayerPlaylist, PlayerPlaylistItem
+    pl = db.session.get(PlayerPlaylist, playlist_id)
+    if not pl:
+        return jsonify({'ok': False, 'message': 'Playlist not found'}), 404
+    items = db.session.query(PlayerPlaylistItem).filter_by(
+        playlist_id=pl.id).order_by(PlayerPlaylistItem.position.asc()).all()
+    tracks = []
+    for entry in items:
+        track = db.session.get(ConversionHistory, entry.conversion_id)
+        if track is None:
+            continue
+        serialized = _serialize(track)
+        serialized['item_id'] = entry.id
+        tracks.append(serialized)
+    return jsonify({'ok': True, 'playlist': {'id': pl.id, 'name': pl.name},
+                    'items': tracks})
+
+
+@bp.route('/api/playlists/<int:playlist_id>/add', methods=['POST'])
+def api_playlist_add(playlist_id):
+    """Append a finished track to a user playlist."""
+    from app.models import PlayerPlaylist, PlayerPlaylistItem
+    pl = db.session.get(PlayerPlaylist, playlist_id)
+    if not pl:
+        return jsonify({'ok': False, 'message': 'Playlist not found'}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        conversion_id = int(payload.get('conversion_id', 0))
+    except (TypeError, ValueError):
+        conversion_id = 0
+    track = db.session.get(ConversionHistory, conversion_id)
+    if not track or track.status not in ('completed', 'skipped'):
+        return jsonify({'ok': False,
+                        'message': 'Only finished tracks can be added'}), 400
+    top = db.session.query(PlayerPlaylistItem).filter_by(
+        playlist_id=pl.id).order_by(
+        PlayerPlaylistItem.position.desc()).first()
+    entry = PlayerPlaylistItem(playlist_id=pl.id, conversion_id=track.id,
+                               position=(top.position + 1) if top else 0)
+    db.session.add(entry)
+    db.session.commit()
+    return jsonify({'ok': True, 'playlist': _serialize_user_playlist(pl)})
+
+
+@bp.route('/api/playlists/<int:playlist_id>/remove', methods=['POST'])
+def api_playlist_remove(playlist_id):
+    """Remove one entry from a user playlist (track file is kept)."""
+    from app.models import PlayerPlaylist, PlayerPlaylistItem
+    payload = request.get_json(silent=True) or {}
+    try:
+        item_id = int(payload.get('item_id', 0))
+    except (TypeError, ValueError):
+        item_id = 0
+    entry = db.session.get(PlayerPlaylistItem, item_id)
+    if not entry or entry.playlist_id != playlist_id:
+        return jsonify({'ok': False, 'message': 'Entry not found'}), 404
+    db.session.delete(entry)
+    db.session.commit()
+    pl = db.session.get(PlayerPlaylist, playlist_id)
+    return jsonify({'ok': True, 'playlist': _serialize_user_playlist(pl)})
+
+
+@bp.route('/api/playlists/<int:playlist_id>/move', methods=['POST'])
+def api_playlist_move(playlist_id):
+    """Move a playlist entry up or down one slot."""
+    from app.models import PlayerPlaylistItem
+    payload = request.get_json(silent=True) or {}
+    try:
+        item_id = int(payload.get('item_id', 0))
+    except (TypeError, ValueError):
+        item_id = 0
+    direction = -1 if str(payload.get('direction') or '') == 'up' else 1
+    entries = db.session.query(PlayerPlaylistItem).filter_by(
+        playlist_id=playlist_id).order_by(
+        PlayerPlaylistItem.position.asc()).all()
+    index = next((i for i, e in enumerate(entries) if e.id == item_id), None)
+    if index is None or not 0 <= index + direction < len(entries):
+        return jsonify({'ok': False, 'message': 'Cannot move it that way'}), 400
+    other = entries[index + direction]
+    entry = entries[index]
+    entry.position, other.position = other.position, entry.position
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/playlists/<int:playlist_id>/delete', methods=['POST'])
+def api_playlist_delete(playlist_id):
+    """Delete a user playlist (track files are kept)."""
+    from app.models import PlayerPlaylist, PlayerPlaylistItem
+    pl = db.session.get(PlayerPlaylist, playlist_id)
+    if not pl:
+        return jsonify({'ok': False, 'message': 'Playlist not found'}), 404
+    db.session.query(PlayerPlaylistItem).filter_by(
+        playlist_id=pl.id).delete()
+    db.session.delete(pl)
+    db.session.commit()
+    return jsonify({'ok': True})
 
 
 def _playable_file_or_404(conversion_id):
@@ -1226,6 +1453,8 @@ def _fetch_thumbnail(url):
 
 def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
     """Convert audio to the target format with metadata and cover art."""
+    if VALID_FORMATS[format_type].get('kind') == 'video':
+        return convert_video_file(input_file, format_type, output_file, meta)
     args = ['ffmpeg', '-y']
     if cover_file and format_type in COVER_FORMATS:
         args += ['-i', input_file, '-i', cover_file]
@@ -1248,6 +1477,39 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
     args += ['-threads', '2']
     args.append(output_file)
     result = subprocess.run(args, capture_output=True, text=True, timeout=180)
+
+    if result.returncode == 0 and os.path.exists(output_file):
+        return {'success': True}
+    else:
+        error_msg = result.stderr.strip()[-500:] if result.stderr else 'FFmpeg returned non-zero exit code'
+        return {'success': False, 'error': f'FFmpeg conversion failed: {error_msg}'}
+
+
+def convert_video_file(input_file, format_type, output_file, meta):
+    """Convert a download to a portable video file with metadata.
+
+    MP4 is re-encoded to H.264/AAC (plays everywhere, faststart-tagged for
+    seeking during streaming). WebM and MKV are stream-copied: YouTube's
+    VP9/Opus sources fit those containers as-is, which keeps conversion
+    fast and lossless; anything else fails loudly with ffmpeg's reason.
+    Cover art rides alongside as a sidecar (see download_and_convert).
+    """
+    fmt = VALID_FORMATS[format_type]
+    args = ['ffmpeg', '-y', '-i', input_file]
+    if fmt['ext'] == 'mp4':
+        args += ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+                 '-c:a', 'aac', '-movflags', '+faststart']
+    else:
+        args += ['-c', 'copy']
+
+    for key in ('title', 'artist', 'album', 'date'):
+        value = meta.get(key)
+        if value:
+            args += ['-metadata', f'{key}={value}']
+
+    args += ['-threads', '2']
+    args.append(output_file)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=600)
 
     if result.returncode == 0 and os.path.exists(output_file):
         return {'success': True}
@@ -1439,10 +1701,25 @@ def _run_ytdlp(args, url, timeout):
     return last_result
 
 
+def _download_kind(job):
+    """'video' when the queued job wants video, else 'audio'."""
+    if job is None:
+        return 'audio'
+    return VALID_FORMATS.get(LABEL_TO_KEY.get(job.format, ''), {}).get('kind', 'audio')
+
+
+def _download_selector(job):
+    # Video is capped at 1080p: 4K re-encodes blow past any sane timeout.
+    if _download_kind(job) == 'video':
+        return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+    return 'bestaudio/best'
+
+
 def download_audio(url, temp_audio, job=None):
-    """Download best-quality audio, reporting live progress. Returns success dict."""
-    base = (_active_privacy_flags() + _ytdlp_net_args()
-            + ['--no-playlist', '-f', 'bestaudio/best', '--newline', '-o', temp_audio])
+    """Download best-quality audio (or video), reporting live progress."""
+    selector = _download_selector(job)
+    base = (list(_YTDLP_PRIVACY_FLAGS) + _ytdlp_net_args()
+            + ['--no-playlist', '-f', selector, '--newline', '-o', temp_audio])
     cmd = _ytdlp_command() + base + [url]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1468,22 +1745,43 @@ def download_audio(url, temp_audio, job=None):
 
     if proc.returncode != 0 and _is_youtube(url):
         fallback = (_active_privacy_flags() + _ytdlp_net_args()
-                    + ['--no-playlist', '-f', 'bestaudio/best', '-o', temp_audio,
+                    + ['--no-playlist', '-f', selector, '-o', temp_audio,
                        '--extractor-args', 'youtube:player_client=android_vr,tv,web_embedded', url])
         retry = subprocess.run(_ytdlp_command() + fallback,
                                capture_output=True, text=True, timeout=300)
         if retry.returncode == 0:
-            if os.path.exists(temp_audio):
+            if _normalize_download(temp_audio):
                 return {'success': True}
             return {'success': False, 'error': 'No audio file was downloaded'}
 
     if proc.returncode != 0:
         return {'success': False, 'error': 'yt-dlp download failed'}
 
-    if os.path.exists(temp_audio):
+    if _normalize_download(temp_audio):
         return {'success': True}
 
     return {'success': False, 'error': 'No audio file was downloaded'}
+
+
+def _normalize_download(temp_audio):
+    """Resolve the real downloaded file, collapsing merged outputs.
+
+    Video merges land as `<temp>.mkv`/`<temp>.mp4` rather than exactly at
+    temp_audio; move that back so the rest of the pipeline sees one path.
+    Returns the path, or None when nothing usable arrived.
+    """
+    if os.path.isfile(temp_audio):
+        return temp_audio
+    for candidate in sorted(glob.glob(temp_audio + '.*')):
+        if candidate.endswith('.part'):
+            continue
+        if os.path.isfile(candidate):
+            try:
+                os.replace(candidate, temp_audio)
+            except OSError:
+                return candidate
+            return temp_audio
+    return None
 
 
 # -------------------------------------------------------------- helpers ----
@@ -1770,12 +2068,15 @@ def _serialize(item):
         'item_index': item.item_index,
         'item_count': item.item_count,
         'retry_attempts': item.retry_attempts,
+        'liked': bool(getattr(item, 'liked', False)),
+        'play_count': getattr(item, 'play_count', 0) or 0,
         'error': item.error or '',
         'created_at': str(item.created_at) if item.created_at else '',
     }
 
 
 @bp.route('/api/reveal/<int:conversion_id>')
+@_same_origin_required
 def reveal_file(conversion_id):
     """Reveal the saved file or playlist folder in the OS file manager."""
     history = db.session.get(ConversionHistory, conversion_id)
@@ -1802,6 +2103,7 @@ def reveal_file(conversion_id):
 
 
 @bp.route('/api/queue/pause')
+@_same_origin_required
 def api_queue_pause():
     """Pause the download queue; workers idle until resumed."""
     _queue_paused.set()
@@ -1809,6 +2111,7 @@ def api_queue_pause():
 
 
 @bp.route('/api/queue/resume')
+@_same_origin_required
 def api_queue_resume():
     """Resume a paused download queue."""
     _queue_paused.clear()
@@ -1830,6 +2133,7 @@ def api_health():
 
 
 @bp.route('/api/skip/<int:conversion_id>')
+@_same_origin_required
 def skip_job(conversion_id):
     """Skip a queued/active track, or every remaining track of a playlist.
 
@@ -2845,8 +3149,9 @@ def _probe_metadata(path):
 def _is_valid_audio(path):
     """Check if a file is genuinely playable audio, not just named like it.
 
-    Fully decodes the file with ffmpeg: truncated downloads and garbage
-    bytes fail the decode, while header-only ffprobe checks would pass them.
+    Decodes up to the first two minutes with ffmpeg: truncated downloads
+    and garbage bytes fail the decode, while header-only checks would pass
+    them. (Length beyond that is covered by the duration check.)
     Returns True if the file is valid, False if corrupted or unreadable.
     """
     try:
@@ -2856,8 +3161,8 @@ def _is_valid_audio(path):
         if os.path.getsize(path) == 0:
             return False
         res = subprocess.run(
-            ['ffmpeg', '-v', 'error', '-i', path, '-f', 'null', '-'],
-            capture_output=True, text=True, timeout=120,
+            ['ffmpeg', '-v', 'error', '-i', path, '-t', '120', '-f', 'null', '-'],
+            capture_output=True, text=True, timeout=150,
         )
         return res.returncode == 0
     except Exception:

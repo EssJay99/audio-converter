@@ -83,6 +83,9 @@ _SCHEMA_MIGRATIONS = {
         ('expected_title', 'VARCHAR(250) DEFAULT ""'),
         ('import_misses', 'TEXT DEFAULT "[]"'),
         ('subscription_id', 'INTEGER'),
+        ('liked', 'BOOLEAN DEFAULT 0'),
+        ('play_count', 'INTEGER DEFAULT 0'),
+        ('last_played_at', 'DATETIME'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),

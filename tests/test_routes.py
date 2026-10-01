@@ -2831,9 +2831,9 @@ def test_find_free_port_prefers_stable_default():
     try:
         probe.bind((desktop.DEFAULT_HOST, desktop.DEFAULT_PORT))
         probe.listen(1)
-        taken = True
-    except OSError:
         taken = False
+    except OSError:
+        taken = True
     try:
         port = desktop.find_free_port(preferred=desktop.DEFAULT_PORT)
         assert (port != desktop.DEFAULT_PORT) if taken else (port == desktop.DEFAULT_PORT)
@@ -2929,12 +2929,12 @@ def test_parent_completion_notifies_once(client, monkeypatch):
 
 # ------------------------------------------------------- backup ----
 
-def test_backup_download_is_valid_sqlite(client):
+def test_backup_download_is_valid_sqlite(client, tmp_path):
     import sqlite3
     resp = client.get('/api/backup')
     assert resp.status_code == 200
     assert resp.headers['Content-Disposition'].startswith('attachment')
-    path = '/tmp/opencode/backup-test.db'
+    path = str(tmp_path / 'backup-test.db')
     with open(path, 'wb') as f:
         f.write(resp.data)
     try:
@@ -3407,3 +3407,121 @@ def test_home_has_subs_stats_health_markers(client):
             is_playlist=True, playlist_title='Mix', item_count=1))
         db.session.commit()
     assert b'data-subscribe' in client.get('/').data
+
+
+# ------------------------------------------------------- player tab ----
+
+def test_player_page_renders(client):
+    page = client.get('/player')
+    assert page.status_code == 200
+    for marker in (b'id="libGrid"', b'id="viz"', b'id="tabQueue"',
+                   b'id="tabPlaylists"', b'player_tab.js',
+                   b'href="/player">Player</a>'):
+        assert marker in page.data
+
+
+def test_like_toggle(client, completed_conversion):
+    job_id, _ = completed_conversion
+    assert client.post(f'/api/like/{job_id}').get_json() == {
+        'ok': True, 'liked': True}
+    assert client.post(f'/api/like/{job_id}').get_json() == {
+        'ok': True, 'liked': False}
+    assert client.post('/api/like/999999').status_code == 404
+
+
+def test_record_played(client, completed_conversion):
+    job_id, _ = completed_conversion
+    assert client.post(f'/api/played/{job_id}').get_json() == {
+        'ok': True, 'play_count': 1}
+    assert client.post(f'/api/played/{job_id}').get_json() == {
+        'ok': True, 'play_count': 2}
+    assert client.post('/api/played/999999').status_code == 404
+
+
+def test_library_lists_playable_only(client, tmp_path):
+    target = tmp_path / 'song.flac'
+    target.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/ok', format='FLAC',
+            output_path=str(target), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/gone', format='FLAC',
+            output_path=str(tmp_path / 'gone.flac'), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/busy', format='FLAC',
+            output_path=str(tmp_path), status='downloading'))
+        db.session.commit()
+
+    items = client.get('/api/library').get_json()['items']
+    assert [i['url'] for i in items] == ['https://youtu.be/ok']
+
+
+def test_user_playlist_crud(client, completed_conversion):
+    job_id, _ = completed_conversion
+    created = client.post('/api/playlists', json={'name': 'Gym'}).get_json()
+    assert created['ok'] is True
+    pid = created['playlist']['id']
+
+    assert client.post('/api/playlists', json={'name': '  '}).status_code == 400
+    assert client.post(f'/api/playlists/{pid}/add',
+                       json={'conversion_id': 999999}).status_code == 400
+
+    added = client.post(f'/api/playlists/{pid}/add',
+                        json={'conversion_id': job_id}).get_json()
+    assert added['ok'] is True
+    assert added['playlist']['count'] == 1
+
+    items = client.get(f'/api/playlists/{pid}').get_json()
+    assert len(items['items']) == 1
+    entry = items['items'][0]
+    assert entry['id'] == job_id
+
+    listed = client.get('/api/playlists').get_json()['items']
+    assert listed[0]['name'] == 'Gym'
+
+    item_id = items['items'][0]['item_id']
+    assert client.post(f'/api/playlists/{pid}/move',
+                       json={'item_id': item_id, 'direction': 'up'}
+                       ).status_code == 400
+    assert client.post(f'/api/playlists/{pid}/remove',
+                       json={'item_id': item_id}).get_json()['ok'] is True
+    assert client.post(f'/api/playlists/{pid}/delete').get_json() == {
+        'ok': True}
+
+
+def test_user_playlist_move_reorders(client, completed_conversion, tmp_path):
+    job_id, _ = completed_conversion
+    other = tmp_path / 'other.flac'
+    other.write_bytes(b'fLaC')
+    with client.application.app_context():
+        job2 = ConversionHistory(url='https://youtu.be/b', format='FLAC',
+                                 output_path=str(other), status='completed')
+        db.session.add(job2)
+        db.session.commit()
+        job2_id = job2.id
+
+    pid = client.post('/api/playlists', json={'name': 'Mix'}).get_json(
+    )['playlist']['id']
+    client.post(f'/api/playlists/{pid}/add', json={'conversion_id': job_id})
+    client.post(f'/api/playlists/{pid}/add', json={'conversion_id': job2_id})
+
+    def order():
+        return [t['id'] for t in
+                client.get(f'/api/playlists/{pid}').get_json()['items']]
+
+    assert order() == [job_id, job2_id]
+    item_id = client.get(f'/api/playlists/{pid}').get_json()['items'][1]['item_id']
+    client.post(f'/api/playlists/{pid}/move',
+                json={'item_id': item_id, 'direction': 'up'})
+    assert order() == [job2_id, job_id]
+
+
+def test_serialize_reports_likes_and_plays(client, completed_conversion):
+    job_id, _ = completed_conversion
+    client.post(f'/api/like/{job_id}')
+    client.post(f'/api/played/{job_id}')
+    item = client.get('/api/conversions', query_string={'limit': 10}).get_json()
+    row = next(i for i in item if i['id'] == job_id)
+    assert row['liked'] is True
+    assert row['play_count'] == 1
