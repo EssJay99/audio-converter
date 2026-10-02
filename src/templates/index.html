@@ -306,9 +306,23 @@
                                         </tr>
                                     </thead>
                                     <tbody id="historyBody" class="fade-in">
+                                        {% set ns = namespace(day='') %}
                                         {% for item in history %}
+                                        {% if item.created_at and item.created_at.date() == today %}
+                                            {% set daylabel = 'Today' %}
+                                        {% elif item.created_at and item.created_at.date() == yesterday %}
+                                            {% set daylabel = 'Yesterday' %}
+                                        {% elif item.created_at %}
+                                            {% set daylabel = item.created_at.strftime('%A, %b %d') %}
+                                        {% else %}
+                                            {% set daylabel = 'Unknown date' %}
+                                        {% endif %}
+                                        {% if daylabel != ns.day %}
+                                            {% set ns.day = daylabel %}
+                                            <tr class="history-day"><td colspan="5">{{ daylabel }}</td></tr>
+                                        {% endif %}
                                         {% if item.is_playlist %}
-                                            <tr id="row-{{ item.id }}" class="playlist-row" data-folder="{{ item.output_path }}">
+                                            <tr id="row-{{ item.id }}" class="playlist-row" data-folder="{{ item.output_path }}" data-day="{{ daylabel }}">
                                                     <td class="row-status">
                                                         <input type="checkbox" class="form-check-input row-select me-1" data-bulk="{{ item.id }}" title="Select row" aria-label="Select row">
                                                         <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
@@ -316,6 +330,9 @@
                                                             <div class="progress-bar row-progress-bar bg-primary" role="progressbar"
                                                                  style="width: {{ item.progress }}%" aria-valuenow="{{ item.progress }}"></div>
                                                         </div>
+                                                        {% if item.status in ['downloading', 'converting'] and (item.dl_speed or item.dl_eta) %}
+                                                        <div class="row-speed text-muted small">{{ item.dl_speed }}{% if item.dl_speed and item.dl_eta %} · {% endif %}{% if item.dl_eta %}ETA {{ item.dl_eta }}{% endif %}</div>
+                                                        {% endif %}
                                                         <div class="playlist-summary" data-playlist-summary data-count="{{ item.item_count }}" data-progress="{{ item.progress }}">
                                                             {% if item.item_count %}{{ item.progress }}% &middot; {{ item.item_count }} track(s){% else %}Reading playlist&hellip;{% endif %}
                                                         </div>
@@ -371,7 +388,7 @@
                                                     <td colspan="5"><div class="playlist-children-box"></div></td>
                                                 </tr>
                                         {% else %}
-                                            <tr id="row-{{ item.id }}" data-folder="{{ item.output_path }}">
+                                            <tr id="row-{{ item.id }}" data-folder="{{ item.output_path }}" data-day="{{ daylabel }}">
                                                     <td class="row-status">
                                                         <input type="checkbox" class="form-check-input row-select me-1" data-bulk="{{ item.id }}" title="Select row" aria-label="Select row">
                                                         <span class="badge status-badge status-{{ item.status }}">{{ item.status }}</span>
@@ -379,6 +396,9 @@
                                                             <div class="progress-bar row-progress-bar bg-primary" role="progressbar"
                                                                  style="width: {{ item.progress }}%" aria-valuenow="{{ item.progress }}"></div>
                                                         </div>
+                                                        {% if item.status in ['downloading', 'converting'] and (item.dl_speed or item.dl_eta) %}
+                                                        <div class="row-speed text-muted small">{{ item.dl_speed }}{% if item.dl_speed and item.dl_eta %} · {% endif %}{% if item.dl_eta %}ETA {{ item.dl_eta }}{% endif %}</div>
+                                                        {% endif %}
                                                     </td>
                                                     <td>{{ item.format }}</td>
                                                     <td><a href="{{ item.url }}" target="_blank" rel="noopener" title="Open link">
@@ -520,6 +540,16 @@
                         if (bar) {
                             bar.style.width = item.progress + '%';
                             bar.setAttribute('aria-valuenow', item.progress);
+                        }
+                        const speedEl = row.querySelector('.row-speed');
+                        if (speedEl) {
+                            const bits = [];
+                            if (['downloading', 'converting'].includes(item.status)) {
+                                if (item.dl_speed) bits.push(item.dl_speed);
+                                if (item.dl_eta) bits.push('ETA ' + item.dl_eta);
+                            }
+                            const text = bits.join(' · ');
+                            if (speedEl.textContent !== text) speedEl.textContent = text;
                         }
                         if (summary) {
                             const label = row.querySelector('.expand-label');

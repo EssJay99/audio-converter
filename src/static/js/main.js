@@ -74,6 +74,14 @@ function renderSavedFileCell(cell, item) {
         queue.textContent = '+ Queue';
         actions.appendChild(queue);
 
+        const nextBtn = document.createElement('button');
+        nextBtn.type = 'button';
+        nextBtn.className = 'btn btn-sm btn-outline-secondary queue-next-btn';
+        nextBtn.title = 'Play next (insert after current track)';
+        nextBtn.setAttribute('data-queue-next', item.id);
+        nextBtn.textContent = 'Next \u2192';
+        actions.appendChild(nextBtn);
+
         const rename = document.createElement('button');
         rename.type = 'button';
         rename.className = 'btn btn-sm btn-outline-secondary rename-btn';
@@ -510,9 +518,28 @@ function shortUrl(url) {
 
 // Builds a <tr> matching the server-rendered layout. Used to lazily list a
 // playlist's tracks when its parent row is expanded.
+function historyDayLabel(iso) {
+    // 'YYYY-MM-DD …' -> Today / Yesterday / weekday label, matching server.
+    const m = /^\s*(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+    if (!m) return 'Unknown date';
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const today = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+    const stamp = m[1] + '-' + m[2] + '-' + m[3];
+    if (stamp === today) return 'Today';
+    const y = new Date(now.getTime() - 86400000);
+    const yesterday = y.getFullYear() + '-' + pad(y.getMonth() + 1) + '-' + pad(y.getDate());
+    if (stamp === yesterday) return 'Yesterday';
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return days[d.getDay()] + ', ' + months[d.getMonth()] + ' ' + m[3];
+}
+
 function renderHistoryRow(item) {
     const tr = document.createElement('tr');
     tr.id = 'row-' + item.id;
+    tr.dataset.day = historyDayLabel(item.created_at);
     if (item.parent_id) tr.dataset.playlistId = item.parent_id;
     if (item.output_path) tr.dataset.folder = item.output_path;
 
@@ -537,6 +564,10 @@ function renderHistoryRow(item) {
     progressBar.style.width = item.progress + '%';
     progressWrap.appendChild(progressBar);
     statusTd.appendChild(progressWrap);
+    const speedLine = document.createElement('div');
+    speedLine.className = 'row-speed text-muted small';
+    speedLine.textContent = speedText(item);
+    statusTd.appendChild(speedLine);
     tr.appendChild(statusTd);
 
     const fmtTd = document.createElement('td');
@@ -613,6 +644,14 @@ function renderHistoryRow(item) {
     tr.appendChild(dateTd);
 
     return tr;
+}
+
+function speedText(item) {
+    if (!['downloading', 'converting'].includes(item.status)) return '';
+    const bits = [];
+    if (item.dl_speed) bits.push(item.dl_speed);
+    if (item.dl_eta) bits.push('ETA ' + item.dl_eta);
+    return bits.join(' \u00b7 ');
 }
 
 function fmtRuntime(totalSeconds) {
@@ -858,7 +897,75 @@ function loadSubscriptions() {
                         .then(loadSubscriptions)
                         .catch(() => toast('Could not remove this subscription.', 'danger'));
                 });
+                const filters = document.createElement('details');
+                filters.className = 'sub-filters small';
+                const summary = document.createElement('summary');
+                const activeFilters = (sub.skip_shorts ? 1 : 0) +
+                    (sub.min_duration > 0 ? 1 : 0) +
+                    (sub.title_include ? 1 : 0) + (sub.title_exclude ? 1 : 0);
+                summary.textContent = activeFilters
+                    ? 'Filters (' + activeFilters + ' on)' : 'Filters';
+                summary.title = 'Only queue matching new tracks';
+                filters.appendChild(summary);
+                const grid = document.createElement('div');
+                grid.className = 'd-flex flex-wrap gap-2 align-items-center mt-1';
+                const shortsLabel = document.createElement('label');
+                shortsLabel.className = 'd-flex gap-1 align-items-center';
+                const shorts = document.createElement('input');
+                shorts.type = 'checkbox';
+                shorts.checked = !!sub.skip_shorts;
+                shorts.title = 'Skip clips of a minute or less';
+                shortsLabel.appendChild(shorts);
+                shortsLabel.appendChild(document.createTextNode('Skip shorts'));
+                grid.appendChild(shortsLabel);
+                const minDur = document.createElement('input');
+                minDur.type = 'number';
+                minDur.min = '0';
+                minDur.max = '36000';
+                minDur.value = sub.min_duration || 0;
+                minDur.title = 'Minimum seconds (0 = off)';
+                minDur.className = 'form-control form-control-sm';
+                minDur.style.width = '7rem';
+                minDur.placeholder = 'Min secs';
+                grid.appendChild(minDur);
+                const inc = document.createElement('input');
+                inc.type = 'text';
+                inc.value = sub.title_include || '';
+                inc.placeholder = 'Title must contain…';
+                inc.title = 'Comma-separated; matches if any term hits';
+                inc.className = 'form-control form-control-sm';
+                inc.style.width = '11rem';
+                grid.appendChild(inc);
+                const exc = document.createElement('input');
+                exc.type = 'text';
+                exc.value = sub.title_exclude || '';
+                exc.placeholder = 'Title must not contain…';
+                exc.title = 'Comma-separated; drops on any hit';
+                exc.className = 'form-control form-control-sm';
+                exc.style.width = '11rem';
+                grid.appendChild(exc);
+                const save = document.createElement('button');
+                save.type = 'button';
+                save.className = 'btn btn-sm btn-outline-primary';
+                save.textContent = 'Save filters';
+                save.addEventListener('click', () => {
+                    postJSON('/api/subscriptions/' + sub.id + '/filters', {
+                        min_duration: Number(minDur.value) || 0,
+                        skip_shorts: shorts.checked,
+                        title_include: inc.value,
+                        title_exclude: exc.value,
+                    })
+                        .then((res) => {
+                            toast(res.ok ? 'Filters saved.' : (res.message || 'Could not save.'),
+                                  res.ok ? 'success' : 'danger');
+                            loadSubscriptions();
+                        })
+                        .catch(() => toast('Could not save filters.', 'danger'));
+                });
+                grid.appendChild(save);
+                filters.appendChild(grid);
                 list.appendChild(row);
+                list.appendChild(filters);
             });
         })
         .catch(() => {});
@@ -880,6 +987,18 @@ function initHealthBanner() {
             }
             if (data.app_update && data.app_update.version) {
                 problems.push('Audio Converter ' + data.app_update.version + ' is available (Settings › Check for updates)');
+            }
+            if (data.resumed > 0) {
+                let seenResume = null;
+                try {
+                    seenResume = sessionStorage.getItem('resumeNoticed');
+                } catch (err) { /* private mode */ }
+                if (!seenResume) {
+                    try {
+                        sessionStorage.setItem('resumeNoticed', '1');
+                    } catch (err) { /* private mode */ }
+                    problems.push('Resumed ' + data.resumed + ' interrupted download(s) from last time.');
+                }
             }
             if (data.ffmpeg === false) {
                 problems.push('FFmpeg was not found — conversions cannot run until it is installed');
@@ -1210,7 +1329,8 @@ function historyTopRows() {
     const body = document.getElementById('historyBody');
     if (!body) return [];
     return Array.from(body.children).filter(
-        (tr) => tr.tagName === 'TR' && !tr.classList.contains('playlist-children'));
+        (tr) => tr.tagName === 'TR' && !tr.classList.contains('playlist-children') &&
+            !tr.classList.contains('history-day'));
 }
 
 function historyRowStatus(tr) {
@@ -1308,6 +1428,28 @@ function applyHistoryFilter() {
     const next = document.getElementById('historyNext');
     if (prev) prev.disabled = historyState.page <= 0;
     if (next) next.disabled = historyState.page >= pages - 1;
+    // Day headers are rebuilt from the rows in their current (possibly
+    // sorted/paged) order, so headers never detach from their rows.
+    Array.from(body.querySelectorAll(':scope > tr.history-day')).forEach((h) => h.remove());
+    // Show headers only in chronological sorts; name sort mixes dates.
+    const chronological = historyState.sort !== 'name';
+    if (chronological) {
+        let lastDay = null;
+        ordered.forEach((tr) => {
+            if (!pageSet.has(tr)) return;
+            const day = tr.dataset.day || 'Unknown date';
+            if (day !== lastDay) {
+                lastDay = day;
+                const header = document.createElement('tr');
+                header.className = 'history-day';
+                const td = document.createElement('td');
+                td.colSpan = 5;
+                td.textContent = day;
+                header.appendChild(td);
+                body.insertBefore(header, tr);
+            }
+        });
+    }
 }
 
 function historyFolderLabel(path) {

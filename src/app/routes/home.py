@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import time
+from datetime import timedelta
 
 from flask import Blueprint, render_template, request, jsonify, abort, Response
 from sqlalchemy import or_
@@ -20,9 +21,13 @@ def index():
 
     settings = UserSettings.query.first()
     default_format = getattr(settings, 'default_format', 'flac') or 'flac'
+    today = utcnow().date()
+    yesterday = today - timedelta(days=1)
     return render_template(
         'index.html',
         history=history,
+        today=today,
+        yesterday=yesterday,
         default_output_path=effective_output_path(),
         default_format=default_format,
         request_path=request.path,
@@ -68,9 +73,13 @@ def history():
         ConversionHistory.created_at.desc()
     ).offset((page - 1) * per).limit(per).all()
 
+    today = utcnow().date()
+    yesterday = today - timedelta(days=1)
     return render_template(
         'index.html',
         history=history,
+        today=today,
+        yesterday=yesterday,
         default_output_path=effective_output_path(),
         default_format='flac',
         request_path=request.path,
@@ -129,7 +138,6 @@ DURATION_PROBE_CAP = 500
 @bp.route('/api/stats')
 def api_stats():
     """Library dashboard numbers: counts, size, playtime, top playlists."""
-    from datetime import timedelta
     from app.routes.convert import _stored_duration, _cached_stat
 
     try:

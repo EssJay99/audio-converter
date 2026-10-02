@@ -102,6 +102,14 @@
             img.loading = 'lazy';
             img.src = '/api/cover/' + item.id + '?size=thumb';
             img.onerror = function () { img.classList.add('d-none'); };
+            img.style.cursor = 'zoom-in';
+            img.title = 'Click to enlarge';
+            img.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                if (window.AudioLightbox) {
+                    window.AudioLightbox.open(img.src.replace('?size=thumb', ''));
+                }
+            });
             card.appendChild(img);
             var info = document.createElement('div');
             info.className = 'lib-info';
@@ -920,6 +928,46 @@
         if (liked) liked.addEventListener('change', function () { libShown = 100; renderLibrary(); });
         const sort = document.getElementById('tabSort');
         if (sort) sort.addEventListener('change', function () { libShown = 100; renderLibrary(); });
+        const saveQueueForm = document.getElementById('tabSaveQueue');
+        if (saveQueueForm) {
+            saveQueueForm.addEventListener('submit', function (e) {
+                e.preventDefault();
+                const nameInput = document.getElementById('tabSaveQueueName');
+                const name = nameInput ? nameInput.value.trim() : '';
+                if (!name) return;
+                if (!window.AudioPlayer || !window.AudioPlayer.snapshot) {
+                    if (typeof toast === 'function') toast('Player is not ready.', 'danger');
+                    return;
+                }
+                const snap = window.AudioPlayer.snapshot();
+                if (!snap.queue.length) {
+                    if (typeof toast === 'function') toast('The queue is empty.', 'info');
+                    return;
+                }
+                postJSON('/api/playlists', { name: name })
+                    .then(function (res) {
+                        if (!res.ok || !res.playlist) throw new Error(res.message || '');
+                        const pid = res.playlist.id;
+                        let chain = Promise.resolve();
+                        snap.queue.forEach(function (entry) {
+                            chain = chain.then(function () {
+                                return postJSON('/api/playlists/' + pid + '/add',
+                                                { conversion_id: entry.id });
+                            });
+                        });
+                        return chain.then(function () {
+                            if (nameInput) nameInput.value = '';
+                            if (typeof toast === 'function') {
+                                toast('Queue saved as playlist.', 'success');
+                            }
+                            loadUserPlaylists();
+                        });
+                    })
+                    .catch(function () {
+                        if (typeof toast === 'function') toast('Could not save queue.', 'danger');
+                    });
+            });
+        }
         const form = document.getElementById('tabPlaylistCreate');
         if (form) {
             form.addEventListener('submit', function (e) {

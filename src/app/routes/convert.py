@@ -167,6 +167,8 @@ def _resume_interrupted():
             db.session.rollback()
     if count:
         _ensure_worker()
+    global _resumed_count
+    _resumed_count = count
     return count
 
 
@@ -246,7 +248,8 @@ def _worker_loop():
                     job_timeout = _settings.job_timeout if _settings else 300
                     job_start = None
 
-                    _job_update(job, status='downloading', progress=2)
+                    _job_update(job, status='downloading', progress=2,
+                        dl_speed='', dl_eta='')
                     try:
                         job_start = time.time()
                         result = download_and_convert(job.url, fmt_key, output_dir, job)
@@ -452,7 +455,8 @@ def _expand_playlist_job(job):
             filtered_urls.append(url)
     urls = filtered_urls
 
-    _job_update(job, status='downloading', progress=0, output_path=folder,
+    _job_update(job, status='downloading', progress=0, dl_speed='', dl_eta='',
+                output_path=folder,
                 playlist_title=title, item_count=len(urls),
                 import_source=import_source, import_misses=misses_json if import_source else '[]',
                 error=import_note or None)
@@ -690,6 +694,56 @@ def _due_subscriptions():
     return due
 
 
+def _meta_duration(item):
+    """Seconds from an item dict, tolerating every historical key."""
+    for key in ('duration', 'expected_duration'):
+        try:
+            value = float(item.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _split_terms(text):
+    return [t.strip().lower() for t in str(text or '').split(',') if t.strip()]
+
+
+def _apply_sub_filters(sub, urls, meta_by_url):
+    """Drop fresh URLs a subscription's filters reject.
+
+    Title rules always apply (flat listings always carry titles);
+    duration rules only judge items whose length is known. Returns
+    (kept_urls, filtered_count).
+    """
+    try:
+        min_duration = int(getattr(sub, 'min_duration', 0) or 0)
+    except (TypeError, ValueError):
+        min_duration = 0
+    skip_shorts = bool(getattr(sub, 'skip_shorts', False))
+    include = _split_terms(getattr(sub, 'title_include', ''))
+    exclude = _split_terms(getattr(sub, 'title_exclude', ''))
+    if min_duration <= 0 and not skip_shorts and not include and not exclude:
+        return list(urls), 0
+    kept = []
+    for url in urls:
+        meta = meta_by_url.get(url) or {}
+        title = str(meta.get('title') or '').lower()
+        duration = _meta_duration(meta)
+        if exclude and any(term in title for term in exclude):
+            continue
+        if include and not any(term in title for term in include):
+            continue
+        if duration > 0:
+            if min_duration > 0 and duration < min_duration:
+                continue
+            if skip_shorts and duration <= 65:
+                continue
+        kept.append(url)
+    return kept, len(urls) - len(kept)
+
+
 def _check_due_subscriptions():
     from datetime import datetime
     for sub in _due_subscriptions():
@@ -757,8 +811,17 @@ def check_subscription(subscription_id):
     known = {c.url for c in db.session.query(ConversionHistory).filter_by(
         parent_id=parent.id).all()}
     fresh = [u for u in result['urls'] if u not in known]
+    meta_by_url = {}
+    for item in result.get('items', []) or []:
+        if isinstance(item, dict) and item.get('url'):
+            meta_by_url[item['url']] = {
+                'title': str(item.get('title')
+                              or item.get('expected_title') or ''),
+                'duration': _meta_duration(item),
+            }
+    fresh, filtered = _apply_sub_filters(sub, fresh, meta_by_url)
     if not fresh:
-        return {'ok': True, 'added': 0}
+        return {'ok': True, 'added': 0, 'filtered': filtered}
 
     folder = parent.output_path or sub.output_path
     try:
@@ -775,7 +838,7 @@ def check_subscription(subscription_id):
     db.session.commit()
     _ensure_worker()
     _refresh_playlist_parent(parent.id)
-    return {'ok': True, 'added': len(fresh)}
+    return {'ok': True, 'added': len(fresh), 'filtered': filtered}
 
 
 def _ensure_folder_art(parent):
@@ -940,11 +1003,12 @@ def _job_update(job, **fields):
 _progress_cache = {}
 
 
-def _job_progress(job, pct):
+def _job_progress(job, pct, speed=None, eta=None):
     """Record download progress, committing at most every 2s or 2 points.
 
     yt-dlp emits a progress line per percent per worker; committing each one
     would serialize all workers on the database lock and starve the UI.
+    Speed/ETA ride along in the same commit, so they cost nothing extra.
     """
     now = time.monotonic()
     last = _progress_cache.get(job.id)
@@ -953,7 +1017,12 @@ def _job_progress(job, pct):
         if pct < last_pct + 2 and now - last_time < 2.0:
             return
     _progress_cache[job.id] = (pct, now)
-    _job_update(job, progress=int(pct))
+    fields = {'progress': int(pct)}
+    if speed is not None:
+        fields['dl_speed'] = speed
+    if eta is not None:
+        fields['dl_eta'] = eta
+    _job_update(job, **fields)
 
 
 # Filesystem stat cache: staleness-tolerant existence/size lookups so list
@@ -1100,6 +1169,8 @@ def _same_origin_required(view):
 
 
 _finish_armed = False
+# Interrupted jobs requeued by the latest launch (for the resume notice).
+_resumed_count = 0
 
 
 def _job_finish(job, **fields):
@@ -2165,7 +2236,8 @@ def download_and_convert(url, format_type, output_path, job=None):
         if not check_ffmpeg():
             return {'success': False, 'error': 'FFmpeg not found! Install it first.'}
 
-        _job_update(job, status='downloading', progress=5) if job else None
+        _job_update(job, status='downloading', progress=5,
+                        dl_speed='', dl_eta='') if job else None
 
         downloaded_from = url
         dl = download_audio(url, temp_audio, job)
@@ -3038,9 +3110,17 @@ def download_audio(url, temp_audio, job=None):
             match = re.search(r'(?:^|\s)\[download\]', line)
             if match and '%' in line:
                 pct_match = re.search(r'(\d+(?:\.\d+)?)%', line)
+                speed_match = re.search(r'\bat\s+(\S+)', line)
+                eta_match = re.search(r'\bETA\s+(\S+)', line)
                 if pct_match and job:
                     pct = min(90, 5 + float(pct_match.group(1)) * 0.85)
-                    _job_progress(job, pct)
+                    speed = speed_match.group(1) if speed_match else None
+                    eta = eta_match.group(1) if eta_match else None
+                    if speed == 'Unknown' or (speed and not speed.endswith('/s')):
+                        speed = ''
+                    if eta == 'Unknown':
+                        eta = ''
+                    _job_progress(job, pct, speed=speed, eta=eta)
         proc.wait(timeout=300)
     except KeyboardInterrupt:
         proc.kill()
@@ -4015,6 +4095,8 @@ def _serialize(item):
         'rating': getattr(item, 'rating', 0) or 0,
         'quality': getattr(item, 'quality', '') or '',
         'duration': getattr(item, 'duration', 0) or 0,
+        'dl_speed': getattr(item, 'dl_speed', '') or '',
+        'dl_eta': getattr(item, 'dl_eta', '') or '',
         'tag_title': getattr(item, 'tag_title', '') or '',
         'tag_artist': getattr(item, 'tag_artist', '') or '',
         'tag_album': getattr(item, 'tag_album', '') or '',
@@ -4090,13 +4172,18 @@ def api_health():
             app_update = dict(_latest_app)
     except Exception:
         app_update = {'version': '', 'url': ''}
+    try:
+        resumed = int(_resumed_count)
+    except Exception:
+        resumed = 0
     return jsonify({'ok': True,
                     'stale_helper_suspected': _stale_helper_event.is_set(),
                     'ffmpeg': check_ffmpeg(),
                     'ytdlp': bool(_find_ytdlp()),
                     'output_writable': output_ok,
                     'disk_free_bytes': disk_free,
-                    'app_update': app_update})
+                    'app_update': app_update,
+                    'resumed': resumed})
 
 
 @bp.route('/api/prune-missing', methods=['POST'])
@@ -4634,6 +4721,10 @@ def _serialize_subscription(sub):
         'parent_id': sub.parent_id,
         'interval_hours': sub.interval_hours,
         'active': bool(sub.active),
+        'min_duration': getattr(sub, 'min_duration', 0) or 0,
+        'skip_shorts': bool(getattr(sub, 'skip_shorts', False)),
+        'title_include': getattr(sub, 'title_include', '') or '',
+        'title_exclude': getattr(sub, 'title_exclude', '') or '',
         'last_checked': str(sub.last_checked) if sub.last_checked else '',
     }
 
@@ -4727,6 +4818,30 @@ def api_subscription_interval(sub_id):
     sub.interval_hours = interval if interval in SUBSCRIPTION_INTERVALS else 24
     db.session.commit()
     return jsonify({'ok': True, 'interval_hours': sub.interval_hours})
+
+
+@bp.route('/api/subscriptions/<int:sub_id>/filters', methods=['POST'])
+def api_subscription_filters(sub_id):
+    """Set follow filters: skip shorts, minimum seconds, title terms.
+
+    Terms are comma-separated; include matches if any term hits, exclude
+    drops on any hit. Unknown durations never trigger duration rules.
+    """
+    from app.models import Subscription
+    sub = db.session.get(Subscription, sub_id)
+    if not sub:
+        return jsonify({'ok': False, 'message': 'Subscription not found'}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        min_duration = int(payload.get('min_duration', 0) or 0)
+    except (TypeError, ValueError):
+        min_duration = 0
+    sub.min_duration = max(0, min(36000, min_duration))
+    sub.skip_shorts = bool(payload.get('skip_shorts', False))
+    sub.title_include = str(payload.get('title_include') or '').strip()[:500]
+    sub.title_exclude = str(payload.get('title_exclude') or '').strip()[:500]
+    db.session.commit()
+    return jsonify({'ok': True, 'sub': _serialize_subscription(sub)})
 
 
 @bp.route('/api/subscriptions/<int:sub_id>/delete', methods=['POST'])
@@ -4912,6 +5027,7 @@ def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
     title = (str(info.get('title') or '').strip()
              or (f'Videos from {host}' if host else 'Videos'))
     urls = []
+    items = []
     seen = set()
     for entry in entries:
         if not entry or not isinstance(entry, dict):
@@ -4925,12 +5041,19 @@ def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
             continue
         seen.add(track_url)
         urls.append(track_url)
+        try:
+            duration = float(entry.get('duration') or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        items.append({'url': track_url,
+                      'title': str(entry.get('title') or ''),
+                      'duration': duration})
         if len(urls) >= max_items:
             break
     if not urls:
         return {'success': False,
                 'error': 'No downloadable videos found on that page.'}
-    return {'success': True, 'title': title, 'urls': urls}
+    return {'success': True, 'title': title, 'urls': urls, 'items': items}
 
 
 def resolve_playlist(url, max_items=PLAYLIST_MAX_ITEMS):
@@ -4957,6 +5080,7 @@ def resolve_playlist(url, max_items=PLAYLIST_MAX_ITEMS):
 
     title = str(info.get('title') or 'Playlist').strip() or 'Playlist'
     urls = []
+    items = []
     for entry in info.get('entries') or []:
         if not entry or not isinstance(entry, dict):
             continue
@@ -4968,13 +5092,20 @@ def resolve_playlist(url, max_items=PLAYLIST_MAX_ITEMS):
         if track_url:
             track_url = sanitize_url(track_url)
             urls.append(track_url)
+            try:
+                duration = float(entry.get('duration') or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            items.append({'url': track_url,
+                          'title': str(entry.get('title') or ''),
+                          'duration': duration})
         if len(urls) >= max_items:
             break
 
     if not urls:
         return {'success': False, 'error': 'Playlist appears to be empty or private'}
 
-    return {'success': True, 'title': title, 'urls': urls}
+    return {'success': True, 'title': title, 'urls': urls, 'items': items}
 
 
 # --------------------------------------------- streaming playlist import ----

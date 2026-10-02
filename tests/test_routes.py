@@ -6039,3 +6039,82 @@ def test_audio_quality_settings_round_trip(client):
     assert resp.status_code == 302
     with client.application.app_context():
         assert UserSettings.query.first().audio_quality == 'best'
+
+
+def test_job_progress_stores_speed_eta(client):
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/sp', format='FLAC',
+            output_path='/tmp/sp.flac', status='downloading', progress=0))
+        db.session.commit()
+        job = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sp').first()
+        convert_module._progress_cache.pop(job.id, None)
+        convert_module._job_progress(job, 10.0, speed='3.2MiB/s', eta='00:14')
+        db.session.refresh(job)
+        assert job.progress == 10
+        assert job.dl_speed == '3.2MiB/s'
+        assert job.dl_eta == '00:14'
+
+
+def test_apply_sub_filters():
+    import types
+    f = convert_module._apply_sub_filters
+    sub = types.SimpleNamespace(min_duration=0, skip_shorts=False,
+                                title_include='', title_exclude='')
+    urls = ['u1', 'u2']
+    meta = {'u1': {'title': 'Song', 'duration': 200},
+            'u2': {'title': 'Clip', 'duration': 30}}
+    assert f(sub, urls, meta) == (['u1', 'u2'], 0)
+    sub = types.SimpleNamespace(min_duration=120, skip_shorts=False,
+                                title_include='', title_exclude='')
+    assert f(sub, urls, meta) == (['u1'], 1)
+    sub = types.SimpleNamespace(min_duration=0, skip_shorts=True,
+                                title_include='', title_exclude='')
+    assert f(sub, urls, meta) == (['u1'], 1)
+    sub = types.SimpleNamespace(min_duration=0, skip_shorts=False,
+                                title_include='song, anthem', title_exclude='')
+    assert f(sub, urls, meta) == (['u1'], 1)
+    sub = types.SimpleNamespace(min_duration=0, skip_shorts=False,
+                                title_include='', title_exclude='clip')
+    assert f(sub, urls, meta) == (['u1'], 1)
+    # Unknown duration never triggers duration rules.
+    sub = types.SimpleNamespace(min_duration=120, skip_shorts=True,
+                                title_include='', title_exclude='')
+    assert f(sub, ['u3'], {'u3': {'title': 'Mystery', 'duration': 0}}) == (
+        ['u3'], 0)
+
+
+def test_subscription_filters_endpoint(client):
+    from app.models import Subscription
+    with client.application.app_context():
+        db.session.add(Subscription(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path='/tmp/pl'))
+        db.session.commit()
+        sub = Subscription.query.filter_by(url='https://youtu.be/pl').first().id
+    data = client.post(f'/api/subscriptions/{sub}/filters', json={
+        'min_duration': 120, 'skip_shorts': True,
+        'title_include': 'live, acoustic', 'title_exclude': 'remix'}).get_json()
+    assert data['ok'] is True
+    assert data['sub']['min_duration'] == 120
+    assert data['sub']['skip_shorts'] is True
+    assert data['sub']['title_include'] == 'live, acoustic'
+    assert client.post('/api/subscriptions/999999/filters', json={}).status_code == 404
+    data = client.post(f'/api/subscriptions/{sub}/filters', json={
+        'min_duration': -5}).get_json()
+    assert data['sub']['min_duration'] == 0
+
+
+def test_queue_top_endpoint(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/t1', format='FLAC',
+            output_path='/tmp/t1.flac', status='pending'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/t1').first().id
+    assert client.post(f'/api/queue/top/{row}').get_json()['ok'] is True
+    assert convert_module._queue_has(row) is True
+    convert_module._priority_queue.get_nowait()

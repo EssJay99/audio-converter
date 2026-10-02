@@ -74,6 +74,9 @@
         restoreRepeat();
         restoreQueue();
         restoreEQ();
+        restorePreampBalance();
+        restoreFadeSecs();
+        restoreAutoLyrics();
         restoreCrossfade();
         restoreSleepMode();
         initMediaSession();
@@ -130,7 +133,13 @@
             Player.audio.volume = v / 100;
             if (Player.audio2) Player.audio2.volume = v / 100;
             localStorage.setItem('appPlayerVolume', String(v));
+            updateMuteIcon();
         });
+        const muteBtn = $('appPlayerMute');
+        if (muteBtn) {
+            muteBtn.addEventListener('click', () => toggleMute());
+            updateMuteIcon();
+        }
         Player.ui.queueBtn.addEventListener('click', () => toggleQueueBox());
         initQueueDrag();
         Player.ui.queueClear.addEventListener('click', () => {
@@ -183,6 +192,33 @@
         }
         const qExport = $('appPlayerQueueExport');
         if (qExport) qExport.addEventListener('click', exportQueue);
+        const qClearPlayed = $('appPlayerQueueClearPlayed');
+        if (qClearPlayed) {
+            qClearPlayed.addEventListener('click', () => {
+                clearPlayed();
+                if (typeof toast === 'function') toast('Played tracks cleared.', 'info');
+            });
+        }
+        const qSearch = $('appPlayerQueueSearch');
+        if (qSearch) qSearch.addEventListener('input', () => renderQueue());
+        const fadeSel = $('appPlayerFadeSecs');
+        if (fadeSel) {
+            fadeSel.addEventListener('change', () => {
+                Player.fadeSecs = Math.max(2, Math.min(30, Number(fadeSel.value) || 8));
+                try {
+                    localStorage.setItem('appPlayerFadeSecs', String(Player.fadeSecs));
+                } catch (err) { /* private mode */ }
+            });
+        }
+        const autoLy = $('appAutoLyrics');
+        if (autoLy) {
+            autoLy.addEventListener('change', () => {
+                Player.autoLyrics = autoLy.checked;
+                try {
+                    localStorage.setItem('appPlayerAutoLyrics', autoLy.checked ? '1' : '0');
+                } catch (err) { /* private mode */ }
+            });
+        }
         const qImport = $('appPlayerQueueImport');
         if (qImport) {
             qImport.addEventListener('change', () => {
@@ -242,6 +278,24 @@
                 applyEQGains(gains);
             });
         });
+        const preEl = $('appPlayerPreamp');
+        if (preEl) {
+            preEl.addEventListener('input', () => {
+                try {
+                    localStorage.setItem('appPlayerPreamp', preEl.value);
+                } catch (err) { /* private mode */ }
+                applyPreampBalance();
+            });
+        }
+        const balEl = $('appPlayerBalance');
+        if (balEl) {
+            balEl.addEventListener('input', () => {
+                try {
+                    localStorage.setItem('appPlayerBalance', balEl.value);
+                } catch (err) { /* private mode */ }
+                applyPreampBalance();
+            });
+        }
         Player.ui.queueList.addEventListener('click', (e) => {
             const rem = e.target.closest('[data-queue-remove]');
             if (rem) {
@@ -296,7 +350,7 @@
         play();
     }
 
-    function enqueue(item) {
+    function enqueue(item, prefetched) {
         Player.queue.push({
             id: item.id,
             display: item.filename ? stem(item.filename) : 'Track',
@@ -306,12 +360,28 @@
         if (Player.index < 0) {
             Player.index = 0;
             saveQueue();
-            loadCurrent();
+            loadCurrent(prefetched);
             play();
         } else {
             saveQueue();
             renderQueue();
         }
+    }
+
+    function playNext(item) {
+        const entry = {
+            id: item.id,
+            display: item.filename ? stem(item.filename) : 'Track',
+            format: item.format,
+            path: item.output_path || '',
+        };
+        if (Player.index < 0 || !Player.queue.length) {
+            enqueue(item);
+            return;
+        }
+        Player.queue.splice(Player.index + 1, 0, entry);
+        saveQueue();
+        renderQueue();
     }
 
     function removeFromQueue(qidx) {
@@ -335,10 +405,25 @@
         renderQueue();
     }
 
+    function queueFilter() {
+        const el = $('appPlayerQueueSearch');
+        return el ? el.value.trim().toLowerCase() : '';
+    }
+
+    function clearPlayed() {
+        if (Player.index <= 0) return;
+        Player.queue.splice(0, Player.index);
+        Player.index = 0;
+        saveQueue();
+        renderQueue();
+    }
+
     function renderQueue() {
         Player.ui.queueCount.textContent = String(Player.queue.length || 0);
         Player.ui.queueList.innerHTML = '';
+        const q = queueFilter();
         Player.queue.forEach(function (item, i) {
+            if (q && (item.display || '').toLowerCase().indexOf(q) === -1) return;
             const li = document.createElement('li');
             li.className = 'app-player-queue-item' + (i === Player.index ? ' active' : '');
             li.setAttribute('data-queue-index', String(i));
@@ -426,22 +511,24 @@
         return /video$/i.test(format || '');
     }
 
-    function loadCurrent() {
+    function loadCurrent(prefetched) {
         const item = Player.queue[Player.index];
         if (!item) return;
-        fetchAndLoad(item, false);
+        fetchAndLoad(item, false, prefetched);
     }
 
     // Fetch a track's metadata, then either load it straight onto the
     // primary element or crossfade into it when this is an automatic
     // advance with overlap armed.
-    function fetchAndLoad(item, auto) {
+    function fetchAndLoad(item, auto, prefetched) {
         if (Player.fading) finishFadeNow();
         const wantIndex = Player.index;
         Player.ui.cover.classList.add('d-none');
         Player.ui.cover.removeAttribute('src');
-        fetch('/api/track/' + item.id)
-            .then(function (r) { return r.json(); })
+        const ready = prefetched && prefetched.item && String(prefetched.item.id) === String(item.id)
+            ? Promise.resolve(prefetched)
+            : fetch('/api/track/' + item.id).then(function (r) { return r.json(); });
+        ready
             .then(function (data) {
                 Player.autoPending = false;
                 // A newer navigation (natural end during a crossfade
@@ -469,9 +556,18 @@
                 Player.ui.context.classList.toggle('d-none', !Player.contextLabel);
                 show();
                 Player.expectResume = item.id;
+                if (data.item && !isVideoFormat(data.item.format) && Player.autoLyrics) {
+                    Lyrics.open(item.id);
+                }
                 if (auto && startCrossfade(item)) return;
                 Player.audio.src = '/audio/' + item.id;
-                Player.ui.cover.onload = () => Player.ui.cover.classList.remove('d-none');
+                Player.ui.cover.style.cursor = 'zoom-in';
+        Player.ui.cover.title = 'Click to enlarge';
+        Player.ui.cover.onclick = () => {
+            const full = Player.ui.cover.src.replace('?size=thumb', '');
+            if (window.AudioLightbox) window.AudioLightbox.open(full);
+        };
+        Player.ui.cover.onload = () => Player.ui.cover.classList.remove('d-none');
                 Player.ui.cover.onerror = () => Player.ui.cover.classList.add('d-none');
                 Player.ui.cover.src = '/api/cover/' + item.id + '?size=thumb';
                 Player.audio.load();
@@ -569,7 +665,28 @@
 
     let sleepTimer = null;
 
-    // Fade the volume out over a few seconds instead of stopping cold.
+    function restoreAutoLyrics() {
+        try {
+            Player.autoLyrics = localStorage.getItem('appPlayerAutoLyrics') === '1';
+        } catch (err) {
+            Player.autoLyrics = false;
+        }
+        const box = $('appAutoLyrics');
+        if (box) box.checked = !!Player.autoLyrics;
+    }
+
+    function restoreFadeSecs() {
+        try {
+            const secs = Number(localStorage.getItem('appPlayerFadeSecs')) || 8;
+            Player.fadeSecs = Math.max(2, Math.min(30, secs));
+        } catch (err) {
+            Player.fadeSecs = 8;
+        }
+        const sel = $('appPlayerFadeSecs');
+        if (sel) sel.value = String(Player.fadeSecs);
+    }
+
+    // Fade the volume out instead of stopping cold.
     function fadeOutAndPause() {
         const finish = () => {
             Player.audio.pause();
@@ -584,15 +701,16 @@
             return;
         }
         try {
+            const secs = Player.fadeSecs || 8;
             const ctx = eqNodes.ctx;
             const master = eqNodes.master;
             master.gain.cancelScheduledValues(ctx.currentTime);
             master.gain.setValueAtTime(Math.max(master.gain.value, 0.0001), ctx.currentTime);
-            master.gain.linearRampToValueAtTime(0.0001, ctx.currentTime + 8);
+            master.gain.linearRampToValueAtTime(0.0001, ctx.currentTime + secs);
             setTimeout(() => {
                 finish();
                 master.gain.setValueAtTime(1, ctx.currentTime);
-            }, 8200);
+            }, secs * 1000 + 200);
         } catch (err) {
             finish();
         }
@@ -853,7 +971,10 @@
         try {
             const ctx = new AudioContext();
             const src = ctx.createMediaElementSource(Player.audio);
-            let node = src;
+            const preamp = ctx.createGain();
+            preamp.gain.value = dbToGain(currentPreamp());
+            src.connect(preamp);
+            let node = preamp;
             const filters = EQ_FREQS.map(function (freq) {
                 const filter = ctx.createBiquadFilter();
                 filter.type = 'peaking';
@@ -868,11 +989,20 @@
             const master = ctx.createGain();
             master.gain.value = 1;
             node.connect(master);
+            let out = master;
+            let pan = null;
+            if (typeof ctx.createStereoPanner === 'function') {
+                pan = ctx.createStereoPanner();
+                pan.pan.value = currentBalance() / 100;
+                master.connect(pan);
+                out = pan;
+            }
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 128;
-            master.connect(analyser);
+            out.connect(analyser);
             analyser.connect(ctx.destination);
-            eqNodes = { ctx: ctx, filters: filters, master: master, analyser: analyser };
+            eqNodes = { ctx: ctx, filters: filters, master: master, analyser: analyser,
+                        preamp: preamp, pan: pan };
             applyEQGains(currentEQGains());
             wireSecondElement();
         } catch (err) { eqNodes = null; }
@@ -884,9 +1014,43 @@
         if (!eqNodes || !Player.audio2 || Player.eqWired2) return;
         try {
             eqNodes.ctx.createMediaElementSource(Player.audio2)
-                .connect(eqNodes.filters[0]);
+                .connect(eqNodes.preamp || eqNodes.filters[0]);
             Player.eqWired2 = true;
         } catch (err) { /* already wired or unsupported */ }
+    }
+
+    function dbToGain(db) {
+        return Math.pow(10, (Number(db) || 0) / 20);
+    }
+
+    function currentPreamp() {
+        const el = $('appPlayerPreamp');
+        return el ? Number(el.value) || 0 : 0;
+    }
+
+    function currentBalance() {
+        const el = $('appPlayerBalance');
+        return el ? Number(el.value) || 0 : 0;
+    }
+
+    function restorePreampBalance() {
+        try {
+            const pre = localStorage.getItem('appPlayerPreamp');
+            const preEl = $('appPlayerPreamp');
+            if (preEl && pre !== null) preEl.value = String(Math.max(-12, Math.min(12, Number(pre) || 0)));
+            const bal = localStorage.getItem('appPlayerBalance');
+            const balEl = $('appPlayerBalance');
+            if (balEl && bal !== null) balEl.value = String(Math.max(-100, Math.min(100, Number(bal) || 0)));
+        } catch (err) { /* private mode */ }
+        applyPreampBalance();
+    }
+
+    function applyPreampBalance() {
+        if (!eqNodes) return;
+        try {
+            if (eqNodes.preamp) eqNodes.preamp.gain.value = dbToGain(currentPreamp());
+            if (eqNodes.pan) eqNodes.pan.pan.value = currentBalance() / 100;
+        } catch (err) { /* ignore */ }
     }
 
     function currentEQGains() {
@@ -930,13 +1094,28 @@
     //   [data-play-all]   play every completed track of a playlist
     //   [data-queue]      append this track to the current queue
     function onRowButtonClick(e) {
+        const nextQueueBtn = e.target.closest('[data-queue-next]');
+        if (nextQueueBtn) {
+            fetch('/api/track/' + nextQueueBtn.dataset.queueNext)
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (!data.ok) throw new Error(data.message || '');
+                    playNext(data.item);
+                })
+                .catch(function () {
+                    if (typeof toast === 'function') toast('Could not queue this track.', 'danger');
+                });
+            e.preventDefault();
+            return;
+        }
+
         const queueBtn = e.target.closest('[data-queue]');
         if (queueBtn) {
             fetch('/api/track/' + queueBtn.dataset.queue)
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (!data.ok) throw new Error(data.message || '');
-                    enqueue(data.item);
+                    enqueue(data.item, data);
                 })
                 .catch(function () { if (typeof toast === 'function') toast('Could not add this track to the queue.', 'danger'); });
             e.preventDefault();
@@ -985,7 +1164,19 @@
                     .then(function (r) { return r.json(); })
                     .then(function (data) {
                         if (!data.ok) throw new Error(data.message || '');
-                        buildLinearQueue([data.item], 0, '');
+                        Player.queue = [{
+                            id: data.item.id,
+                            display: data.item.filename
+                                ? stem(data.item.filename) : 'Track',
+                            format: data.item.format,
+                            path: data.item.output_path || '',
+                        }];
+                        Player.index = 0;
+                        Player.contextLabel = '';
+                        saveQueue();
+                        renderQueue();
+                        loadCurrent(data);
+                        play();
                     })
                     .catch(function () { if (typeof toast === 'function') toast('Could not play this track.', 'danger'); });
             }
@@ -1619,7 +1810,47 @@
             if (Player.audio2) Player.audio2.volume = v;
             if (Player.ui.volume) Player.ui.volume.value = Math.round(v * 100);
         }
+        updateMuteIcon();
     }
+
+    function updateMuteIcon() {
+        const btn = $('appPlayerMute');
+        if (!btn || !Player.audio) return;
+        const muted = Player.audio.volume === 0;
+        btn.innerHTML = muted ? '&#128263;' : '&#128266;';
+        btn.title = muted ? 'Unmute (M)' : 'Mute (M)';
+        btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+    }
+
+    // -------------------------------------------- lightbox ----
+
+    function openLightbox(src) {
+        closeLightbox();
+        if (!src) return;
+        const overlay = document.createElement('div');
+        overlay.className = 'app-lightbox';
+        overlay.id = 'appLightbox';
+        const img = document.createElement('img');
+        img.alt = 'Cover art enlarged';
+        img.src = src;
+        img.onerror = () => closeLightbox();
+        overlay.appendChild(img);
+        overlay.addEventListener('click', closeLightbox);
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', escLightbox);
+    }
+
+    function closeLightbox() {
+        const overlay = $('appLightbox');
+        if (overlay) overlay.remove();
+        document.removeEventListener('keydown', escLightbox);
+    }
+
+    function escLightbox(e) {
+        if (e.key === 'Escape') closeLightbox();
+    }
+
+    window.AudioLightbox = { open: openLightbox, close: closeLightbox };
 
     document.addEventListener('DOMContentLoaded', init);
 
@@ -1643,6 +1874,9 @@
         removeAt: removeFromQueue,
         importFile: function (file) {
             importQueueFile(file);
+        },
+        playNext: function (item) {
+            playNext(item);
         },
         playItems: function (items, startIndex, label) {
             buildLinearQueue(items, startIndex || 0, label || '');
@@ -1721,5 +1955,6 @@
         Player.audio.volume = v / 100;
         if (Player.audio2) Player.audio2.volume = v / 100;
         localStorage.setItem('appPlayerVolume', String(v));
+        updateMuteIcon();
     }
 })();

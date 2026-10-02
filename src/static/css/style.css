@@ -948,7 +948,7 @@ body.dark-mode .viz-canvas {
     flex: 0 0 auto;
 }
 
-.app-player-vol-icon {
+#appPlayerMute {
     font-size: 0.85rem;
 }
 
@@ -1170,8 +1170,7 @@ body {
 @media (max-width: 640px) {
     .app-player-tag,
     .app-player-context,
-    .app-player-volume,
-    .app-player-vol-icon {
+    .app-player-volume {
         display: none;
     }
     .app-player-cover {
@@ -1432,4 +1431,44 @@ body {
     content: '● ';
     color: var(--bs-primary, #0d6efd);
     font-size: 0.7rem;
+}
+
+/* --- History day headers, cover lightbox, sub filters --- */
+.history-day td {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--bs-secondary-color, #6c757d);
+    background: var(--bs-tertiary-bg, #f8f9fa);
+    padding: 4px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.app-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 1090;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 24px;
+    cursor: zoom-out;
+}
+.app-lightbox img {
+    max-width: min(90vw, 900px);
+    max-height: 88vh;
+    border-radius: 8px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.sub-filters {
+    width: 100%;
+    margin: 2px 0 6px;
+}
+.sub-filters summary {
+    cursor: pointer;
+    color: var(--bs-secondary-color, #6c757d);
+    display: inline-block;
+}
+.row-speed:empty {
+    display: none;
 }

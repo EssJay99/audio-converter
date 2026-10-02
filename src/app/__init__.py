@@ -140,6 +140,14 @@ _SCHEMA_MIGRATIONS = {
         ('cover_url', 'VARCHAR(1000) DEFAULT ""'),
         ('quality', 'VARCHAR(100) DEFAULT ""'),
         ('job_options', 'TEXT DEFAULT "{}"'),
+        ('dl_speed', 'VARCHAR(20) DEFAULT ""'),
+        ('dl_eta', 'VARCHAR(20) DEFAULT ""'),
+    ],
+    'subscription': [
+        ('min_duration', 'INTEGER DEFAULT 0'),
+        ('skip_shorts', 'BOOLEAN DEFAULT 0'),
+        ('title_include', 'VARCHAR(500) DEFAULT ""'),
+        ('title_exclude', 'VARCHAR(500) DEFAULT ""'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),

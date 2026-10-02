@@ -95,6 +95,10 @@ class ConversionHistory(db.Model):
     status = db.Column(db.String(50), nullable=False, default='pending')
     progress = db.Column(db.Integer, nullable=False, default=0)
     error = db.Column(db.String(1000), nullable=True)
+    # Live download readout ("3.2MiB/s", "00:14"); meaningful only while
+    # active, cleared when the job leaves the downloading state.
+    dl_speed = db.Column(db.String(20), nullable=False, default='')
+    dl_eta = db.Column(db.String(20), nullable=False, default='')
     created_at = db.Column(db.DateTime, default=utcnow)
 
     # Playlist support: a parent row (is_playlist=True) represents a whole
@@ -162,6 +166,12 @@ class Subscription(db.Model):
                           nullable=True)
     interval_hours = db.Column(db.Integer, nullable=False, default=24)
     active = db.Column(db.Boolean, nullable=False, default=True)
+    # Follow filters: skip shorts, minimum seconds (0 = off), comma
+    # separated title terms (include matches any, exclude matches none).
+    min_duration = db.Column(db.Integer, nullable=False, default=0)
+    skip_shorts = db.Column(db.Boolean, nullable=False, default=False)
+    title_include = db.Column(db.String(500), nullable=False, default='')
+    title_exclude = db.Column(db.String(500), nullable=False, default='')
     last_checked = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=utcnow)
 
