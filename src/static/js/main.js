@@ -201,6 +201,23 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return;
     }
+    const topBtn = e.target.closest('[data-top]');
+    if (topBtn) {
+        topBtn.disabled = true;
+        fetch('/api/queue/top/' + topBtn.dataset.top, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken() },
+        })
+            .then((r) => r.json())
+            .then((data) => {
+                toast(data.ok ? (data.message || 'Moved to the top.') : (data.message || 'Could not move.'), data.ok ? 'success' : 'danger');
+                if (typeof refreshTable === 'function') refreshTable();
+            })
+            .catch(() => toast('Could not move.', 'danger'))
+            .finally(() => { topBtn.disabled = false; });
+        e.preventDefault();
+        return;
+    }
     const pauseBtn = e.target.closest('[data-pause]');
     if (pauseBtn) {
         pauseBtn.disabled = true;
@@ -548,6 +565,15 @@ function renderHistoryRow(item) {
         retry.textContent = 'Retry';
         fileTd.appendChild(retry);
     } else if (['pending', 'downloading', 'converting'].includes(item.status)) {
+        if (item.status === 'pending') {
+            const top = document.createElement('button');
+            top.type = 'button';
+            top.className = 'btn btn-sm btn-outline-secondary top-btn me-1';
+            top.title = 'Move to the top of the queue';
+            top.setAttribute('data-top', item.id);
+            top.textContent = 'Top';
+            fileTd.appendChild(top);
+        }
         const pause = document.createElement('button');
         pause.type = 'button';
         pause.className = 'btn btn-sm btn-outline-info pause-btn me-1';
@@ -881,6 +907,19 @@ document.addEventListener('DOMContentLoaded', initHealthBanner);
 
 // --- Library stats ---------------------------------------------------------
 
+function readableBytes(num) {
+    const value = Number(num) || 0;
+    if (value < 1024) return value + ' B';
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let v = value / 1024;
+    let u = 0;
+    while (v >= 1024 && u < units.length - 1) {
+        v /= 1024;
+        u += 1;
+    }
+    return v.toFixed(1) + ' ' + units[u];
+}
+
 function loadStats() {
     const body = document.getElementById('statsBody');
     if (!body) return;
@@ -914,6 +953,11 @@ function loadStats() {
             if (tops.length) {
                 html += '<div class="small text-muted mt-1">Biggest playlists: ' +
                     tops.map((p) => esc(p.title) + ' (' + p.tracks + ')').join(' · ') + '</div>';
+            }
+            const folders = data.top_folders || [];
+            if (folders.length) {
+                html += '<div class="small text-muted mt-1">Largest folders: ' +
+                    folders.map((f) => esc(f.folder) + ' (' + readableBytes(f.bytes) + ')').join(' · ') + '</div>';
             }
             body.innerHTML = html;
         })
@@ -1714,6 +1758,35 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
             .then((r) => r.json())
             .then((data) => {
                 if (data.first_run) card.classList.remove('d-none');
+            })
+            .catch(() => {});
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+
+// --- What's new: one dialog per app version ---------------------------------
+(function whatsNew() {
+    function init() {
+        try {
+            if (sessionStorage.getItem('whatsNewSeen')) return;
+        } catch (err) { /* private mode */ }
+        fetch('/api/whats-new')
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.is_new) return;
+                try {
+                    sessionStorage.setItem('whatsNewSeen', data.version || '1');
+                } catch (err) { /* private mode */ }
+                if (typeof toast === 'function') {
+                    toast('Updated to ' + data.version + ' — see what changed.', 'info');
+                }
+                if (confirm('Audio Converter updated to ' + data.version + '.\n\nOpen the release notes?')) {
+                    window.open(data.url, '_blank', 'noopener');
+                }
             })
             .catch(() => {});
     }

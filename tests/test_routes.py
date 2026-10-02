@@ -5679,3 +5679,183 @@ def test_video_page_options_and_defaults(client):
                    'name="embed_subs"', 'name="embed_cover"',
                    'inspectBtn', 'inspectBox', 'As configured'):
         assert marker in page
+
+
+def test_best_thumbnail_picks_maxres():
+    info = {'thumbnail': 'https://x/hq.jpg',
+            'thumbnails': [
+                {'url': 'https://x/small.jpg', 'width': 120},
+                {'url': 'https://x/maxresdefault.jpg', 'width': 300},
+                {'url': 'https://x/big.jpg', 'width': 1280}]}
+    assert convert_module._best_thumbnail(info) == 'https://x/maxresdefault.jpg'
+    info2 = {'thumbnails': [{'url': 'https://x/big.jpg', 'width': 1280},
+                            {'url': 'https://x/small.jpg', 'width': 120}]}
+    assert convert_module._best_thumbnail(info2) == 'https://x/big.jpg'
+    assert convert_module._best_thumbnail(
+        {'thumbnail': 'https://x/hq.jpg'}) == 'https://x/hq.jpg'
+    assert convert_module._best_thumbnail({}) == ''
+    assert convert_module._best_thumbnail(
+        {'thumbnail': 'javascript:alert(1)'}) == ''
+
+
+def test_track_tags_and_provenance(client, tmp_path, monkeypatch):
+    import subprocess as _sp
+    src = tmp_path / 'tone.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=2', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    monkeypatch.setattr(convert_module, 'extract_metadata', lambda url: {
+        'title': 'Song', 'duration': 2.0, 'thumbnail': ''})
+    monkeypatch.setattr(convert_module, '_should_skip_duplicates', lambda: False)
+    monkeypatch.setattr(convert_module, 'check_ffmpeg', lambda: True)
+    monkeypatch.setattr(convert_module, '_fetch_thumbnail', lambda url: None)
+
+    def fake_download(url, temp_audio, job=None):
+        import shutil as _sh
+        _sh.copyfile(str(src), temp_audio)
+        return {'success': True}
+
+    monkeypatch.setattr(convert_module, 'download_audio', fake_download)
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://youtu.be/pl', format='FLAC',
+            output_path=str(tmp_path), status='completed',
+            is_playlist=True, item_count=3)
+        db.session.add(parent)
+        db.session.commit()
+        job = ConversionHistory(
+            url='https://youtu.be/t', format='FLAC',
+            output_path=str(tmp_path), status='downloading',
+            parent_id=parent.id, item_index=1, item_count=3)
+        db.session.add(job)
+        db.session.commit()
+        result = convert_module.download_and_convert(
+            job.url, 'flac', str(tmp_path), job)
+    assert result['success'] is True
+    meta = convert_module._probe_metadata(result['filepath'])
+    assert meta['title'] == 'Song'
+    out = result['filepath']
+    import subprocess as _sp2
+    probe = _sp2.run(['ffmpeg', '-hide_banner', '-i', out],
+                     capture_output=True, text=True, timeout=30)
+    assert 'track' in (probe.stderr or '').lower()
+    assert 'comment' in (probe.stderr or '').lower()
+
+
+def test_nfo_sidecar(client, tmp_path, monkeypatch):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.nfo_files = True
+        db.session.commit()
+    convert_module._maybe_write_nfo(
+        str(tmp_path / 'song.flac'),
+        {'title': 'Song', 'artist': 'Band', 'uploader': 'Up',
+         'upload_date': '20240101', 'duration': 200}, 'https://x/v', 'flac')
+    nfo = tmp_path / 'song.nfo'
+    assert nfo.is_file()
+    text = nfo.read_text(encoding='utf-8')
+    assert 'title: Song' in text and 'source: https://x/v' in text
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        settings.nfo_files = False
+        db.session.commit()
+    convert_module._maybe_write_nfo(
+        str(tmp_path / 'other.flac'), {'title': 'T'}, 'https://x', 'flac')
+    assert not (tmp_path / 'other.nfo').exists()
+
+
+def test_queue_top_endpoint(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/q1', format='FLAC',
+            output_path='/tmp/q1.flac', status='pending'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/q2', format='FLAC',
+            output_path='/tmp/q2.flac', status='completed'))
+        db.session.commit()
+        pending = ConversionHistory.query.filter_by(
+            url='https://youtu.be/q1').first().id
+        done = ConversionHistory.query.filter_by(
+            url='https://youtu.be/q2').first().id
+    assert client.post(f'/api/queue/top/{pending}').get_json()['ok'] is True
+    assert client.post(f'/api/queue/top/{done}').status_code == 400
+    assert client.post('/api/queue/top/999999').status_code == 404
+
+
+def test_finish_action_fires_once(client, monkeypatch):
+    from app.models import UserSettings
+    calls = []
+    monkeypatch.setattr(convert_module, '_run_finish_action',
+                        lambda action: calls.append(action) or 'done')
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.finish_action = 'sleep'
+        db.session.commit()
+        convert_module._finish_armed = False
+        convert_module._maybe_finish_action()
+        assert calls == []
+        convert_module._finish_armed = True
+        convert_module._maybe_finish_action()
+        assert calls == ['sleep']
+        assert convert_module._finish_armed is False
+        convert_module._maybe_finish_action()
+        assert calls == ['sleep']
+
+
+def test_whats_new_endpoint(client):
+    from app import APP_VERSION
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.seen_version = ''
+        db.session.commit()
+    assert client.get('/api/whats-new').get_json()['is_new'] is False
+    with client.application.app_context():
+        UserSettings.query.first().seen_version = '0.0.1'
+        db.session.commit()
+    data = client.get('/api/whats-new').get_json()
+    assert data['is_new'] is True and data['version'] == APP_VERSION
+    assert client.get('/api/whats-new').get_json()['is_new'] is False
+
+
+def test_storage_breakdown_keys(client, tmp_path):
+    track = tmp_path / 's.flac'
+    track.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/sb', format='FLAC',
+            output_path=str(track), status='completed'))
+        db.session.commit()
+    data = client.get('/api/stats').get_json()
+    assert 'top_folders' in data and 'bytes_by_format' in data
+    assert data['bytes_by_format'].get('FLAC', 0) > 0
+
+
+def test_org_settings_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'finish_action': 'shutdown',
+        'numbered_filenames': 'on',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.finish_action == 'shutdown'
+        assert settings.numbered_filenames is True
+        assert settings.nfo_files is False
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('name="finish_action"', 'name="numbered_filenames"',
+                   'name="nfo_files"'):
+        assert marker in page

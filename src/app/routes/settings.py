@@ -7,10 +7,11 @@ import requests
 bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression',
-                  'default_format', 'video_quality', 'default_video_format')
+                  'default_format', 'video_quality', 'default_video_format',
+                  'finish_action')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
-                  'auto_update_ytdlp',)
+                  'auto_update_ytdlp', 'numbered_filenames', 'nfo_files',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -65,6 +66,7 @@ def get_settings_dict():
         'video_crf': 23,
         'video_preset': 'veryfast',
         'default_video_format': 'video_mp4',
+        'finish_action': 'nothing',
     }
     user_settings = UserSettings.query.first()
     if user_settings:
@@ -137,6 +139,9 @@ def save_settings():
     if data.get('default_video_format') not in ('video_mp4', 'video_webm',
                                                 'video_mkv'):
         data['default_video_format'] = 'video_mp4'
+    data['finish_action'] = request.form.get('finish_action', 'nothing').strip()
+    if data['finish_action'] not in ('nothing', 'sleep', 'shutdown'):
+        data['finish_action'] = 'nothing'
 
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')

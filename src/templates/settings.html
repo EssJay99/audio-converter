@@ -225,6 +225,15 @@
                         <small class="form-text text-muted">Give up on one stuck track after this long.</small>
                     </div>
                     <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="finish_action" class="form-label">When queue empties</label>
+                        <select class="form-select" id="finish_action" name="finish_action">
+                            <option value="nothing" {% if finish_action == 'nothing' %}selected{% endif %}>Do nothing</option>
+                            <option value="sleep" {% if finish_action == 'sleep' %}selected{% endif %}>Sleep computer</option>
+                            <option value="shutdown" {% if finish_action == 'shutdown' %}selected{% endif %}>Shut down</option>
+                        </select>
+                        <small class="form-text text-muted">For overnight runs. Fires once per finished batch.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
                         <label for="bandwidth_limit" class="form-label">Speed limit (KB/s)</label>
                         <input type="number" class="form-control" id="bandwidth_limit" name="bandwidth_limit"
                                min="0" max="100000" value="{{ bandwidth_limit }}">
@@ -269,6 +278,16 @@
                             <input class="form-check-input" type="checkbox" id="normalize_audio" name="normalize_audio" value="on"
                                    {% if normalize_audio %}checked{% endif %}>
                             <label class="form-check-label" for="normalize_audio">Normalize volume across tracks (EBU R128)</label>
+                        </div>
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="numbered_filenames" name="numbered_filenames" value="on"
+                                   {% if numbered_filenames %}checked{% endif %}>
+                            <label class="form-check-label" for="numbered_filenames">Number playlist tracks (<code>01 - Title</code>)</label>
+                        </div>
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="nfo_files" name="nfo_files" value="on"
+                                   {% if nfo_files %}checked{% endif %}>
+                            <label class="form-check-label" for="nfo_files">Save .nfo metadata sidecars next to downloads</label>
                         </div>
                     </div>
                 </div>

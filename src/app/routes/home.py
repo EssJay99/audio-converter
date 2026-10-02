@@ -132,8 +132,13 @@ def api_stats():
     from datetime import timedelta
     from app.routes.convert import _stored_duration, _cached_stat
 
+    try:
+        output_root = os.path.abspath(effective_output_path())
+    except Exception:
+        output_root = ''
     rows = db.session.query(ConversionHistory).all()
     by_status, by_format = {}, {}
+    by_folder, by_format_bytes = {}, {}
     total_bytes, total_files = 0, 0
     for row in rows:
         by_status[row.status] = by_status.get(row.status, 0) + 1
@@ -144,6 +149,16 @@ def api_stats():
             if exists:
                 total_bytes += size
                 total_files += 1
+                by_format_bytes[row.format] = by_format_bytes.get(
+                    row.format, 0) + size
+                folder = os.path.dirname(os.path.abspath(path))
+                if output_root and folder.startswith(output_root):
+                    rel = os.path.relpath(folder, output_root)
+                    top = rel.split(os.sep)[0]
+                    label = top if top != '.' else '(output root)'
+                else:
+                    label = folder or '(unknown)'
+                by_folder[label] = by_folder.get(label, 0) + size
 
     # Playtime: probe durations (cached by file mtime after the first pass),
     # capped so huge libraries stay responsive.
@@ -206,6 +221,10 @@ def api_stats():
         'top_artists': [{'artist': a, 'plays': n} for a, n in top_artists],
         'top_tracks': [{'title': (r.tag_title or os.path.basename(r.output_path or '') or r.url[:40]),
                         'plays': r.play_count or 0} for r in top_tracks],
+        'top_folders': [{'folder': name, 'bytes': n} for name, n in sorted(
+            by_folder.items(), key=lambda kv: -kv[1])[:8]],
+        'bytes_by_format': dict(sorted(by_format_bytes.items(),
+                                       key=lambda kv: -kv[1])),
     })
 
 

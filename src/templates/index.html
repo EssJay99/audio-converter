@@ -120,9 +120,50 @@
                         const form = document.querySelector('#homeConvertForm');
                         const submit = form ? form.querySelector('button[type="submit"]') : null;
                         if (form && submit) {
-                            form.addEventListener('submit', function () {
+                            form.addEventListener('submit', function (e) {
+                                const urlField = document.getElementById('url');
+                                const lines = (urlField ? urlField.value : '').split(/\r?\n/)
+                                    .map((l) => l.trim()).filter(Boolean);
+                                if (lines.length < 2) {
+                                    submit.disabled = true;
+                                    submit.textContent = 'Queued... checking status below';
+                                    return;
+                                }
+                                // Batch paste: one link per line, queued one by
+                                // one so every URL gets full validation.
+                                e.preventDefault();
                                 submit.disabled = true;
-                                submit.textContent = 'Queued... checking status below';
+                                const fmt = document.getElementById('format');
+                                const org = document.getElementById('organization');
+                                const out = document.querySelector('#homeConvertForm [name="output_path"]');
+                                const csrfEl = form.querySelector('[name="csrf_token"]');
+                                let done = 0;
+                                let queued = 0;
+                                submit.textContent = 'Queueing 1/' + lines.length + '…';
+                                const step = () => {
+                                    if (done >= lines.length) {
+                                        submit.disabled = false;
+                                        submit.textContent = 'Convert to Lossless Audio';
+                                        if (urlField) urlField.value = '';
+                                        if (typeof toast === 'function') {
+                                            toast('Sent ' + queued + ' of ' + lines.length + ' link(s) — rejected ones explain themselves on Home.', queued ? 'success' : 'danger');
+                                        }
+                                        if (typeof refreshTable === 'function') refreshTable();
+                                        return;
+                                    }
+                                    const body = new FormData();
+                                    body.append('csrf_token', csrfEl ? csrfEl.value : '');
+                                    body.append('url', lines[done]);
+                                    body.append('format', fmt ? fmt.value : 'flac');
+                                    if (org) body.append('organization', org.value);
+                                    if (out && out.value) body.append('output_path', out.value);
+                                    done += 1;
+                                    submit.textContent = 'Queueing ' + done + '/' + lines.length + '…';
+                                    fetch('/convert', { method: 'POST', body: body })
+                                        .then(() => { queued += 1; step(); })
+                                        .catch(() => step());
+                                };
+                                step();
                             });
                         }
                     });
@@ -370,6 +411,10 @@
                                                                 </div>
                                                             {% endif %}
                                                     {% else %}
+                                                        {% if item.status == 'pending' %}
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary top-btn me-1"
+                                                                    data-top="{{ item.id }}" title="Move to the top of the queue">Top</button>
+                                                        {% endif %}
                                                         {% if item.status in ['pending', 'downloading', 'converting'] %}
                                                             <button type="button" class="btn btn-sm btn-outline-info pause-btn me-1"
                                                                     data-pause="{{ item.id }}" title="Pause this download (resumable)">Pause</button>

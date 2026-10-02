@@ -51,6 +51,9 @@ COVER_FORMATS = ('flac', 'alac')
 # ---------------------------------------------------------------- queue ----
 
 _conversion_queue = queue.Queue()
+# Jump-the-queue lane: "move to top" puts ids here and workers drain it
+# before the main FIFO. Same entries, same handling, just first.
+_priority_queue = queue.Queue()
 # Live yt-dlp processes by job id (for pause) and ids the user paused.
 # Membership tests are GIL-atomic; proc objects are only touched by owner.
 _active_downloads = {}
@@ -112,9 +115,28 @@ def _queue_has(job_id):
     """True when a job id is already waiting in memory (no double-queue)."""
     try:
         with _conversion_queue.mutex:
-            return job_id in _conversion_queue.queue
+            if job_id in _conversion_queue.queue:
+                return True
+        with _priority_queue.mutex:
+            return job_id in _priority_queue.queue
     except Exception:
         return False
+    return False
+
+
+@bp.route('/api/queue/top/<int:conversion_id>', methods=['POST'])
+def api_queue_top(conversion_id):
+    """Move a pending job to the front: workers take it next."""
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history:
+        return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    if history.status != 'pending':
+        return jsonify({'ok': False,
+                        'message': 'Only pending conversions can jump the queue'}), 400
+    if not _queue_has(history.id):
+        _priority_queue.put(history.id)
+    _ensure_worker()
+    return jsonify({'ok': True, 'message': 'Moved to the top of the queue.'})
 
 
 def _resume_interrupted():
@@ -172,8 +194,13 @@ def _worker_loop():
             if _queue_paused.is_set():
                 time.sleep(1)
                 continue
+            from_priority = False
             try:
-                job_id = _conversion_queue.get(timeout=1)
+                try:
+                    job_id = _priority_queue.get_nowait()
+                    from_priority = True
+                except queue.Empty:
+                    job_id = _conversion_queue.get(timeout=1)
             except queue.Empty:
                 continue
             try:
@@ -306,7 +333,13 @@ def _worker_loop():
             except Exception:
                 pass
             finally:
-                _conversion_queue.task_done()
+                try:
+                    if from_priority:
+                        _priority_queue.task_done()
+                    else:
+                        _conversion_queue.task_done()
+                except ValueError:
+                    pass
 
 
     finally:
@@ -498,6 +531,7 @@ def _scheduler_loop():
         try:
             with flask_app.app_context():
                 _check_due_subscriptions()
+                _maybe_finish_action()
         except Exception:
             pass
         time.sleep(60)
@@ -731,6 +765,45 @@ def check_subscription(subscription_id):
     return {'ok': True, 'added': len(fresh)}
 
 
+def _ensure_folder_art(parent):
+    """Drop the first finished track's cover in as the folder's art.
+
+    Runs once when a folder-organized playlist completes: prefers an
+    existing sidecar, else extracts embedded art, else gives up quietly.
+    File managers show folder.jpg as the folder thumbnail.
+    """
+    try:
+        folder = parent.output_path or ''
+        if not folder or not os.path.isdir(folder):
+            return
+        if (parent.playlist_organization or 'folder') != 'folder':
+            return
+        target = os.path.join(folder, 'folder.jpg')
+        if os.path.isfile(target):
+            return
+        child = db.session.query(ConversionHistory).filter_by(
+            parent_id=parent.id).filter(
+            ConversionHistory.status.in_(
+                ['completed', 'skipped'])).order_by(
+            ConversionHistory.item_index.asc()).first()
+        if child is None or not child.output_path:
+            return
+        sidecar = os.path.splitext(child.output_path)[0] + '.cover.jpg'
+        if os.path.isfile(sidecar):
+            shutil.copyfile(sidecar, target)
+            return
+        if not os.path.isfile(child.output_path):
+            return
+        res = subprocess.run(
+            ['ffmpeg', '-y', '-v', 'error', '-i', child.output_path,
+             '-an', '-vcodec', 'copy', target],
+            capture_output=True, text=True, timeout=30)
+        if res.returncode != 0 or not os.path.isfile(target):
+            _cleanup(target)
+    except Exception:
+        pass
+
+
 def _refresh_playlist_parent(parent_id):
     """Recompute a playlist parent's status/progress from its children."""
     parent = db.session.get(ConversionHistory, parent_id)
@@ -754,6 +827,7 @@ def _refresh_playlist_parent(parent_id):
             parent.error = f'All {failed} track(s) failed to convert'
         else:
             parent.status = 'completed'
+            _ensure_folder_art(parent)
             parts = []
             if failed:
                 parts.append(f'{failed} of {total} track(s) failed')
@@ -1012,6 +1086,9 @@ def _same_origin_required(view):
     return wrapper
 
 
+_finish_armed = False
+
+
 def _job_finish(job, **fields):
     """Apply a terminal update only if the job is still actively converting.
 
@@ -1025,7 +1102,81 @@ def _job_finish(job, **fields):
             list(ConversionHistory.ACTIVE_STATUSES)),
     ).update(fields, synchronize_session=False)
     db.session.commit()
+    if count > 0 and fields.get('status') in ('completed', 'failed'):
+        # Real work finished: a configured sleep/shutdown-on-empty may fire
+        # once the queues drain. Skips don't arm it (the user is here).
+        global _finish_armed
+        _finish_armed = True
     return count > 0
+
+
+def _finish_action_setting():
+    """Configured end-of-queue action: 'nothing', 'sleep', or 'shutdown'."""
+    try:
+        settings = UserSettings.query.first()
+        action = (getattr(settings, 'finish_action', 'nothing') or 'nothing')
+    except Exception:
+        return 'nothing'
+    return action if action in ('sleep', 'shutdown') else 'nothing'
+
+
+def _run_finish_action(action):
+    """Sleep or shut the machine down, best-effort. Returns a message."""
+    try:
+        if action == 'sleep':
+            if sys.platform == 'darwin':
+                subprocess.run(['pmset', 'sleepnow'],
+                               capture_output=True, timeout=15)
+            elif sys.platform.startswith('win'):
+                subprocess.run(['rundll32', 'powrprof.dll,SetSuspendState',
+                                '0,1,0'], capture_output=True, timeout=15)
+            else:
+                subprocess.run(['systemctl', 'suspend'],
+                               capture_output=True, timeout=15)
+            return 'Putting the computer to sleep.'
+        if sys.platform == 'darwin':
+            subprocess.run(['osascript', '-e',
+                            'tell app "System Events" to shut down'],
+                           capture_output=True, timeout=15)
+        elif sys.platform.startswith('win'):
+            subprocess.run(['shutdown', '/s', '/t', '30'],
+                           capture_output=True, timeout=15)
+        else:
+            subprocess.run(['systemctl', 'poweroff'],
+                           capture_output=True, timeout=15)
+        return 'Shutting down.'
+    except Exception as e:
+        return f'Could not run that action: {str(e)}'
+
+
+def _maybe_finish_action():
+    """Sleep/shut down once the queues and workers fully drain.
+
+    Fires at most once per completed batch: re-armed by the next finished
+    track, so an evening run sleeps the machine without pestering.
+    """
+    global _finish_armed
+    if not _finish_armed:
+        return
+    try:
+        if _conversion_queue.qsize() + _priority_queue.qsize() > 0:
+            return
+        busy = db.session.query(ConversionHistory).filter(
+            ConversionHistory.status.in_(
+                list(ConversionHistory.ACTIVE_STATUSES))).count()
+        if busy:
+            return
+        action = _finish_action_setting()
+        _finish_armed = False
+        if action == 'nothing':
+            return
+        message = _run_finish_action(action)
+        try:
+            _notify('Queue finished', message)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------- routes --
@@ -1899,7 +2050,30 @@ def download_and_convert(url, format_type, output_path, job=None):
             pass
 
     fmt = VALID_FORMATS[format_type]
-    target_name = sanitize_filename(title) + '.' + fmt['ext']
+    if job is not None and getattr(job, 'parent_id', None):
+        # Playlist children carry their position as track tags so players
+        # order and display them correctly.
+        try:
+            position = int(getattr(job, 'item_index', 0) or 0) + 1
+        except (TypeError, ValueError):
+            position = 0
+        if position > 0:
+            meta['track'] = str(position)
+            try:
+                total = int(getattr(job, 'item_count', 0) or 0)
+            except (TypeError, ValueError):
+                total = 0
+            if total > 0:
+                meta['tracktotal'] = str(total)
+    # Provenance travels inside the file even if the library database is lost.
+    if url:
+        meta['comment'] = f'Source: {url}'[:500]
+    if _want_numbered_names() and job is not None and getattr(
+            job, 'parent_id', None) and meta.get('track'):
+        target_name = (sanitize_filename(
+            f"{int(meta['track']):02d} - {title}") + '.' + fmt['ext'])
+    else:
+        target_name = sanitize_filename(title) + '.' + fmt['ext']
 
     if job and _should_skip_duplicates():
         dup = find_duplicate(output_path, target_name)
@@ -1991,6 +2165,7 @@ def download_and_convert(url, format_type, output_path, job=None):
                 db.session.flush()
             except Exception:
                 db.session.rollback()
+        _maybe_write_nfo(output_file, meta, downloaded_from, format_type)
         return {'success': True, 'filepath': output_file, 'filename': os.path.basename(output_file),
                 'via': downloaded_from}
 
@@ -2028,12 +2203,52 @@ def extract_metadata(url):
                 meta['duration'] = 0
             upload_date = str(info.get('upload_date') or '')
             meta['date'] = upload_date[:4]
-            thumbnail = str(info.get('thumbnail') or '').strip()
-            meta['thumbnail'] = thumbnail if thumbnail else ''
+            meta['upload_date'] = upload_date
+            meta['uploader'] = str(info.get('uploader') or info.get('creator')
+                                   or '').strip()[:200]
+            meta['webpage_url'] = str(info.get('webpage_url') or url)[:500]
+            meta['description'] = str(info.get('description') or '')[:2000]
+            meta['thumbnail'] = _best_thumbnail(info)
         except json.JSONDecodeError:
             pass
 
     return meta
+
+
+def _best_thumbnail(info):
+    """Highest-resolution thumbnail URL from a yt-dlp info dict.
+
+    Prefers an explicit maxresdefault, else the widest listed thumbnail,
+    else the default thumbnail field. Empty string when nothing usable.
+    """
+    try:
+        thumbs = info.get('thumbnails') or []
+        best = ''
+        best_width = -1
+        for thumb in thumbs:
+            if not isinstance(thumb, dict):
+                continue
+            thumb_url = str(thumb.get('url') or '')
+            if not thumb_url.startswith(('http://', 'https://')):
+                continue
+            if 'maxresdefault' in thumb_url:
+                return thumb_url
+            try:
+                width = int(thumb.get('width') or 0)
+            except (TypeError, ValueError):
+                width = 0
+            if width > best_width:
+                best_width = width
+                best = thumb_url
+        if best:
+            return best
+    except Exception:
+        pass
+    try:
+        fallback = str(info.get('thumbnail') or '').strip()
+    except Exception:
+        return ''
+    return fallback if fallback.startswith(('http://', 'https://')) else ''
 
 
 def _source_name(url):
@@ -2218,7 +2433,8 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file,
         # Single-pass EBU R128 normalization so playlists play at even volume.
         args += ['-filter:a', 'loudnorm']
 
-    for key in ('title', 'artist', 'album', 'date'):
+    for key in ('title', 'artist', 'album', 'date', 'track', 'tracktotal',
+                'comment'):
         value = meta.get(key)
         if value:
             args += ['-metadata', f'{key}={value}']
@@ -2322,7 +2538,8 @@ def convert_video_file(input_file, format_type, output_file, meta, job=None,
         if sub_inputs:
             args += ['-c:s', 'copy' if fmt['ext'] == 'mkv' else 'mov_text']
 
-    for key in ('title', 'artist', 'album', 'date'):
+    for key in ('title', 'artist', 'album', 'date', 'track', 'tracktotal',
+                'comment'):
         value = meta.get(key)
         if value:
             args += ['-metadata', f'{key}={value}']
@@ -2649,6 +2866,15 @@ def _download_kind(job):
     return VALID_FORMATS.get(LABEL_TO_KEY.get(job.format, ''), {}).get('kind', 'audio')
 
 
+def _want_numbered_names():
+    """Numbered `NN - title` filenames for playlist children."""
+    try:
+        settings = UserSettings.query.first()
+        return bool(getattr(settings, 'numbered_filenames', False))
+    except Exception:
+        return False
+
+
 def _video_quality_cap(job=None):
     """Video quality cap: per-submit override wins, else the setting."""
     override = _job_option(job, 'quality')
@@ -2844,6 +3070,42 @@ def _normalize_download(temp_audio, want_video=False):
     for candidate in candidates:
         return _adopt_candidate(candidate, temp_audio)
     return None
+
+
+def _want_nfo():
+    """Whether downloads get a .nfo metadata sidecar."""
+    try:
+        settings = UserSettings.query.first()
+        return bool(getattr(settings, 'nfo_files', False))
+    except Exception:
+        return False
+
+
+def _maybe_write_nfo(output_file, meta, source_url, format_type):
+    """Write a `<title>.nfo` provenance card next to a finished file.
+
+    Plain `key: value` text collectors and media centers (Kodi/Jellyfin
+    read .nfo) both parse: title, artist, uploader, dates, duration,
+    format, and the exact source URL.
+    """
+    if not _want_nfo():
+        return
+    try:
+        stem = os.path.splitext(output_file)[0]
+        lines = [
+            f"title: {meta.get('title', '')}",
+            f"artist: {meta.get('artist', '')}",
+            f"album: {meta.get('album', '')}",
+            f"uploader: {meta.get('uploader', '')}",
+            f"upload_date: {meta.get('upload_date', '')}",
+            f"duration: {meta.get('duration', 0)}",
+            f"format: {format_type}",
+            f"source: {source_url}",
+        ]
+        with open(stem + '.nfo', 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+    except Exception:
+        pass
 
 
 def _adopt_candidate(candidate, temp_audio):
@@ -3700,7 +3962,7 @@ def api_queue_resume():
 def api_queue_status():
     """Queue state for the toolbar: paused flag plus waiting jobs."""
     return jsonify({'ok': True, 'paused': _queue_paused.is_set(),
-                    'pending': _conversion_queue.qsize()})
+                    'pending': _conversion_queue.qsize() + _priority_queue.qsize()})
 
 
 @bp.route('/api/health')
@@ -5263,6 +5525,29 @@ def api_notices_read():
     except Exception:
         db.session.rollback()
     return jsonify({'ok': True})
+
+
+@bp.route('/api/whats-new')
+def api_whats_new():
+    """First-run-per-version notes: {is_new, version, url} for the dialog."""
+    from app import APP_VERSION
+    try:
+        settings = UserSettings.query.first()
+        seen = (getattr(settings, 'seen_version', '') or '') if settings else ''
+    except Exception:
+        return jsonify({'ok': True, 'is_new': False})
+    is_new = bool(seen) and seen != APP_VERSION
+    if is_new:
+        try:
+            if settings is None:
+                settings = UserSettings(output_path=effective_output_path())
+                db.session.add(settings)
+            settings.seen_version = APP_VERSION
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+    return jsonify({'ok': True, 'is_new': is_new, 'version': APP_VERSION,
+                    'url': 'https://github.com/EssJay99/audio-converter/releases'})
 
 
 @bp.route('/api/first-run')

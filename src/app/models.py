@@ -57,6 +57,14 @@ class UserSettings(db.Model):
     video_preset = db.Column(db.String(20), nullable=False, default='veryfast')
     # Preselected format on the video convert form.
     default_video_format = db.Column(db.String(20), nullable=False, default='video_mp4')
+    # What to do when the queue drains: 'nothing', 'sleep', or 'shutdown'.
+    finish_action = db.Column(db.String(10), nullable=False, default='nothing')
+    # App version last acknowledged in the What's-new dialog.
+    seen_version = db.Column(db.String(20), nullable=False, default='')
+    # Playlist children save as `NN - title` instead of plain titles.
+    numbered_filenames = db.Column(db.Boolean, nullable=False, default=False)
+    # Write a .nfo sidecar (title/artist/uploader/date/URL) per download.
+    nfo_files = db.Column(db.Boolean, nullable=False, default=False)
     # Video download cap: '720p', '1080p', or 'best' (no cap).
     video_quality = db.Column(db.String(10), nullable=False, default='1080p')
     # Tidal login (all optional). Client id/secret come from the user's own

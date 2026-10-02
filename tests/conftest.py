@@ -33,6 +33,11 @@ def fresh_db():
         except Exception:
             pass
         try:
+            while True:
+                convert_module._priority_queue.get_nowait()
+        except Exception:
+            pass
+        try:
             convert_module._paused_jobs.clear()
         except Exception:
             pass
