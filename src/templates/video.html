@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8E%B5%3C/text%3E%3C/svg%3E">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Convert Video - Audio Converter</title>
@@ -53,19 +54,77 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3">
                             <label for="url" class="form-label">YouTube or SoundCloud Link</label>
-                            <input type="text" class="form-control form-control-lg" id="url" name="url" required
-                                   placeholder="https://www.youtube.com/watch?v=...">
+                            <div class="d-flex gap-2">
+                                <input type="text" class="form-control form-control-lg" id="url" name="url" required
+                                       placeholder="https://www.youtube.com/watch?v=...">
+                                <button type="button" class="btn btn-outline-secondary text-nowrap" id="inspectBtn" title="Preview what this link points at">Inspect</button>
+                            </div>
                             <small class="form-text text-muted">Tip: paste a playlist or channel link and every video lands in its own folder.</small>
+                            <div id="inspectBox" class="d-none mt-2 p-2 border rounded d-flex gap-2 align-items-center">
+                                <img id="inspectThumb" class="rounded d-none" alt="" width="120">
+                                <div class="min-w-0">
+                                    <div id="inspectTitle" class="fw-semibold text-truncate"></div>
+                                    <div id="inspectMeta" class="text-muted small"></div>
+                                </div>
+                            </div>
                         </div>
 
                         <div class="mb-3">
                             <label for="format" class="form-label">Output Format</label>
                             <select class="form-select form-control-lg" id="format" name="format" required>
-                                <option value="video_mp4">MP4 Video (plays everywhere)</option>
-                                <option value="video_webm">WebM Video (small files)</option>
-                                <option value="video_mkv">MKV Video (archival, external players)</option>
+                                <option value="video_mp4"{% if default_video_format == 'video_mp4' %} selected{% endif %}>MP4 Video (plays everywhere)</option>
+                                <option value="video_webm"{% if default_video_format == 'video_webm' %} selected{% endif %}>WebM Video (small files)</option>
+                                <option value="video_mkv"{% if default_video_format == 'video_mkv' %} selected{% endif %}>MKV Video (archival, external players)</option>
                             </select>
                             <small class="form-text text-muted">MP4 plays in the app's theater mode and everywhere else. WebM is smaller. MKV keeps maximum quality for VLC and friends.</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="quality" class="form-label">Quality</label>
+                            <select class="form-select form-control-lg" id="quality" name="quality">
+                                <option value="">As configured (currently {{ video_quality }})</option>
+                                <option value="720p">720p (fast, small)</option>
+                                <option value="1080p">1080p</option>
+                                <option value="best">Best available (slow, huge)</option>
+                            </select>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-4">
+                                <label for="opt_subtitles" class="form-label small">Subtitles</label>
+                                <select class="form-select" id="opt_subtitles" name="subtitles">
+                                    <option value="">As configured</option>
+                                    <option value="on">Download</option>
+                                    <option value="off">Skip</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="opt_sponsorblock" class="form-label small">Sponsor skipping</label>
+                                <select class="form-select" id="opt_sponsorblock" name="sponsorblock">
+                                    <option value="">As configured</option>
+                                    <option value="on">Skip segments</option>
+                                    <option value="off">Keep everything</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="opt_normalize" class="form-label small">Volume normalize</label>
+                                <select class="form-select" id="opt_normalize" name="normalize">
+                                    <option value="">As configured</option>
+                                    <option value="on">Normalize</option>
+                                    <option value="off">Keep original</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="mb-3 d-flex flex-wrap gap-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="embed_subs" name="embed_subs" value="on">
+                                <label class="form-check-label small" for="embed_subs" title="Mux subtitles into MP4/MKV as well as saving sidecars">Embed subtitles in file</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="embed_cover" name="embed_cover" value="on">
+                                <label class="form-check-label small" for="embed_cover" title="Attach the thumbnail as cover art (MP4/MKV)">Embed cover art</label>
+                            </div>
                         </div>
 
                         <div class="mb-3">
@@ -108,18 +167,71 @@
     <script>
         window.pathBrowserHome = {{ default_output_path|tojson }};
     </script>
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const form = document.querySelector('form[action="/convert"]');
-            const submit = form ? form.querySelector('button[type="submit"]') : null;
-            if (form && submit) {
-                form.addEventListener('submit', function () {
-                    submit.disabled = true;
-                    submit.textContent = 'Queued... checking status on Home';
-                });
-            }
-        });
-    </script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                const form = document.querySelector('form[action="/convert"]');
+                const submit = form ? form.querySelector('button[type="submit"]') : null;
+                if (form && submit) {
+                    form.addEventListener('submit', function () {
+                        submit.disabled = true;
+                        submit.textContent = 'Queued... checking status on Home';
+                    });
+                }
+                const inspectBtn = document.getElementById('inspectBtn');
+                const urlInput = document.getElementById('url');
+                const box = document.getElementById('inspectBox');
+                function csrf() {
+                    const meta = document.querySelector('meta[name="csrf-token"]');
+                    return meta ? meta.getAttribute('content') : '';
+                }
+                function fmtDur(seconds) {
+                    const total = Math.max(0, Math.round(Number(seconds) || 0));
+                    const h = Math.floor(total / 3600);
+                    const m = Math.floor((total % 3600) / 60);
+                    const s = total % 60;
+                    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+                }
+                if (inspectBtn && urlInput) {
+                    inspectBtn.addEventListener('click', () => {
+                        const url = urlInput.value.trim();
+                        if (!url) return;
+                        inspectBtn.disabled = true;
+                        inspectBtn.textContent = 'Reading…';
+                        fetch('/api/inspect', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf() },
+                            body: JSON.stringify({ url: url }),
+                        })
+                            .then((r) => r.json())
+                            .then((data) => {
+                                inspectBtn.disabled = false;
+                                inspectBtn.textContent = 'Inspect';
+                                if (!data.ok) {
+                                    if (typeof toast === 'function') toast(data.message || 'Could not read that link.', 'danger');
+                                    else alert(data.message || 'Could not read that link.');
+                                    return;
+                                }
+                                box.classList.remove('d-none');
+                                document.getElementById('inspectTitle').textContent = data.title;
+                                document.getElementById('inspectMeta').textContent =
+                                    (data.artist ? data.artist + ' · ' : '') + fmtDur(data.duration);
+                                const thumb = document.getElementById('inspectThumb');
+                                if (data.thumbnail) {
+                                    thumb.src = data.thumbnail;
+                                    thumb.classList.remove('d-none');
+                                    thumb.onerror = () => thumb.classList.add('d-none');
+                                } else {
+                                    thumb.classList.add('d-none');
+                                }
+                            })
+                            .catch(() => {
+                                inspectBtn.disabled = false;
+                                inspectBtn.textContent = 'Inspect';
+                            });
+                    });
+                }
+            });
+        </script>
 
     {% include '_player.html' %}
 </body>

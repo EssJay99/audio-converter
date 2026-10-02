@@ -451,6 +451,7 @@ def _append_children(parent, urls, title, folder, expectations=None,
             output_path=folder,
             status='pending',
             progress=0,
+            job_options=getattr(parent, 'job_options', '') or '{}',
             parent_id=parent.id,
             is_playlist=False,
             playlist_title=title,
@@ -1038,9 +1039,20 @@ def convert_page():
 @bp.route('/video')
 def video_page():
     """Show the video conversion page."""
+    from app.models import UserSettings
     default_output_path = effective_output_path()
+    try:
+        settings = UserSettings.query.first()
+        video_quality = (getattr(settings, 'video_quality', '1080p')
+                         or '1080p')
+        default_video_format = (getattr(settings, 'default_video_format',
+                                        'video_mp4') or 'video_mp4')
+    except Exception:
+        video_quality, default_video_format = '1080p', 'video_mp4'
     return render_template('video.html',
                            default_output_path=default_output_path,
+                           video_quality=video_quality,
+                           default_video_format=default_video_format,
                            request_path='/video')
 
 
@@ -1075,6 +1087,20 @@ def convert():
               'or a video format (video_mp4, video_webm, video_mkv)', 'error')
         return redirect(url_for('home.index'))
 
+    job_options = {}
+    if VALID_FORMATS[format_type].get('kind') == 'video':
+        quality = request.form.get('quality', '').strip()
+        if quality in ('720p', '1080p', 'best'):
+            job_options['quality'] = quality
+        for key in ('subtitles', 'sponsorblock', 'normalize'):
+            choice = request.form.get(key, '').strip()
+            if choice in ('on', 'off'):
+                job_options[key] = choice
+        if request.form.get('embed_subs'):
+            job_options['embed_subs'] = True
+        if request.form.get('embed_cover'):
+            job_options['embed_cover'] = True
+
     try:
         os.makedirs(output_path, exist_ok=True)
         if not os.access(output_path, os.W_OK):
@@ -1098,9 +1124,14 @@ def convert():
             if existing.output_path != output_path:
                 existing.output_path = output_path
                 db.session.commit()
+            # A resubmitted form may carry new per-submit options.
+            if job_options:
+                existing.job_options = json.dumps(job_options)
+                db.session.commit()
             flash('Resuming existing playlist from last session.', 'info')
         else:
-            queue_playlist(url, format_type, output_path, organization)
+            queue_playlist(url, format_type, output_path, organization,
+                           job_options=job_options)
             if is_import:
                 flash('Playlist import queued. Tracks will be found on YouTube and saved into one folder.', 'info')
             else:
@@ -1113,6 +1144,7 @@ def convert():
         output_path=output_path,
         status='pending',
         progress=0,
+        job_options=json.dumps(job_options),
     )
     db.session.add(history)
     db.session.commit()
@@ -1124,7 +1156,8 @@ def convert():
     return redirect(url_for('home.index'))
 
 
-def queue_playlist(url, format_type, output_path, organization='folder'):
+def queue_playlist(url, format_type, output_path, organization='folder',
+                   job_options=None):
     """Create the parent playlist row and hand it to the worker for expansion."""
     organization = organization or 'folder'
     history = ConversionHistory(
@@ -1136,6 +1169,7 @@ def queue_playlist(url, format_type, output_path, organization='folder'):
         is_playlist=True,
         item_count=0,
         playlist_organization=organization,
+        job_options=json.dumps(job_options or {}),
     )
     db.session.add(history)
     db.session.commit()
@@ -1925,7 +1959,8 @@ def download_and_convert(url, format_type, output_path, job=None):
 
         _job_update(job, status='converting', progress=95) if job else None
 
-        result = convert_audio_file(temp_audio, format_type, output_file, meta, cover_file)
+        result = convert_audio_file(temp_audio, format_type, output_file, meta, cover_file,
+                                    job)
         if not result.get('success'):
             return result
 
@@ -2151,10 +2186,23 @@ def _fetch_thumbnail(url):
     return None
 
 
-def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
+def convert_audio_file(input_file, format_type, output_file, meta, cover_file,
+                       job=None):
     """Convert audio to the target format with metadata and cover art."""
     if VALID_FORMATS[format_type].get('kind') == 'video':
-        return convert_video_file(input_file, format_type, output_file, meta)
+        # Subtitle sidecars already sit next to the output (see
+        # download_and_convert); hand them over for optional embedding.
+        subs_here = []
+        stem = os.path.splitext(output_file)[0]
+        for candidate in sorted(glob.glob(stem + '.*.vtt')
+                                + glob.glob(stem + '.*.srt')):
+            parts = os.path.basename(candidate).split('.')
+            if len(parts) >= 3 and re.fullmatch(r'[A-Za-z-]{2,12}',
+                                                parts[-2] or ''):
+                subs_here.append((parts[-2], candidate))
+        return convert_video_file(input_file, format_type, output_file, meta,
+                                  job=job, subs=subs_here,
+                                  cover_file=cover_file)
     args = ['ffmpeg', '-y']
     if cover_file and format_type in COVER_FORMATS:
         args += ['-i', input_file, '-i', cover_file]
@@ -2166,7 +2214,7 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
         args += ['-map', '1:v', '-c:v', 'copy', '-disposition:v', 'attached_pic']
 
     args += _format_args(format_type)
-    if _want_normalize():
+    if _want_normalize(job):
         # Single-pass EBU R128 normalization so playlists play at even volume.
         args += ['-filter:a', 'loudnorm']
 
@@ -2188,30 +2236,91 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file):
         return {'success': False, 'error': f'FFmpeg conversion failed: {error_msg}'}
 
 
-def convert_video_file(input_file, format_type, output_file, meta):
+def _video_encode_settings():
+    """(crf, preset) for MP4 re-encodes, clamped to sane ranges."""
+    try:
+        settings = UserSettings.query.first()
+        crf = int(getattr(settings, 'video_crf', 23) or 23)
+        preset = str(getattr(settings, 'video_preset', 'veryfast') or 'veryfast')
+    except Exception:
+        return 23, 'veryfast'
+    crf = max(18, min(32, crf))
+    if preset not in ('ultrafast', 'superfast', 'veryfast', 'faster',
+                      'fast', 'medium', 'slow'):
+        preset = 'veryfast'
+    return crf, preset
+
+
+def convert_video_file(input_file, format_type, output_file, meta, job=None,
+                       subs=(), cover_file=None):
     """Convert a download to a portable video file with metadata.
 
     MP4 is re-encoded to H.264/AAC (plays everywhere, faststart-tagged for
-    seeking during streaming). WebM and MKV are stream-copied: YouTube's
-    VP9/Opus sources fit those containers as-is, which keeps conversion
-    fast and lossless; anything else fails loudly with ffmpeg's reason.
-    Cover art rides alongside as a sidecar (see download_and_convert).
+    seeking during streaming) using the configured CRF/preset. WebM and MKV
+    are stream-copied: YouTube's VP9/Opus sources fit those containers
+    as-is, which keeps conversion fast and lossless; anything else fails
+    loudly with ffmpeg's reason. Subtitle sidecars ride alongside (see
+    download_and_convert); with embed_subs they are muxed in as well, and
+    a cover image can ride as an attached picture.
     """
     fmt = VALID_FORMATS[format_type]
+    options = _job_options(job)
     args = ['ffmpeg', '-y', '-i', input_file]
-    normalize = _want_normalize()
+    # Extra inputs are numbered from 1; explicit -map keeps selection
+    # deterministic (ffmpeg defaults would silently drop subtitles).
+    extra_maps = []
+    next_input = 1
+    sub_inputs = []
+    if options.get('embed_subs') and subs:
+        # Mux each sidecar in; container picks the subtitle codec below.
+        for _lang, path in subs:
+            if path and os.path.isfile(path):
+                args += ['-i', path]
+                extra_maps += ['-map', str(next_input)]
+                next_input += 1
+                sub_inputs.append(path)
+    cover_vstream = None
+    if options.get('embed_cover') and cover_file and os.path.isfile(cover_file) \
+            and fmt['ext'] in ('mp4', 'mkv'):
+        args += ['-i', cover_file]
+        extra_maps += ['-map', str(next_input)]
+        next_input += 1
+        # The attached picture becomes output video stream N, where N is
+        # the main file's video stream count (usually 1).
+        try:
+            probe = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-i', input_file],
+                capture_output=True, text=True, timeout=20)
+            cover_vstream = len(re.findall(
+                r'(?im)^\s*Stream #\d+:\d+.*?:\s*Video\s*:',
+                probe.stderr or ''))
+        except Exception:
+            cover_vstream = 1
+    if extra_maps:
+        args += ['-map', '0'] + extra_maps
+    normalize = _want_normalize(job)
     if fmt['ext'] == 'mp4':
-        args += ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        crf, preset = _video_encode_settings()
+        args += ['-c:v', 'libx264', '-preset', preset, '-crf', str(crf),
                  '-c:a', 'aac', '-movflags', '+faststart']
         if normalize:
             args += ['-filter:a', 'loudnorm']
+        if sub_inputs:
+            args += ['-c:s', 'mov_text']
+        if cover_vstream is not None:
+            args += [f'-c:v:{cover_vstream}', 'mjpeg',
+                     f'-disposition:v:{cover_vstream}', 'attached_pic']
     elif normalize:
         # A filter forces a re-encode, so copy paths pick per-container
         # codecs instead of failing on `-c copy` plus a filter.
         audio_codec = 'libopus' if fmt['ext'] == 'webm' else 'aac'
         args += ['-c:v', 'copy', '-c:a', audio_codec, '-filter:a', 'loudnorm']
+        if sub_inputs:
+            args += ['-c:s', 'copy' if fmt['ext'] == 'mkv' else 'mov_text']
     else:
         args += ['-c', 'copy']
+        if sub_inputs:
+            args += ['-c:s', 'copy' if fmt['ext'] == 'mkv' else 'mov_text']
 
     for key in ('title', 'artist', 'album', 'date'):
         value = meta.get(key)
@@ -2335,8 +2444,35 @@ def _active_privacy_flags():
 MIN_FREE_BYTES = 200 * 1024 * 1024
 
 
-def _want_sponsorblock():
-    """Context-safe read of the sponsor-skipping toggle (default on)."""
+def _job_options(job):
+    """Per-submit overrides stored on the job row ({} when absent)."""
+    try:
+        raw = getattr(job, 'job_options', '') or '{}'
+        options = json.loads(raw)
+        return options if isinstance(options, dict) else {}
+    except Exception:
+        return {}
+
+
+def _job_option(job, key, default=None):
+    if job is None:
+        return default
+    try:
+        return _job_options(job).get(key, default)
+    except Exception:
+        return default
+
+
+def _want_sponsorblock(job=None):
+    """Context-safe read of the sponsor-skipping toggle (default on).
+
+    A per-submit override on the job ('on'/'off') wins over Settings.
+    """
+    override = _job_option(job, 'sponsorblock')
+    if override == 'on':
+        return True
+    if override == 'off':
+        return False
     try:
         settings = UserSettings.query.first()
         if settings is None:
@@ -2346,8 +2482,13 @@ def _want_sponsorblock():
         return True
 
 
-def _want_normalize():
+def _want_normalize(job=None):
     """Context-safe read of the loudness toggle (default off)."""
+    override = _job_option(job, 'normalize')
+    if override == 'on':
+        return True
+    if override == 'off':
+        return False
     try:
         settings = UserSettings.query.first()
         if settings is None:
@@ -2357,8 +2498,13 @@ def _want_normalize():
         return False
 
 
-def _want_subtitles():
+def _want_subtitles(job=None):
     """Context-safe read of the subtitle toggle (default on)."""
+    override = _job_option(job, 'subtitles')
+    if override == 'on':
+        return True
+    if override == 'off':
+        return False
     try:
         settings = UserSettings.query.first()
         if settings is None:
@@ -2503,8 +2649,11 @@ def _download_kind(job):
     return VALID_FORMATS.get(LABEL_TO_KEY.get(job.format, ''), {}).get('kind', 'audio')
 
 
-def _video_quality_cap():
-    """User's video quality cap, defaulting to 1080p (safe for timeouts)."""
+def _video_quality_cap(job=None):
+    """Video quality cap: per-submit override wins, else the setting."""
+    override = _job_option(job, 'quality')
+    if override in ('720p', '1080p', 'best'):
+        return override
     try:
         settings = UserSettings.query.first()
         quality = (getattr(settings, 'video_quality', '1080p') or '1080p').strip()
@@ -2515,7 +2664,7 @@ def _video_quality_cap():
 
 def _download_selector(job):
     if _download_kind(job) == 'video':
-        cap = _video_quality_cap()
+        cap = _video_quality_cap(job)
         if cap == 'best':
             return 'bestvideo+bestaudio/best'
         height = 720 if cap == '720p' else 1080
@@ -2532,9 +2681,9 @@ def download_audio(url, temp_audio, job=None):
             + ['--no-playlist', '--continue', '-f', selector,
                '--newline', '-o', temp_audio])
     if _download_kind(job) == 'video':
-        if _want_sponsorblock():
+        if _want_sponsorblock(job):
             base += ['--sponsorblock-remove', 'sponsor,intro,outro,selfpromo,interaction']
-        if _want_subtitles():
+        if _want_subtitles(job):
             # Manual subs in every language, but auto-generated ones only
             # for a shortlist: 'all' on auto-subs fans out into hundreds of
             # machine translations (xx-en, …) and gets the IP throttled.
@@ -3407,7 +3556,8 @@ def api_transcode():
         if fmt_key in COVER_FORMATS and os.path.isfile(sidecar_src):
             cover = sidecar_src
         try:
-            result = convert_audio_file(src, fmt_key, dest, meta, cover)
+            result = convert_audio_file(src, fmt_key, dest, meta, cover,
+                                        history)
         except Exception as e:
             result = {'success': False, 'error': str(e)}
         if not result.get('success'):
@@ -5123,6 +5273,39 @@ def api_first_run():
     except Exception:
         has_rows = True
     return jsonify({'ok': True, 'first_run': not has_rows})
+
+
+@bp.route('/api/inspect', methods=['POST'])
+def api_inspect():
+    """Preview a link before queueing: title, duration, thumbnail.
+
+    Single videos only (playlists have their own flow). Lets the video
+    page show what a link actually points at so users don't download
+    the wrong thing.
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_url = str(payload.get('url') or '').strip()
+    url = sanitize_url(raw_url) if _privacy_on() else raw_url
+    if not url:
+        return jsonify({'ok': False, 'message': 'Paste a link first.'}), 400
+    if not _is_supported_url(url):
+        return jsonify({'ok': False,
+                        'message': 'That link is not from a supported site.'}), 400
+    if _is_collection_url(url) or _is_streaming_playlist_url(url):
+        return jsonify({'ok': False,
+                        'message': 'Single videos only — playlists queue directly.'}), 400
+    try:
+        meta = extract_metadata(url)
+    except Exception:
+        meta = {}
+    if not meta:
+        return jsonify({'ok': False,
+                        'message': 'Could not read that link.'}), 502
+    return jsonify({'ok': True,
+                    'title': meta.get('title') or 'Untitled',
+                    'artist': meta.get('artist') or '',
+                    'duration': meta.get('duration') or 0,
+                    'thumbnail': meta.get('thumbnail') or ''})
 
 
 @bp.route('/api/chapters/<int:conversion_id>')

@@ -108,6 +108,35 @@
                         </select>
                         <small class="form-text text-muted">Caps full-video downloads. Higher than 1080p often blows past the track timeout.</small>
                     </div>
+
+                    <div class="col-md-6">
+                        <label for="default_video_format" class="form-label">Default video format</label>
+                        <select class="form-select" id="default_video_format" name="default_video_format">
+                            <option value="video_mp4" {% if default_video_format == 'video_mp4' %}selected{% endif %}>MP4 (plays everywhere)</option>
+                            <option value="video_webm" {% if default_video_format == 'video_webm' %}selected{% endif %}>WebM (small files)</option>
+                            <option value="video_mkv" {% if default_video_format == 'video_mkv' %}selected{% endif %}>MKV (archival)</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="video_crf" class="form-label">MP4 quality (CRF 18–32)</label>
+                        <input type="number" class="form-control" id="video_crf" name="video_crf"
+                               min="18" max="32" value="{{ video_crf }}">
+                        <small class="form-text text-muted">Lower is better quality and bigger files. 23 is the sweet spot.</small>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="video_preset" class="form-label">MP4 encode speed</label>
+                        <select class="form-select" id="video_preset" name="video_preset">
+                            <option value="ultrafast" {% if video_preset == 'ultrafast' %}selected{% endif %}>Ultrafast (big files)</option>
+                            <option value="superfast" {% if video_preset == 'superfast' %}selected{% endif %}>Superfast</option>
+                            <option value="veryfast" {% if video_preset == 'veryfast' %}selected{% endif %}>Veryfast (recommended)</option>
+                            <option value="faster" {% if video_preset == 'faster' %}selected{% endif %}>Faster</option>
+                            <option value="fast" {% if video_preset == 'fast' %}selected{% endif %}>Fast</option>
+                            <option value="medium" {% if video_preset == 'medium' %}selected{% endif %}>Medium (small files, slow)</option>
+                            <option value="slow" {% if video_preset == 'slow' %}selected{% endif %}>Slow (smallest, slowest)</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 

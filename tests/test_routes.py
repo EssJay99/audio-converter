@@ -5531,3 +5531,151 @@ def test_host_guard(client):
     assert resp.get_json()['ok'] is False
     resp = client.get('/', base_url='http://127.0.0.1.evil.com/')
     assert resp.status_code == 403
+
+
+def test_video_submit_stores_options(client, monkeypatch):
+    import json
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    resp = client.post('/convert', data={
+        'url': 'https://www.youtube.com/watch?v=abc',
+        'format': 'video_mp4',
+        'output_path': '/tmp/out',
+        'quality': '720p',
+        'subtitles': 'off',
+        'sponsorblock': 'on',
+        'embed_subs': 'on',
+    })
+    assert resp.status_code == 302
+    with client.application.app_context():
+        job = ConversionHistory.query.order_by(
+            ConversionHistory.created_at.desc()).first()
+        options = json.loads(job.job_options)
+        assert options == {'quality': '720p', 'subtitles': 'off',
+                           'sponsorblock': 'on', 'embed_subs': True}
+
+
+def test_audio_submit_stores_no_options(client, monkeypatch):
+    import json
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    client.post('/convert', data={
+        'url': 'https://www.youtube.com/watch?v=abc',
+        'format': 'flac',
+        'output_path': '/tmp/out',
+        'quality': 'best',
+    })
+    with client.application.app_context():
+        job = ConversionHistory.query.order_by(
+            ConversionHistory.created_at.desc()).first()
+        assert json.loads(job.job_options) == {}
+
+
+def test_video_encode_settings_clamp(client, monkeypatch):
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.video_crf = 99
+        settings.video_preset = 'bogus'
+        db.session.commit()
+        assert convert_module._video_encode_settings() == (32, 'veryfast')
+        settings.video_crf = 18
+        settings.video_preset = 'slow'
+        db.session.commit()
+        assert convert_module._video_encode_settings() == (18, 'slow')
+
+
+def test_convert_video_embeds_subs_and_cover(client, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        __import__('pytest').skip('ffmpeg not on PATH')
+    src = tmp_path / 'clip.mp4'
+    subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'testsrc=duration=1:size=128x128:rate=10',
+         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+         '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', str(src)],
+        check=True, timeout=120)
+    sub = tmp_path / 'clip.en.vtt'
+    sub.write_text('WEBVTT\n\n00:00.000 --> 00:01.000\nHi\n')
+    cover = tmp_path / 'cover.jpg'
+    subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=red:size=64x64:duration=1',
+         '-vframes', '1', str(cover)],
+        check=True, timeout=120)
+
+    class FakeJob:
+        job_options = ('{"embed_subs": true, "embed_cover": true}')
+
+    out = tmp_path / 'out.mp4'
+    with client.application.app_context():
+        result = convert_module.convert_video_file(
+            str(src), 'video_mp4', str(out), {'title': 'T'},
+            job=FakeJob(), subs=[('en', str(sub))], cover_file=str(cover))
+    assert result == {'success': True}
+    probe = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-i', str(out)],
+        capture_output=True, text=True, timeout=30)
+    kinds = convert_module._stream_types(probe.stderr)
+    assert kinds >= {'video', 'audio', 'subtitle'}
+    assert 'attached_pic' in (probe.stderr or '').lower() or 'mjpeg' in (
+        probe.stderr or '').lower()
+
+
+def test_inspect_endpoint(client, monkeypatch):
+    monkeypatch.setattr(
+        convert_module, 'extract_metadata',
+        lambda url: {'title': 'Song', 'artist': 'Band', 'duration': 200,
+                     'thumbnail': 'https://img/x.jpg'})
+    data = client.post('/api/inspect',
+                       json={'url': 'https://www.youtube.com/watch?v=x'}).get_json()
+    assert data['ok'] is True
+    assert data['title'] == 'Song' and data['duration'] == 200
+    data = client.post('/api/inspect',
+                       json={'url': 'https://evil.com/x'})
+    assert data.status_code == 400
+    data = client.post('/api/inspect',
+                       json={'url': 'https://www.youtube.com/playlist?list=x'})
+    assert data.status_code == 400
+    assert client.post('/api/inspect', json={}).status_code == 400
+
+
+def test_video_settings_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'video_crf': '18',
+        'video_preset': 'slow',
+        'default_video_format': 'video_mkv',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.video_crf == 18
+        assert settings.video_preset == 'slow'
+        assert settings.default_video_format == 'video_mkv'
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('name="video_crf"', 'name="video_preset"',
+                   'name="default_video_format"', 'option value="slow" selected'):
+        assert marker in page
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x', 'video_crf': '99',
+        'video_preset': 'bogus', 'default_video_format': 'bogus'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.video_crf == 32
+        assert settings.video_preset == 'veryfast'
+        assert settings.default_video_format == 'video_mp4'
+
+
+def test_video_page_options_and_defaults(client):
+    page = client.get('/video').data.decode('utf-8')
+    for marker in ('name="quality"', 'name="subtitles"',
+                   'name="sponsorblock"', 'name="normalize"',
+                   'name="embed_subs"', 'name="embed_cover"',
+                   'inspectBtn', 'inspectBox', 'As configured'):
+        assert marker in page

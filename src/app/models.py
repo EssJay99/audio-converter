@@ -52,6 +52,11 @@ class UserSettings(db.Model):
     auto_update_ytdlp = db.Column(db.Boolean, nullable=False, default=False)
     # Preselected format on the convert forms.
     default_format = db.Column(db.String(20), nullable=False, default='flac')
+    # Video encoding defaults (per-submit quality lives on the job).
+    video_crf = db.Column(db.Integer, nullable=False, default=23)
+    video_preset = db.Column(db.String(20), nullable=False, default='veryfast')
+    # Preselected format on the video convert form.
+    default_video_format = db.Column(db.String(20), nullable=False, default='video_mp4')
     # Video download cap: '720p', '1080p', or 'best' (no cap).
     video_quality = db.Column(db.String(10), nullable=False, default='1080p')
     # Tidal login (all optional). Client id/secret come from the user's own
@@ -122,6 +127,9 @@ class ConversionHistory(db.Model):
     rating = db.Column(db.Integer, nullable=False, default=0)
     # Source quality line ("FLAC · 44.1 kHz · stereo") parsed at completion.
     quality = db.Column(db.String(100), nullable=False, default='')
+    # Per-submit option overrides (JSON): quality, subtitles, sponsorblock,
+    # normalize, embed_subs, embed_cover. Absent keys follow Settings.
+    job_options = db.Column(db.Text, nullable=False, default='{}')
     # Source cover-art URL (YouTube/SoundCloud thumbnail), kept so missing
     # artwork can be backfilled later without re-resolving the track.
     cover_url = db.Column(db.String(1000), nullable=False, default='')

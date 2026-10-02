@@ -7,7 +7,7 @@ import requests
 bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression',
-                  'default_format', 'video_quality')
+                  'default_format', 'video_quality', 'default_video_format')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
                   'auto_update_ytdlp',)
@@ -62,6 +62,9 @@ def get_settings_dict():
         'tray_icon': True,
         'default_format': 'flac',
         'video_quality': '1080p',
+        'video_crf': 23,
+        'video_preset': 'veryfast',
+        'default_video_format': 'video_mp4',
     }
     user_settings = UserSettings.query.first()
     if user_settings:
@@ -85,6 +88,10 @@ def get_settings_dict():
             defaults['offpeak_start'] = user_settings.offpeak_start
         if getattr(user_settings, 'offpeak_end', None) is not None:
             defaults['offpeak_end'] = user_settings.offpeak_end
+        if getattr(user_settings, 'video_crf', None) is not None:
+            defaults['video_crf'] = user_settings.video_crf
+        if getattr(user_settings, 'video_preset', None) is not None:
+            defaults['video_preset'] = user_settings.video_preset
         defaults['proxy'] = getattr(user_settings, 'proxy', None) or ''
         if getattr(user_settings, 'worker_count', None) is not None:
             defaults['worker_count'] = user_settings.worker_count
@@ -122,6 +129,14 @@ def save_settings():
         data['default_format'] = 'flac'
     if data.get('video_quality') not in ('720p', '1080p', 'best'):
         data['video_quality'] = '1080p'
+    data['video_crf'] = _int_from_form(request, 'video_crf', 23, 18, 32)
+    data['video_preset'] = request.form.get('video_preset', 'veryfast').strip()
+    if data['video_preset'] not in ('ultrafast', 'superfast', 'veryfast',
+                                    'faster', 'fast', 'medium', 'slow'):
+        data['video_preset'] = 'veryfast'
+    if data.get('default_video_format') not in ('video_mp4', 'video_webm',
+                                                'video_mkv'):
+        data['default_video_format'] = 'video_mp4'
 
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')
@@ -139,6 +154,8 @@ def save_settings():
         user_settings.offpeak_limit = data['offpeak_limit']
         user_settings.offpeak_start = data['offpeak_start']
         user_settings.offpeak_end = data['offpeak_end']
+        user_settings.video_crf = data['video_crf']
+        user_settings.video_preset = data['video_preset']
         user_settings.proxy = data['proxy']
         user_settings.worker_count = data['worker_count']
         # New Tidal credentials wipe stored tokens (they belong to the old app).

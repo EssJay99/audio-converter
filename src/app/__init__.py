@@ -139,6 +139,7 @@ _SCHEMA_MIGRATIONS = {
         ('rating', 'INTEGER DEFAULT 0'),
         ('cover_url', 'VARCHAR(1000) DEFAULT ""'),
         ('quality', 'VARCHAR(100) DEFAULT ""'),
+        ('job_options', 'TEXT DEFAULT "{}"'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),
@@ -157,6 +158,9 @@ _SCHEMA_MIGRATIONS = {
         ('auto_update_ytdlp', 'BOOLEAN DEFAULT 0'),
         ('default_format', 'VARCHAR(20) DEFAULT "flac"'),
         ('video_quality', 'VARCHAR(10) DEFAULT "1080p"'),
+        ('video_crf', 'INTEGER DEFAULT 23'),
+        ('video_preset', 'VARCHAR(20) DEFAULT "veryfast"'),
+        ('default_video_format', 'VARCHAR(20) DEFAULT "video_mp4"'),
         ('tidal_client_id', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_client_secret', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),
