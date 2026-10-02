@@ -938,7 +938,7 @@
                     if (!data.ok) throw new Error(data.message || '');
                     enqueue(data.item);
                 })
-                .catch(function () { alert('Could not add this track to the queue.'); });
+                .catch(function () { if (typeof toast === 'function') toast('Could not add this track to the queue.', 'danger'); });
             e.preventDefault();
             return;
         }
@@ -952,12 +952,12 @@
                         return it.status === 'completed' && it.file_exists;
                     });
                     if (!items.length) {
-                        alert('This playlist has no playable tracks yet.');
+                        if (typeof toast === 'function') toast('This playlist has no playable tracks yet.', 'danger');
                         return;
                     }
                     buildLinearQueue(items, 0, data.items[0] && data.items[0].playlist_title ? data.items[0].playlist_title : 'Playlist');
                 })
-                .catch(function () { alert('Could not load this playlist.'); });
+                .catch(function () { if (typeof toast === 'function') toast('Could not load this playlist.', 'danger'); });
             e.preventDefault();
             return;
         }
@@ -979,7 +979,7 @@
                         const start = Math.max(0, items.findIndex(function (it) { return String(it.id) === String(id); }));
                         buildLinearQueue(items, start, (items[0] && items[0].playlist_title) || 'Playlist');
                     })
-                    .catch(function () { alert('Could not load this playlist.'); });
+                    .catch(function () { if (typeof toast === 'function') toast('Could not load this playlist.', 'danger'); });
             } else {
                 fetch('/api/track/' + id)
                     .then(function (r) { return r.json(); })
@@ -987,7 +987,7 @@
                         if (!data.ok) throw new Error(data.message || '');
                         buildLinearQueue([data.item], 0, '');
                     })
-                    .catch(function () { alert('Could not play this track.'); });
+                    .catch(function () { if (typeof toast === 'function') toast('Could not play this track.', 'danger'); });
             }
             e.preventDefault();
         }

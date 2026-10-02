@@ -14,7 +14,18 @@ REM Without them the build stays unsigned and still works.
 setlocal
 cd /d "%~dp0.."
 
-if not "%~1"=="" ( set VERSION=%~1 ) else ( set VERSION=1.0.0 )
+if not "%~1"=="" ( set VERSION=%~1 ) else ( set VERSION= )
+REM Strip a leading "v" so tags (v1.2.3) and plain versions both work.
+if "%VERSION:~0,1%"=="v" ( set VERSION=%VERSION:~1% )
+REM Anything that is not x.y.z (branch names on manual runs, empty) falls
+REM back to the version baked into the sources.
+echo %VERSION% | findstr /r "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
+if errorlevel 1 (
+    set VERSION=
+    for /f "tokens=2 delims='" %%V in ('findstr /r "^APP_VERSION *= *'" src\app\__init__.py 2^>nul') do set VERSION=%%V
+)
+if "%VERSION%"=="" ( set VERSION=1.0.0 )
+echo ==^> Building version %VERSION%
 
 set PYTHON=python
 set VENV=.venv-build

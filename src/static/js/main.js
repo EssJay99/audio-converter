@@ -195,7 +195,7 @@ document.addEventListener('click', (e) => {
                 loadSubscriptions();
             })
             .catch(() => {
-                alert('Could not follow this playlist.');
+                toast('Could not follow this playlist.', 'danger');
                 subBtn.disabled = false;
             });
         e.preventDefault();
@@ -208,7 +208,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     pauseBtn.disabled = false;
                     return;
                 }
@@ -216,7 +216,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not pause this track.');
+                toast('Could not pause this track.', 'danger');
                 pauseBtn.disabled = false;
             });
         e.preventDefault();
@@ -229,7 +229,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     resumeBtn.disabled = false;
                     return;
                 }
@@ -237,7 +237,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not resume this track.');
+                toast('Could not resume this track.', 'danger');
                 resumeBtn.disabled = false;
             });
         e.preventDefault();
@@ -250,7 +250,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     skipBtn.disabled = false;
                     return;
                 }
@@ -270,7 +270,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not skip this track.');
+                toast('Could not skip this track.', 'danger');
                 skipBtn.disabled = false;
             });
         e.preventDefault();
@@ -290,7 +290,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     delPlBtn.disabled = false;
                     return;
                 }
@@ -305,7 +305,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not delete this playlist.');
+                toast('Could not delete this playlist.', 'danger');
                 delPlBtn.disabled = false;
             });
         e.preventDefault();
@@ -331,7 +331,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     delBtn.disabled = false;
                     return;
                 }
@@ -342,7 +342,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not delete this track.');
+                toast('Could not delete this track.', 'danger');
                 delBtn.disabled = false;
             });
         e.preventDefault();
@@ -358,7 +358,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     retryBtn.disabled = false;
                     return;
                 }
@@ -366,7 +366,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not retry this track.');
+                toast('Could not retry this track.', 'danger');
                 retryBtn.disabled = false;
             });
         e.preventDefault();
@@ -389,21 +389,21 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                     return;
                 }
                 toast('Renamed to ' + data.filename + '.', 'success');
                 if (typeof refreshTable === 'function') refreshTable();
                 else window.location.reload();
             })
-            .catch(() => alert('Could not rename this file.'));
+            .catch(() => toast('Could not rename this file.', 'danger'));
         e.preventDefault();
         return;
     }
     const tagsBtn = e.target.closest('[data-tags]');
     if (tagsBtn) {
         if (typeof bootstrap === 'undefined') {
-            alert('Tag editor unavailable.');
+            toast('Tag editor unavailable.', 'danger');
             e.preventDefault();
             return;
         }
@@ -432,17 +432,17 @@ document.addEventListener('click', (e) => {
                         .then((r) => r.json())
                         .then((saved) => {
                             if (!saved.ok) {
-                                alert(saved.message || 'Could not save tags.');
+                                toast(saved.message || 'Could not save tags.', 'danger');
                                 return;
                             }
                             modal.hide();
                             toast('Tags updated.', 'success');
                         })
-                        .catch(() => alert('Could not save tags.'));
+                        .catch(() => toast('Could not save tags.', 'danger'));
                 };
                 modal.show();
             })
-            .catch(() => alert('Could not load current tags.'));
+            .catch(() => toast('Could not load current tags.', 'danger'));
         e.preventDefault();
         return;
     }
@@ -456,7 +456,7 @@ document.addEventListener('click', (e) => {
             .then((r) => r.json())
             .then((data) => {
                 if (!data.ok) {
-                    if (data.message) alert(data.message);
+                    if (data.message) toast(data.message, 'danger');
                 } else {
                     toast('Queued ' + data.queued + ' newly matched track(s).' +
                         (data.remaining ? ' ' + data.remaining + ' still unmatched.' : ''), 'success');
@@ -465,7 +465,7 @@ document.addEventListener('click', (e) => {
                 if (typeof refreshTable === 'function') refreshTable();
             })
             .catch(() => {
-                alert('Could not retry unmatched tracks.');
+                toast('Could not retry unmatched tracks.', 'danger');
                 missesBtn.disabled = false;
             });
         e.preventDefault();
@@ -477,9 +477,9 @@ document.addEventListener('click', (e) => {
         fetch('/api/reveal/' + revealBtn.dataset.reveal)
             .then((r) => r.json())
             .then((data) => {
-                if (!data.ok && data.message) alert(data.message);
+                if (!data.ok && data.message) toast(data.message, 'danger');
             })
-            .catch(() => alert('Could not open your file manager.'))
+            .catch(() => toast('Could not open your file manager.', 'danger'))
             .finally(() => { revealBtn.disabled = false; });
         e.preventDefault();
     }
@@ -798,7 +798,7 @@ function loadSubscriptions() {
                     postJSON('/api/subscriptions/' + sub.id + '/interval',
                              { interval_hours: Number(freq.value) })
                         .then(() => loadSubscriptions())
-                        .catch(() => alert('Could not change frequency.'));
+                        .catch(() => toast('Could not change frequency.', 'danger'));
                 });
                 row.appendChild(freq);
                 const mkBtn = (label, title, fn) => {
@@ -819,18 +819,18 @@ function loadSubscriptions() {
                             loadSubscriptions();
                             if (typeof refreshTable === 'function') refreshTable();
                         })
-                        .catch(() => alert('Could not check this playlist.'));
+                        .catch(() => toast('Could not check this playlist.', 'danger'));
                 });
                 mkBtn(sub.active ? 'Pause' : 'Resume', 'Pause or resume automatic checks', () => {
                     postJSON('/api/subscriptions/' + sub.id + '/toggle', {})
                         .then(loadSubscriptions)
-                        .catch(() => alert('Could not change this subscription.'));
+                        .catch(() => toast('Could not change this subscription.', 'danger'));
                 });
                 mkBtn('Unfollow', 'Stop checking (history is kept)', () => {
                     if (!confirm('Stop following this playlist? Your downloaded tracks stay.')) return;
                     postJSON('/api/subscriptions/' + sub.id + '/delete', {})
                         .then(loadSubscriptions)
-                        .catch(() => alert('Could not remove this subscription.'));
+                        .catch(() => toast('Could not remove this subscription.', 'danger'));
                 });
                 list.appendChild(row);
             });
@@ -851,6 +851,9 @@ function initHealthBanner() {
             const problems = [];
             if (data.stale_helper_suspected) {
                 problems.push('downloads keep failing — this looks like an outdated downloader (update yt-dlp in Settings › Helpers)');
+            }
+            if (data.app_update && data.app_update.version) {
+                problems.push('Audio Converter ' + data.app_update.version + ' is available (Settings › Check for updates)');
             }
             if (data.ffmpeg === false) {
                 problems.push('FFmpeg was not found — conversions cannot run until it is installed');
@@ -1392,7 +1395,7 @@ function initHistoryToolbar() {
                     queueBtn.dataset.paused = data.paused ? '1' : '';
                     toast(data.paused ? 'Downloads paused.' : 'Downloads resumed.', 'info');
                 })
-                .catch(() => alert('Could not change queue state.'));
+                .catch(() => toast('Could not change queue state.', 'danger'));
         });
     }
     refreshQueueButton();

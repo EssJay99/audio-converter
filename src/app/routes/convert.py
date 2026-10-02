@@ -269,12 +269,14 @@ def _worker_loop():
                                                 error=message):
                                     _conversion_queue.put(job.id)
                             elif _job_finish(job, status='failed', error=message):
+                                _cleanup_partials(output_dir, job.id)
                                 if not job.parent_id and not job.is_playlist:
                                     _notify('Download failed',
                                             (job.url or '')[:200])
                     except TimeoutError as te:
                         # Job exceeded overall time budget — treat as permanent failure
                         _job_finish(job, status='failed', error=f'Timeout: {str(te)}')
+                        _cleanup_partials(output_dir, job.id)
                     except Exception as e:
                         # Network/Unexpected error — check retry budget, but only if we haven't exceeded timeout
                         db.session.commit()
@@ -287,6 +289,7 @@ def _worker_loop():
                         if getattr(e, 'errno', None) == 28 or _looks_like_nospace(e):
                             _job_finish(job, status='failed',
                                         error='Disk filled up mid-download — free space and retry this track.')
+                            _cleanup_partials(output_dir, job.id)
                         elif job.retry_attempts < max_retries and not is_permanent:
                             attempts = job.retry_attempts + 1
                             if _job_finish(job, status='pending', progress=0,
@@ -296,6 +299,7 @@ def _worker_loop():
                         else:
                             _job_finish(job, status='failed', error=_note_stale_helper(
                                         f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
+                            _cleanup_partials(output_dir, job.id)
                     finally:
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
@@ -502,6 +506,10 @@ _helper_watch_started = False
 _helper_watch_lock = threading.Lock()
 _tag_backfill_started = False
 _tag_backfill_lock = threading.Lock()
+# Newest app release seen by the background watch. Surfaced through
+# /api/health so the banner can nudge even when Settings is never opened.
+_latest_app = {'version': '', 'url': ''}
+_latest_app_lock = threading.Lock()
 
 
 def _ensure_helper_watch():
@@ -554,6 +562,35 @@ def _tag_backfill_loop():
         time.sleep(30)
 
 
+def _check_app_release(feed, current_version):
+    """Poll the app release feed; remember a newer release if one exists.
+
+    Silent on every failure (offline, rate-limited, malformed): the manual
+    update button in Settings remains the source of truth.
+    """
+    from app import _version_tuple
+    from app.routes.settings import _parse_feed_payload
+    try:
+        resp = requests.get(feed, timeout=15,
+                            headers={'Accept': 'application/json'})
+        if resp.status_code != 200:
+            return
+        latest, url = _parse_feed_payload(resp.json())
+    except Exception:
+        return
+    try:
+        if latest and _version_tuple(latest) > _version_tuple(current_version):
+            with _latest_app_lock:
+                _latest_app['version'] = latest
+                _latest_app['url'] = url
+        else:
+            with _latest_app_lock:
+                _latest_app['version'] = ''
+                _latest_app['url'] = ''
+    except Exception:
+        pass
+
+
 def _helper_watch_loop():
     """Nudge the health banner when a newer yt-dlp release exists.
 
@@ -562,9 +599,14 @@ def _helper_watch_loop():
     minutes after startup (never on the launch path), then every 6 hours.
     Failures are silent — offline just means no nudge.
     """
-    from app import _version_tuple, app as flask_app
+    from app import _version_tuple, APP_VERSION, app as flask_app
+    from app.routes.settings import _default_update_feed
     time.sleep(300)
     while True:
+        try:
+            _check_app_release(_default_update_feed(), APP_VERSION)
+        except Exception:
+            pass
         try:
             current = _ytdlp_version()
             latest = _latest_ytdlp_release()
@@ -578,7 +620,12 @@ def _helper_watch_loop():
                 except Exception:
                     auto = False
                 if auto:
-                    ok, message, _version = _perform_ytdlp_update()
+                    if not _claim_update():
+                        continue
+                    try:
+                        ok, message, _version = _perform_ytdlp_update()
+                    finally:
+                        _release_update()
                     if ok:
                         try:
                             with flask_app.app_context():
@@ -1050,10 +1097,9 @@ def convert():
             if existing.output_path != output_path:
                 existing.output_path = output_path
                 db.session.commit()
-            history_id = existing.id
             flash('Resuming existing playlist from last session.', 'info')
         else:
-            history_id = queue_playlist(url, format_type, output_path, organization)
+            queue_playlist(url, format_type, output_path, organization)
             if is_import:
                 flash('Playlist import queued. Tracks will be found on YouTube and saved into one folder.', 'info')
             else:
@@ -2634,6 +2680,21 @@ def api_helpers():
     })
 
 
+_update_lock = threading.Lock()
+
+
+def _claim_update():
+    """Non-blocking install mutex: concurrent update clicks get 409."""
+    return _update_lock.acquire(blocking=False)
+
+
+def _release_update():
+    try:
+        _update_lock.release()
+    except RuntimeError:
+        pass
+
+
 def _perform_ytdlp_update():
     """Replace the yt-dlp helper binary with the latest release build.
 
@@ -2687,7 +2748,13 @@ def _perform_ytdlp_update():
 @bp.route('/api/helpers/update-ytdlp', methods=['POST'])
 def api_update_ytdlp():
     """Replace the yt-dlp helper binary with the latest release build."""
-    ok, message, version = _perform_ytdlp_update()
+    if not _claim_update():
+        return jsonify({'ok': False,
+                        'message': 'An update is already in progress.'}), 409
+    try:
+        ok, message, version = _perform_ytdlp_update()
+    finally:
+        _release_update()
     if not ok:
         return jsonify({'ok': False, 'message': message}), 400
     return jsonify({'ok': True, 'version': version, 'message': message})
@@ -2794,9 +2861,21 @@ def api_update_install():
     """
     from app.routes.settings import _default_update_feed
     if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
-        return _macos_update_install()
+        if not _claim_update():
+            return jsonify({'ok': False,
+                            'message': 'An update is already in progress.'}), 409
+        try:
+            return _macos_update_install()
+        finally:
+            _release_update()
     if getattr(sys, 'frozen', False) and sys.platform.startswith('win'):
-        return _windows_update_install()
+        if not _claim_update():
+            return jsonify({'ok': False,
+                            'message': 'An update is already in progress.'}), 409
+        try:
+            return _windows_update_install()
+        finally:
+            _release_update()
     return jsonify({'ok': False,
                     'message': 'Automatic install works from the installed '
                                'macOS (/Applications) or Windows app. Download '
@@ -3377,12 +3456,18 @@ def api_health():
         disk_free = shutil.disk_usage(target).free
     except OSError:
         pass
+    try:
+        with _latest_app_lock:
+            app_update = dict(_latest_app)
+    except Exception:
+        app_update = {'version': '', 'url': ''}
     return jsonify({'ok': True,
                     'stale_helper_suspected': _stale_helper_event.is_set(),
                     'ffmpeg': check_ffmpeg(),
                     'ytdlp': bool(_find_ytdlp()),
                     'output_writable': output_ok,
-                    'disk_free_bytes': disk_free})
+                    'disk_free_bytes': disk_free,
+                    'app_update': app_update})
 
 
 @bp.route('/api/prune-missing', methods=['POST'])
@@ -3416,6 +3501,54 @@ def api_prune_missing():
     return jsonify({'ok': True, 'removed': removed + orphaned})
 
 
+def _stop_download_proc(job_id):
+    """Terminate a running yt-dlp child, if any. Best-effort."""
+    with _paused_lock:
+        proc = _active_downloads.get(job_id)
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def _cleanup_partials(output_dir, job_id):
+    """Remove a terminally failed job's temp fragments (.tmp/.part/.vtt).
+
+    Retry paths deliberately keep them (--continue resumes); this runs only
+    when the job will never run again, so the output folder doesn't fill
+    with orphaned fragments.
+    """
+    try:
+        if not output_dir or not os.path.isdir(output_dir):
+            return
+        needle = f'_{job_id}.tmp'
+        for name in os.listdir(output_dir):
+            if name.startswith('.') and needle in name:
+                _cleanup(os.path.join(output_dir, name))
+    except OSError:
+        pass
+
+
+def _drop_pause_state(history):
+    """Forget a paused job: unmark, stop any process, remove partials."""
+    with _paused_lock:
+        _paused_jobs.discard(history.id)
+    _stop_download_proc(history.id)
+    try:
+        output_path = history.output_path or ''
+        directory = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
+        # Temp files look like .<stem>_<id>.tmp*; match on the job id so
+        # the exact output stem doesn't matter.
+        needle = f'_{history.id}.tmp'
+        if directory:
+            for name in os.listdir(directory):
+                if name.startswith('.') and needle in name:
+                    _cleanup(os.path.join(directory, name))
+    except OSError:
+        pass
+
+
 @bp.route('/api/skip/<int:conversion_id>')
 @_same_origin_required
 def skip_job(conversion_id):
@@ -3423,8 +3556,8 @@ def skip_job(conversion_id):
 
     A skipped track counts as finished for its playlist's progress, and the
     worker will not (re)download it: jobs already in the queue are left for
-    the worker to pass over, and an in-flight download is discarded when it
-    finishes.
+    the worker to pass over, and an in-flight download is stopped and its
+    partial file discarded.
     """
     history = db.session.get(ConversionHistory, conversion_id)
     if not history:
@@ -3434,25 +3567,37 @@ def skip_job(conversion_id):
         children = db.session.query(ConversionHistory).filter_by(
             parent_id=history.id).all()
         active = [c for c in children
-                  if c.status in ConversionHistory.ACTIVE_STATUSES]
+                  if c.status in ConversionHistory.ACTIVE_STATUSES
+                  or c.status == 'paused']
         if not active:
             return jsonify({'ok': False,
                             'message': 'Playlist has no active tracks to skip'}), 400
         for child in active:
+            was_paused = child.status == 'paused'
             child.status = 'skipped'
             child.progress = 100
             child.error = 'Skipped by user'
+            if was_paused:
+                _drop_pause_state(child)
+            else:
+                _stop_download_proc(child.id)
         db.session.commit()
         _refresh_playlist_parent(history.id)
         return jsonify({'ok': True, 'skipped': len(active)})
 
-    if history.status not in ConversionHistory.ACTIVE_STATUSES:
+    if history.status not in ConversionHistory.ACTIVE_STATUSES \
+            and history.status != 'paused':
         return jsonify({'ok': False,
                         'message': 'Only queued or active conversions can be skipped'}), 400
 
+    was_paused = history.status == 'paused'
     history.status = 'skipped'
     history.progress = 100
     history.error = 'Skipped by user'
+    if was_paused:
+        _drop_pause_state(history)
+    else:
+        _stop_download_proc(history.id)
     db.session.commit()
     if history.parent_id:
         _refresh_playlist_parent(history.parent_id)
@@ -3471,6 +3616,27 @@ def pause_job(conversion_id):
     history = db.session.get(ConversionHistory, conversion_id)
     if not history:
         return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    if history.is_playlist:
+        children = db.session.query(ConversionHistory).filter_by(
+            parent_id=history.id).all()
+        active = [c for c in children
+                  if c.status in ('downloading', 'converting', 'pending')]
+        if not active:
+            return jsonify({'ok': False,
+                            'message': 'Playlist has no active tracks to pause'}), 400
+        for child in active:
+            with _paused_lock:
+                _paused_jobs.add(child.id)
+                proc = _active_downloads.get(child.id)
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            child.status = 'paused'
+        db.session.commit()
+        _refresh_playlist_parent(history.id)
+        return jsonify({'ok': True, 'paused': len(active)})
     if history.status not in ('downloading', 'converting', 'pending'):
         return jsonify({'ok': False,
                         'message': 'Only active conversions can be paused'}), 400
@@ -3496,6 +3662,23 @@ def resume_job(conversion_id):
     history = db.session.get(ConversionHistory, conversion_id)
     if not history:
         return jsonify({'ok': False, 'message': 'Conversion not found'}), 404
+    if history.is_playlist:
+        children = db.session.query(ConversionHistory).filter_by(
+            parent_id=history.id).all()
+        paused = [c for c in children if c.status == 'paused']
+        if not paused:
+            return jsonify({'ok': False,
+                            'message': 'Playlist has no paused tracks to resume'}), 400
+        for child in paused:
+            with _paused_lock:
+                _paused_jobs.discard(child.id)
+            child.status = 'pending'
+            if not _queue_has(child.id):
+                _conversion_queue.put(child.id)
+        db.session.commit()
+        _ensure_worker()
+        _refresh_playlist_parent(history.id)
+        return jsonify({'ok': True, 'resumed': len(paused)})
     if history.status != 'paused':
         return jsonify({'ok': False,
                         'message': 'Only paused conversions can be resumed'}), 400

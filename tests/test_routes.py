@@ -5183,3 +5183,129 @@ def test_update_check_custom_shape(client, monkeypatch):
     assert data['update_available'] is True
     assert data['latest'] == 'v99.0'
     assert data['url'] == 'https://example.com/dl'
+
+
+def test_concurrent_update_gets_409(client):
+    assert convert_module._claim_update() is True
+    try:
+        resp = client.post('/api/helpers/update-ytdlp')
+        assert resp.status_code == 409
+        assert 'already in progress' in resp.get_json()['message']
+        resp = client.post('/api/update-install')
+        # Unfrozen dev run answers 400 before touching the lock; a frozen
+        # build mid-update would answer 409. Either is a safe refusal.
+        assert resp.status_code in (400, 409)
+    finally:
+        convert_module._release_update()
+    # Lock released again afterwards.
+    assert convert_module._claim_update() is True
+    convert_module._release_update()
+
+
+def test_skip_paused_cleans_up(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/sp', format='FLAC',
+            output_path=str(outdir), status='paused'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sp').first()
+        row_id = row.id
+        convert_module._paused_jobs.add(row_id)
+    partial = outdir / f'.Me at the zoo_{row_id}.tmp.part'
+    partial.write_bytes(b'partial-bytes')
+    assert client.get(f'/api/skip/{row_id}').get_json() == {
+        'ok': True, 'skipped': 1}
+    with client.application.app_context():
+        assert db.session.get(ConversionHistory, row_id).status == 'skipped'
+        assert row_id not in convert_module._paused_jobs
+    assert not partial.exists()
+
+
+def test_cleanup_partials_only_job_tmps(tmp_path):
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    (outdir / '.song_99.tmp').write_bytes(b'a')
+    (outdir / '.song_99.tmp.part').write_bytes(b'b')
+    (outdir / '.song_99.tmp.en.vtt').write_bytes(b'c')
+    (outdir / '.other_100.tmp').write_bytes(b'd')
+    (outdir / 'song.flac').write_bytes(b'fLaC')
+    (outdir / '.hidden').write_bytes(b'h')
+    convert_module._cleanup_partials(str(outdir), 99)
+    remaining = sorted(p.name for p in outdir.iterdir())
+    assert remaining == ['.hidden', '.other_100.tmp', 'song.flac']
+    convert_module._cleanup_partials(str(tmp_path / 'nope'), 99)
+    convert_module._cleanup_partials('', 99)
+
+
+def test_playlist_pause_resume_children(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    with client.application.app_context():
+        parent = ConversionHistory(
+            url='https://youtu.be/pp', format='FLAC',
+            output_path='/tmp/pp', status='downloading',
+            is_playlist=True, item_count=2)
+        db.session.add(parent)
+        db.session.commit()
+        pid = parent.id
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/pp1', format='FLAC',
+            output_path='/tmp/pp1.flac', status='downloading',
+            parent_id=pid, item_index=0))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/pp2', format='FLAC',
+            output_path='/tmp/pp2.flac', status='completed',
+            parent_id=pid, item_index=1))
+        db.session.commit()
+    assert client.get(f'/api/pause/{pid}').get_json() == {
+        'ok': True, 'paused': 1}
+    with client.application.app_context():
+        active = ConversionHistory.query.filter_by(parent_id=pid).all()
+        assert {c.status for c in active} == {'paused', 'completed'}
+    assert client.get(f'/api/resume/{pid}').get_json() == {
+        'ok': True, 'resumed': 1}
+    with client.application.app_context():
+        active = ConversionHistory.query.filter_by(parent_id=pid).all()
+        assert {c.status for c in active} == {'pending', 'completed'}
+    # Pending children are pausable too.
+    assert client.get(f'/api/pause/{pid}').get_json() == {
+        'ok': True, 'paused': 1}
+    assert client.get(f'/api/pause/999999').status_code == 404
+
+
+def test_app_release_check_remembers_newer(client, monkeypatch):
+    import app.routes.settings as settings_module
+    monkeypatch.setattr(settings_module, '_default_update_feed',
+                        lambda: 'https://example.com/feed.json', raising=False)
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {'version': 'v99.0', 'url': 'https://example.com/dl'}
+
+    monkeypatch.setattr(convert_module.requests, 'get',
+                        lambda url, **kw: FakeResp())
+    from app import APP_VERSION
+    convert_module._check_app_release('https://example.com/feed.json',
+                                      APP_VERSION)
+    data = client.get('/api/health').get_json()
+    assert data['app_update']['version'] == 'v99.0'
+    assert data['app_update']['url'] == 'https://example.com/dl'
+    # Current-or-newer feed clears the nudge.
+    convert_module._check_app_release('https://example.com/feed.json',
+                                      'v99.0')
+    data = client.get('/api/health').get_json()
+    assert data['app_update']['version'] == ''
+
+
+def test_app_release_check_silent_on_failure(monkeypatch):
+    def boom(url, **kw):
+        raise ConnectionError('offline')
+    monkeypatch.setattr(convert_module.requests, 'get', boom)
+    convert_module._check_app_release('https://example.com/feed.json', '1.0.0')
+    with convert_module._latest_app_lock:
+        assert convert_module._latest_app['version'] == ''

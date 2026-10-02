@@ -51,6 +51,7 @@ a = Analysis(
         'itsdangerous',
         'blinker',
         'requests',
+        'send2trash',
         'webview',
         'pystray',
         'PIL',

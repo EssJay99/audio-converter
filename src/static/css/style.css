@@ -50,6 +50,11 @@ body {
     color: #004085;
 }
 
+.status-paused {
+    background-color: #fff3cd;
+    color: #856404;
+}
+
 .status-failed {
     background-color: #f8d7da;
     color: #721c24;

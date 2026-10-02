@@ -96,7 +96,7 @@ jobs:
           # them the installer builds unsigned, exactly as before.
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: scripts\build_windows.bat
+        run: scripts\build_windows.bat "${{ github.ref_name }}"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
