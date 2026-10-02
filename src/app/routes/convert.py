@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
 from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
@@ -1753,10 +1753,12 @@ def _set_autostart(enabled):
             return True, 'Login item updated.'
         if enabled:
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            import shlex
             with open(target, 'w', encoding='utf-8') as f:
                 f.write('[Desktop Entry]\nType=Application\n'
                         'Name=Audio Converter\n'
-                        f'Exec={" ".join(_autostart_command())}\n'
+                        'Exec=' + ' '.join(
+                            shlex.quote(a) for a in _autostart_command()) + '\n'
                         'Terminal=false\nX-GNOME-Autostart-enabled=true\n')
         elif os.path.isfile(target):
             os.remove(target)
@@ -3596,11 +3598,14 @@ def api_prune_missing():
             removed += 1
     db.session.commit()
     orphaned = 0
+    child_counts = dict(
+        db.session.query(ConversionHistory.parent_id,
+                         func.count(ConversionHistory.id)).filter(
+            ConversionHistory.parent_id.isnot(None)).group_by(
+            ConversionHistory.parent_id).all())
     for parent in db.session.query(ConversionHistory).filter_by(
             is_playlist=True).all():
-        remaining = db.session.query(ConversionHistory).filter_by(
-            parent_id=parent.id).count()
-        if remaining == 0:
+        if child_counts.get(parent.id, 0) == 0:
             db.session.delete(parent)
             orphaned += 1
     db.session.commit()

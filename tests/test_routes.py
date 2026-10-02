@@ -3719,13 +3719,10 @@ def test_video_page_video_only(client):
         assert value not in html
 
 
-def test_audio_forms_default_to_audio_with_video_choice(client):
-    # The home form now offers both, but opens on audio with the video
-    # options living in the toggle script (not pre-selected options).
+def test_audio_forms_have_no_video_options(client):
     html = client.get('/').data.decode('utf-8')
-    assert 'name="media"' in html
-    assert 'option value="flac" selected' in html
-    assert 'value="video_mp4"' not in html.split('id="format"')[1].split('</select>')[0]
+    for value in ('video_mp4', 'video_webm', 'video_mkv'):
+        assert value not in html
 
 
 def test_nav_has_video_tab(client):
@@ -5370,11 +5367,10 @@ def test_video_submit_accepted(client, monkeypatch):
         assert job is not None and job.format == 'MP4 Video'
 
 
-def test_home_media_toggle_markers(client):
+def test_home_links_to_video_page(client):
     page = client.get('/').data.decode('utf-8')
-    for marker in ('name="media"', 'mediaAudio', 'mediaVideo',
-                   'video_mp4', 'mediaHint'):
-        assert marker in page
+    assert 'href="/video"' in page
+    assert 'Download the full video' in page
     page = client.get('/settings').data.decode('utf-8')
     assert 'name="video_quality"' in page
 
