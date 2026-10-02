@@ -84,6 +84,17 @@
                         </div>
 
                         <div class="mb-3">
+                            <label class="form-label">What to download</label>
+                            <div class="btn-group w-100" role="group" aria-label="Media type">
+                                <input type="radio" class="btn-check" name="media" id="mediaAudio" value="audio" checked>
+                                <label class="btn btn-outline-primary" for="mediaAudio">Audio only</label>
+                                <input type="radio" class="btn-check" name="media" id="mediaVideo" value="video">
+                                <label class="btn btn-outline-primary" for="mediaVideo">Full video</label>
+                            </div>
+                            <small class="form-text text-muted" id="mediaHint">Just the sound — best quality, smallest files. Great for music.</small>
+                        </div>
+
+                        <div class="mb-3">
                             <label for="format" class="form-label">Output Format</label>
                             <select class="form-select form-control-lg" id="format" name="format" required>
                                 <option value="flac"{% if default_format == 'flac' %} selected{% endif %}>FLAC (Free Lossless Audio Codec)</option>
@@ -124,6 +135,43 @@
                                 submit.textContent = 'Queued... checking status below';
                             });
                         }
+                        // Audio/video choice swaps the format list in place.
+                        const fmt = document.getElementById('format');
+                        const hint = document.getElementById('mediaHint');
+                        const audioOpts = fmt ? Array.from(fmt.options).map((o) => ({
+                            value: o.value, text: o.text, selected: o.selected,
+                        })) : [];
+                        const videoOpts = [
+                            { value: 'video_mp4', text: 'MP4 Video (plays everywhere)' },
+                            { value: 'video_webm', text: 'WebM Video (small files)' },
+                            { value: 'video_mkv', text: 'MKV Video (archival, external players)' },
+                        ];
+                        const showOpts = (opts) => {
+                            if (!fmt) return;
+                            fmt.innerHTML = '';
+                            opts.forEach((o, i) => {
+                                const el = document.createElement('option');
+                                el.value = o.value;
+                                el.textContent = o.text;
+                                el.selected = !!o.selected || i === 0;
+                                fmt.appendChild(el);
+                            });
+                        };
+                        document.querySelectorAll('input[name="media"]').forEach((radio) => {
+                            radio.addEventListener('change', () => {
+                                const video = document.getElementById('mediaVideo').checked;
+                                showOpts(video ? videoOpts : audioOpts.map((o, i) => ({
+                                    value: o.value, text: o.text,
+                                    selected: document.querySelector('#mediaAudio').checked ? o.selected : i === 0,
+                                })));
+                                if (hint) {
+                                    hint.textContent = video
+                                        ? 'Full picture + sound, up to your quality cap in Settings.'
+                                        : 'Just the sound — best quality, smallest files. Great for music.';
+                                }
+                                if (submit) submit.textContent = video ? 'Download Full Video' : 'Convert to Lossless Audio';
+                            });
+                        });
                     });
                 </script>
             </div>

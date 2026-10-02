@@ -135,6 +135,7 @@ _SCHEMA_MIGRATIONS = {
         ('normalize_audio', 'BOOLEAN DEFAULT 0'),
         ('auto_update_ytdlp', 'BOOLEAN DEFAULT 0'),
         ('default_format', 'VARCHAR(20) DEFAULT "flac"'),
+        ('video_quality', 'VARCHAR(10) DEFAULT "1080p"'),
         ('tidal_client_id', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_client_secret', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),

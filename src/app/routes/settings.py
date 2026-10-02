@@ -7,7 +7,7 @@ import requests
 bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression',
-                  'default_format')
+                  'default_format', 'video_quality')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
                   'auto_update_ytdlp',)
@@ -61,6 +61,7 @@ def get_settings_dict():
         'close_behavior': 'ask',
         'tray_icon': True,
         'default_format': 'flac',
+        'video_quality': '1080p',
     }
     user_settings = UserSettings.query.first()
     if user_settings:
@@ -119,6 +120,8 @@ def save_settings():
         data['close_behavior'] = 'ask'
     if data.get('default_format') not in ('flac', 'alac', 'wav', 'ogg_vorbis'):
         data['default_format'] = 'flac'
+    if data.get('video_quality') not in ('720p', '1080p', 'best'):
+        data['video_quality'] = '1080p'
 
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')

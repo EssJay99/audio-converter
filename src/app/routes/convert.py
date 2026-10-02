@@ -1071,7 +1071,8 @@ def convert():
         output_path = effective_output_path()
 
     if not is_valid_format(format_type):
-        flash('Invalid format selected. Use "flac", "alac", "wav", or "ogg_vorbis"', 'error')
+        flash('Invalid format selected. Pick an audio format (flac, alac, wav, ogg_vorbis) '
+              'or a video format (video_mp4, video_webm, video_mkv)', 'error')
         return redirect(url_for('home.index'))
 
     try:
@@ -1938,9 +1939,11 @@ def download_and_convert(url, format_type, output_path, job=None):
 
         expected_duration = getattr(job, 'expected_duration', 0) if job else 0
         expected_title = getattr(job, 'expected_title', '') if job else ''
-        ok, reason = _verify_output(output_file,
-                                    expected_duration=expected_duration or None,
-                                    expected_title=expected_title or None)
+        ok, reason = _verify_output(
+            output_file,
+            expected_duration=expected_duration or None,
+            expected_title=expected_title or None,
+            want_video=_download_kind(job) == 'video')
         if not ok:
             _cleanup(output_file)
             return {'success': False, 'error': reason}
@@ -2464,10 +2467,24 @@ def _download_kind(job):
     return VALID_FORMATS.get(LABEL_TO_KEY.get(job.format, ''), {}).get('kind', 'audio')
 
 
+def _video_quality_cap():
+    """User's video quality cap, defaulting to 1080p (safe for timeouts)."""
+    try:
+        settings = UserSettings.query.first()
+        quality = (getattr(settings, 'video_quality', '1080p') or '1080p').strip()
+    except Exception:
+        return '1080p'
+    return quality if quality in ('720p', '1080p', 'best') else '1080p'
+
+
 def _download_selector(job):
-    # Video is capped at 1080p: 4K re-encodes blow past any sane timeout.
     if _download_kind(job) == 'video':
-        return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+        cap = _video_quality_cap()
+        if cap == 'best':
+            return 'bestvideo+bestaudio/best'
+        height = 720 if cap == '720p' else 1080
+        return (f'bestvideo[height<={height}]+bestaudio/'
+                f'best[height<={height}]/best')
     return 'bestaudio/best'
 
 
@@ -2481,8 +2498,13 @@ def download_audio(url, temp_audio, job=None):
         if _want_sponsorblock():
             base += ['--sponsorblock-remove', 'sponsor,intro,outro,selfpromo,interaction']
         if _want_subtitles():
-            base += ['--write-subs', '--write-auto-subs',
-                     '--sub-langs', 'all,-live_chat', '--convert-subs', 'vtt']
+            # Manual subs in every language, but auto-generated ones only
+            # for a shortlist: 'all' on auto-subs fans out into hundreds of
+            # machine translations (xx-en, …) and gets the IP throttled.
+            base += ['--write-subs', '--sub-langs', 'all,-live_chat',
+                     '--write-auto-subs',
+                     '--sub-langs', 'en,de,es,fr,pt,it,nl,pl,ja,ko,zh-Hans,ar,hi,ru,tr',
+                     '--convert-subs', 'vtt']
     cmd = _ytdlp_command() + base + [url]
 
     proc = None
@@ -2515,6 +2537,7 @@ def download_audio(url, temp_audio, job=None):
                 if _active_downloads.get(job.id) is proc:
                     del _active_downloads[job.id]
 
+    want_video = _download_kind(job) == 'video'
     if proc.returncode != 0 and _is_youtube(url):
         fallback = (_active_privacy_flags() + _ytdlp_net_args()
                     + ['--no-playlist', '-f', selector, '-o', temp_audio,
@@ -2522,16 +2545,20 @@ def download_audio(url, temp_audio, job=None):
         retry = subprocess.run(_ytdlp_command() + fallback,
                                capture_output=True, text=True, timeout=300)
         if retry.returncode == 0:
-            if _normalize_download(temp_audio):
+            if _normalize_download(temp_audio, want_video=want_video):
                 return {'success': True}
-            return {'success': False, 'error': 'No audio file was downloaded'}
+            return {'success': False, 'error': 'No video file was downloaded' if want_video
+                    else 'No audio file was downloaded'}
 
     if proc.returncode != 0:
         return {'success': False, 'error': 'yt-dlp download failed'}
 
-    if _normalize_download(temp_audio):
+    if _normalize_download(temp_audio, want_video=want_video):
         return {'success': True}
 
+    if want_video:
+        return {'success': False,
+                'error': 'No video stream was downloaded (only audio arrived)'}
     return {'success': False, 'error': 'No audio file was downloaded'}
 
 
@@ -2578,25 +2605,68 @@ def _subtitle_tracks(output_path):
     return found
 
 
-def _normalize_download(temp_audio):
+# Extensions yt-dlp leaves next to downloads that are never media.
+_NON_MEDIA_EXTS = frozenset(['.part', '.vtt', '.srt', '.ass', '.lrc',
+                              '.ttml', '.json', '.txt', '.ytdl', '.temp'])
+
+
+def _stream_types(ffmpeg_stderr):
+    """{'audio','video',...} stream kinds parsed from `ffmpeg -i` output."""
+    kinds = set()
+    for match in re.finditer(r'(?im)^\s*Stream #\d+:\d+.*?:\s*(Audio|Video|Subtitle|Data|Attachment)\s*:',
+                             ffmpeg_stderr or ''):
+        kinds.add(match.group(1).lower())
+    return kinds
+
+
+def _has_video_stream(path):
+    """True when ffmpeg sees a video stream in the file."""
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', path],
+            capture_output=True, text=True, timeout=20)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return 'video' in _stream_types(res.stderr or '')
+
+
+def _normalize_download(temp_audio, want_video=False):
     """Resolve the real downloaded file, collapsing merged outputs.
 
     Video merges land as `<temp>.mkv`/`<temp>.mp4` rather than exactly at
     temp_audio; move that back so the rest of the pipeline sees one path.
-    Returns the path, or None when nothing usable arrived.
+    Subtitle sidecars and .part fragments are never mistaken for media,
+    and a video job only accepts a file that actually carries a video
+    stream — otherwise a bare audio part would silently become a fake
+    "video". Returns the path, or None when nothing usable arrived.
     """
+    candidates = []
     if os.path.isfile(temp_audio):
-        return temp_audio
+        candidates.append(temp_audio)
     for candidate in sorted(glob.glob(temp_audio + '.*')):
-        if candidate.endswith('.part'):
+        if os.path.splitext(candidate)[1].lower() in _NON_MEDIA_EXTS:
             continue
-        if os.path.isfile(candidate):
-            try:
-                os.replace(candidate, temp_audio)
-            except OSError:
-                return candidate
-            return temp_audio
+        if candidate not in candidates and os.path.isfile(candidate):
+            candidates.append(candidate)
+    if want_video:
+        for candidate in candidates:
+            if _has_video_stream(candidate):
+                return _adopt_candidate(candidate, temp_audio)
+        return None
+    for candidate in candidates:
+        return _adopt_candidate(candidate, temp_audio)
     return None
+
+
+def _adopt_candidate(candidate, temp_audio):
+    """Move a download candidate to the canonical temp path (or keep it)."""
+    if os.path.abspath(candidate) == os.path.abspath(temp_audio):
+        return temp_audio
+    try:
+        os.replace(candidate, temp_audio)
+    except OSError:
+        return candidate
+    return temp_audio
 
 
 # -------------------------------------------------------------- helpers ----
@@ -5203,16 +5273,20 @@ def _titles_match(expected, actual, threshold=0.4):
     return difflib.SequenceMatcher(None, exp, act).ratio() >= threshold
 
 
-def _verify_output(path, expected_duration=None, expected_title=None):
+def _verify_output(path, expected_duration=None, expected_title=None,
+                   want_video=False):
     """Verify a freshly converted file. Returns (ok, reason).
 
     Checks, in order: the file parses as audio (not corrupted), its length
     matches the expected duration when one is known (not truncated, not a
-    hours-long wrong video), and — for imported tracks — its source title
-    resembles the expected song (not a wrong search hit).
+    hours-long wrong video), video jobs actually carry a video stream (an
+    audio-only file must never ship as a "video"), and — for imported
+    tracks — its source title resembles the expected song.
     """
     if not _is_valid_audio(path):
         return False, 'File is corrupted or unreadable'
+    if want_video and not _has_video_stream(path):
+        return False, 'Finished file has no video stream'
     if expected_duration and expected_duration > 0:
         actual = _probe_duration(path)
         if actual <= 0:

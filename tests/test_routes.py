@@ -3707,11 +3707,13 @@ def test_video_page_video_only(client):
         assert value not in html
 
 
-def test_audio_forms_have_no_video_options(client):
-    for path in ('/', '/convert'):
-        html = client.get(path).data.decode('utf-8')
-        for value in ('video_mp4', 'video_webm', 'video_mkv'):
-            assert value not in html
+def test_audio_forms_default_to_audio_with_video_choice(client):
+    # The home form now offers both, but opens on audio with the video
+    # options living in the toggle script (not pre-selected options).
+    html = client.get('/').data.decode('utf-8')
+    assert 'name="media"' in html
+    assert 'option value="flac" selected' in html
+    assert 'value="video_mp4"' not in html.split('id="format"')[1].split('</select>')[0]
 
 
 def test_nav_has_video_tab(client):
@@ -3947,6 +3949,7 @@ def test_sponsorblock_flags_present_when_on(client, monkeypatch):
             return FakeProc()
 
         monkeypatch.setattr(convert_module.subprocess, 'Popen', fake_popen)
+        monkeypatch.setattr(convert_module, '_has_video_stream', lambda p: False)
         target = '/tmp/opencode-sponsor-test.tmp'
         open(target, 'wb').close()
         try:
@@ -5309,3 +5312,174 @@ def test_app_release_check_silent_on_failure(monkeypatch):
     convert_module._check_app_release('https://example.com/feed.json', '1.0.0')
     with convert_module._latest_app_lock:
         assert convert_module._latest_app['version'] == ''
+
+
+def test_video_quality_selector(client):
+    from app.models import UserSettings
+
+    class FakeJob:
+        format = 'MP4 Video'
+
+    with client.application.app_context():
+        if not UserSettings.query.first():
+            db.session.add(UserSettings(output_path='/tmp/x'))
+            db.session.commit()
+        settings = UserSettings.query.first()
+        settings.video_quality = '1080p'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best')
+        settings.video_quality = '720p'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo[height<=720]+bestaudio/best[height<=720]/best')
+        settings.video_quality = 'best'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo+bestaudio/best')
+        settings.video_quality = 'bogus'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best')
+        assert convert_module._download_selector(None) == 'bestaudio/best'
+
+
+def test_video_submit_accepted(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    resp = client.post('/convert', data={
+        'url': 'https://www.youtube.com/watch?v=abc',
+        'format': 'video_mp4',
+        'output_path': '/tmp/out',
+    })
+    assert resp.status_code == 302
+    with client.application.app_context():
+        job = ConversionHistory.query.order_by(
+            ConversionHistory.created_at.desc()).first()
+        assert job is not None and job.format == 'MP4 Video'
+
+
+def test_home_media_toggle_markers(client):
+    page = client.get('/').data.decode('utf-8')
+    for marker in ('name="media"', 'mediaAudio', 'mediaVideo',
+                   'video_mp4', 'mediaHint'):
+        assert marker in page
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'name="video_quality"' in page
+
+
+def _make_media(tmp_path):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        __import__('pytest').skip('ffmpeg not on PATH')
+    video = tmp_path / 'clip.mp4'
+    subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'testsrc=duration=1:size=128x128:rate=10',
+         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+         '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', str(video)],
+        check=True, timeout=120)
+    audio = tmp_path / 'tone.wav'
+    subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le',
+         str(audio)],
+        check=True, timeout=120)
+    return video, audio
+
+
+def test_normalize_prefers_media_over_subs(tmp_path):
+    video, _audio = _make_media(tmp_path)
+    work = tmp_path / 'dl'
+    work.mkdir()
+    import shutil
+    shutil.copy(str(video), str(work / '.t.tmp.webm'))
+    (work / '.t.tmp.de.vtt').write_text('WEBVTT\n')
+    (work / '.t.tmp.en.vtt').write_text('WEBVTT\n')
+    (work / '.t.tmp.part').write_bytes(b'junk')
+    got = convert_module._normalize_download(str(work / '.t.tmp'))
+    assert got == str(work / '.t.tmp')
+    assert os.path.isfile(str(work / '.t.tmp'))
+    assert not (work / '.t.tmp.webm').exists()
+    assert (work / '.t.tmp.de.vtt').is_file()
+
+
+def test_normalize_video_requires_video_stream(tmp_path):
+    _video, audio = _make_media(tmp_path)
+    work = tmp_path / 'dl'
+    work.mkdir()
+    import shutil
+    # Only an audio part arrived: video jobs must fail, not ship audio.
+    shutil.copy(str(audio), str(work / '.t.tmp.f251.webm'))
+    assert convert_module._normalize_download(
+        str(work / '.t.tmp'), want_video=True) is None
+    # With a real video candidate present it is chosen.
+    shutil.copy(str(_video), str(work / '.t.tmp.mkv'))
+    got = convert_module._normalize_download(
+        str(work / '.t.tmp'), want_video=True)
+    assert got == str(work / '.t.tmp')
+    assert convert_module._has_video_stream(str(work / '.t.tmp')) is True
+    assert convert_module._has_video_stream(str(audio)) is False
+
+
+def test_verify_output_rejects_audioless_video(tmp_path):
+    video, audio = _make_media(tmp_path)
+    ok, _reason = convert_module._verify_output(str(video), want_video=True)
+    assert ok is True
+    ok, reason = convert_module._verify_output(str(audio), want_video=True)
+    assert ok is False
+    assert 'video stream' in reason
+    ok, _reason = convert_module._verify_output(str(audio))
+    assert ok is True
+
+
+def test_stream_types_parsing():
+    kinds = convert_module._stream_types(
+        '  Stream #0:0: Video: h264, yuv420p\n'
+        '  Stream #0:1(eng): Audio: aac, 44100 Hz\n')
+    assert kinds == {'video', 'audio'}
+    assert convert_module._stream_types('no streams') == set()
+
+
+def test_video_subs_use_bounded_auto_langs(client, monkeypatch, tmp_path):
+    import types
+    seen = {}
+
+    class FakeStdout:
+        def readline(self):
+            return ''
+
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = FakeStdout()
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        seen['cmd'] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(convert_module.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(convert_module, '_has_video_stream', lambda p: False)
+    with client.application.app_context():
+        job = ConversionHistory(
+            url='https://www.youtube.com/watch?v=x', format='MP4 Video',
+            output_path=str(tmp_path), status='downloading')
+        db.session.add(job)
+        db.session.commit()
+        job_id = job.id
+        convert_module.download_audio(
+            'https://www.youtube.com/watch?v=x', str(tmp_path / 't.tmp'),
+            job=db.session.get(ConversionHistory, job_id))
+    cmd = seen['cmd']
+    assert '--write-auto-subs' in cmd
+    assert 'all,-live_chat' in cmd  # manual subs stay complete
+    auto_idx = [i for i, a in enumerate(cmd) if a == '--write-auto-subs']
+    assert auto_idx, 'auto subs flag present'
+    auto_langs = cmd[cmd.index('--sub-langs', auto_idx[0]) + 1]
+    assert auto_langs != 'all,-live_chat'
+    assert len(auto_langs.split(',')) <= 20

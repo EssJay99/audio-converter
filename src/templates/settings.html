@@ -98,6 +98,16 @@
                                min="-1" max="10" value="{{ ogg_quality }}">
                         <small class="form-text text-muted">10 is highest quality. 8 is near-transparent.</small>
                     </div>
+
+                    <div class="col-md-6">
+                        <label for="video_quality" class="form-label">Video quality cap</label>
+                        <select class="form-select" id="video_quality" name="video_quality">
+                            <option value="720p" {% if video_quality == '720p' %}selected{% endif %}>720p (fast, small)</option>
+                            <option value="1080p" {% if video_quality == '1080p' %}selected{% endif %}>1080p (recommended)</option>
+                            <option value="best" {% if video_quality == 'best' %}selected{% endif %}>Best available (slow, huge)</option>
+                        </select>
+                        <small class="form-text text-muted">Caps full-video downloads. Higher than 1080p often blows past the track timeout.</small>
+                    </div>
                 </div>
             </div>
 

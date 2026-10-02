@@ -52,6 +52,8 @@ class UserSettings(db.Model):
     auto_update_ytdlp = db.Column(db.Boolean, nullable=False, default=False)
     # Preselected format on the convert forms.
     default_format = db.Column(db.String(20), nullable=False, default='flac')
+    # Video download cap: '720p', '1080p', or 'best' (no cap).
+    video_quality = db.Column(db.String(10), nullable=False, default='1080p')
     # Tidal login (all optional). Client id/secret come from the user's own
     # free app at developer.tidal.com; tokens are filled in by the login flow.
     tidal_client_id = db.Column(db.String(200), nullable=False, default='')
