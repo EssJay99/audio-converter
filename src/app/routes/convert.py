@@ -4890,8 +4890,10 @@ def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
         if result:
             tail = (result.stderr or result.stdout or '')[-300:]
         return {'success': False,
-                'error': f'This site blocks automated reading: {tail}'.strip()
-                or 'This site blocks automated reading.'}
+                'error': f'This site needs JavaScript to reveal its videos: {tail}'.strip()
+                or 'This site needs JavaScript to reveal its videos. '
+                   'If you can get a direct .mp4/.m3u8 link (browser dev '
+                   'tools → Network tab), paste that instead.'}
     try:
         info = json.loads(result.stdout)
     except ValueError:

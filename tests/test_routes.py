@@ -5966,7 +5966,7 @@ def test_generic_collection_resolve(monkeypatch):
     monkeypatch.setattr(convert_module, '_run_ytdlp', fake_fail)
     result = convert_module._resolve_generic_collection('https://media.example/2')
     assert result['success'] is False
-    assert 'blocks' in result['error']
+    assert 'JavaScript' in result['error']
 
 
 def test_generic_series_submit_creates_folder_job(client, tmp_path, monkeypatch):
