@@ -8,7 +8,7 @@ bp = Blueprint('settings', __name__)
 
 SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_quality', 'flac_compression',
                   'default_format', 'video_quality', 'default_video_format',
-                  'finish_action')
+                  'finish_action', 'audio_quality')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
                   'auto_update_ytdlp', 'numbered_filenames', 'nfo_files',)
@@ -66,6 +66,7 @@ def get_settings_dict():
         'video_crf': 23,
         'video_preset': 'veryfast',
         'default_video_format': 'video_mp4',
+        'audio_quality': 'best',
         'finish_action': 'nothing',
     }
     user_settings = UserSettings.query.first()
@@ -129,8 +130,11 @@ def save_settings():
         data['close_behavior'] = 'ask'
     if data.get('default_format') not in ('flac', 'alac', 'wav', 'ogg_vorbis'):
         data['default_format'] = 'flac'
-    if data.get('video_quality') not in ('720p', '1080p', 'best'):
+    if data.get('video_quality') not in ('480p', '720p', '1080p', '2160p',
+                                           'best'):
         data['video_quality'] = '1080p'
+    if data.get('audio_quality') not in ('best', '320', '192', '128'):
+        data['audio_quality'] = 'best'
     data['video_crf'] = _int_from_form(request, 'video_crf', 23, 18, 32)
     data['video_preset'] = request.form.get('video_preset', 'veryfast').strip()
     if data['video_preset'] not in ('ultrafast', 'superfast', 'veryfast',

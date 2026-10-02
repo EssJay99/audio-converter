@@ -80,13 +80,27 @@
                         </div>
 
                         <div class="mb-3">
-                            <label for="quality" class="form-label">Quality</label>
+                            <label for="quality" class="form-label">Video quality</label>
                             <select class="form-select form-control-lg" id="quality" name="quality">
                                 <option value="">As configured (currently {{ video_quality }})</option>
-                                <option value="720p">720p (fast, small)</option>
+                                <option value="480p">480p (small files, fast)</option>
+                                <option value="720p">720p</option>
                                 <option value="1080p">1080p</option>
-                                <option value="best">Best available (slow, huge)</option>
+                                <option value="2160p">4K (huge files, slow)</option>
+                                <option value="best">Best available</option>
                             </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="audio_quality" class="form-label">Sound quality</label>
+                            <select class="form-select form-control-lg" id="audio_quality" name="audio_quality">
+                                <option value="">As configured (currently {{ audio_quality }})</option>
+                                <option value="best">Best available</option>
+                                <option value="320">Up to 320 kbps</option>
+                                <option value="192">Up to 192 kbps</option>
+                                <option value="128">Up to 128 kbps (small files)</option>
+                            </select>
+                            <small class="form-text text-muted">Caps the audio bitrate for video downloads.</small>
                         </div>
 
                         <div class="row g-2 mb-3">
@@ -156,6 +170,8 @@
                         <li class="list-group-item">Video quality follows your cap in Settings › Format Settings (default 1080p).</li>
                 <li class="list-group-item">MP4 and WebM play right in the app's theater mode; MKV downloads for external players.</li>
                 <li class="list-group-item">Every video is verified after conversion — truncated or wrong files are retried automatically.</li>
+                <li class="list-group-item">Beyond YouTube: most video pages work — Vimeo, Dailymotion, series and episode pages. Paste a link and hit Inspect to see if a site reads correctly.</li>
+                <li class="list-group-item">Only download videos you have the right to save.</li>
             </ul>
         </div>
     </div>

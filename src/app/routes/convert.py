@@ -710,10 +710,23 @@ def _check_due_subscriptions():
             db.session.rollback()
 
 
+def _is_generic_subscription(sub):
+    """True when a subscription follows a generic (non-native) series page."""
+    try:
+        if not getattr(sub, 'parent_id', None):
+            return False
+        parent = db.session.get(ConversionHistory, sub.parent_id)
+        return parent is not None and parent.import_source == 'generic'
+    except Exception:
+        return False
+
+
 def _resolve_subscription_urls(sub):
     """Current track URLs for a subscription, via native or import listing."""
     if _is_streaming_playlist_url(sub.url):
         result = resolve_import_urls(sub.url)
+    elif _is_generic_subscription(sub):
+        result = _resolve_generic_collection(sub.url)
     else:
         result = resolve_playlist(sub.url)
     if not result.get('success'):
@@ -1196,13 +1209,17 @@ def video_page():
         settings = UserSettings.query.first()
         video_quality = (getattr(settings, 'video_quality', '1080p')
                          or '1080p')
+        audio_quality = (getattr(settings, 'audio_quality', 'best')
+                         or 'best')
         default_video_format = (getattr(settings, 'default_video_format',
                                         'video_mp4') or 'video_mp4')
     except Exception:
-        video_quality, default_video_format = '1080p', 'video_mp4'
+        video_quality, audio_quality, default_video_format = (
+            '1080p', 'best', 'video_mp4')
     return render_template('video.html',
                            default_output_path=default_output_path,
                            video_quality=video_quality,
+                           audio_quality=audio_quality,
                            default_video_format=default_video_format,
                            request_path='/video')
 
@@ -1225,7 +1242,18 @@ def convert():
         flash('Please provide both a URL and a format', 'error')
         return redirect(url_for('home.index'))
 
-    if not _is_supported_url(url):
+    if not is_valid_format(format_type):
+        flash('Invalid format selected. Pick an audio format (flac, alac, wav, ogg_vorbis) '
+              'or a video format (video_mp4, video_webm, video_mkv)', 'error')
+        return redirect(url_for('home.index'))
+
+    is_video = VALID_FORMATS[format_type].get('kind') == 'video'
+    if is_video:
+        if not _is_supported_video_url(url):
+            flash('That link cannot be used for video — paste a link to a '
+                  'public video page or file.', 'error')
+            return redirect(url_for('home.index'))
+    elif not _is_supported_url(url):
         flash('That link is not from a supported site — use YouTube, '
               'SoundCloud, Spotify, Apple Music, or Tidal', 'error')
         return redirect(url_for('home.index'))
@@ -1233,16 +1261,17 @@ def convert():
     if not output_path:
         output_path = effective_output_path()
 
-    if not is_valid_format(format_type):
-        flash('Invalid format selected. Pick an audio format (flac, alac, wav, ogg_vorbis) '
-              'or a video format (video_mp4, video_webm, video_mkv)', 'error')
-        return redirect(url_for('home.index'))
-
     job_options = {}
-    if VALID_FORMATS[format_type].get('kind') == 'video':
+    if is_video:
         quality = request.form.get('quality', '').strip()
-        if quality in ('720p', '1080p', 'best'):
+        if quality in ('480p', '720p', '1080p', '2160p', 'best'):
             job_options['quality'] = quality
+        audio_quality = request.form.get('audio_quality', '').strip()
+        if audio_quality in ('best', '320', '192', '128'):
+            job_options['audio_quality'] = audio_quality
+        audio_quality = request.form.get('audio_quality', '').strip()
+        if audio_quality in ('320', '192', '128'):
+            job_options['audio_quality'] = audio_quality
         for key in ('subtitles', 'sponsorblock', 'normalize'):
             choice = request.form.get(key, '').strip()
             if choice in ('on', 'off'):
@@ -1288,6 +1317,49 @@ def convert():
             else:
                 flash('Collection queued. Each track will be saved according to your organization preference.', 'info')
         return redirect(url_for('home.index'))
+
+    if is_video and not _is_collection_url(url) and not is_import:
+        # Unknown video page: it may be a series/listing page on a generic
+        # media site. Resolve it here (bounded, fast flat listing); several
+        # episodes become a folder job, anything else falls through to a
+        # single download below.
+        try:
+            generic = _resolve_generic_collection(url)
+        except Exception:
+            generic = {'success': False}
+        if generic.get('success') and len(generic.get('urls') or []) > 1:
+            title = generic.get('title') or 'Videos'
+            if organization == 'flat':
+                folder = output_path
+            else:
+                folder = unique_folder(
+                    output_path if os.path.isdir(output_path)
+                    else os.path.dirname(output_path) or output_path,
+                    sanitize_filename(title))
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except Exception as e:
+                flash(f'Cannot create output directory: {str(e)}', 'error')
+                return redirect(url_for('home.index'))
+            parent = ConversionHistory(
+                url=url,
+                format=VALID_FORMATS[format_type]['label'],
+                output_path=folder,
+                status='downloading',
+                progress=0,
+                is_playlist=True,
+                item_count=len(generic['urls']),
+                playlist_organization=organization,
+                playlist_title=title,
+                import_source='generic',
+                job_options=json.dumps(job_options),
+            )
+            db.session.add(parent)
+            db.session.commit()
+            _append_children(parent, generic['urls'], title, folder)
+            _refresh_playlist_parent(parent.id)
+            flash(f'Series queued: {len(generic["urls"])} videos from “{title}”.', 'info')
+            return redirect(url_for('home.index'))
 
     history = ConversionHistory(
         url=url,
@@ -2298,6 +2370,24 @@ def _is_supported_url(url):
                for suffix in _SUPPORTED_HOST_SUFFIXES)
 
 
+def _is_supported_video_url(url):
+    """Anything the video pipeline may fetch: known hosts, plus any
+    public web URL for yt-dlp's generic extractor (Vimeo, Dailymotion,
+    media sites, direct files...). Intranet/private targets stay rejected
+    via the public-URL check, so this never becomes an SSRF hole."""
+    if _is_supported_url(url):
+        return True
+    try:
+        parts = urlparse(url or '')
+    except Exception:
+        return False
+    if parts.scheme not in ('http', 'https'):
+        return False
+    if not (parts.hostname or ''):
+        return False
+    return _is_public_http_url(url)
+
+
 def _is_public_http_url(url, timeout=5):
     """True when a URL is safe for the server itself to fetch.
 
@@ -2878,25 +2968,43 @@ def _want_numbered_names():
 def _video_quality_cap(job=None):
     """Video quality cap: per-submit override wins, else the setting."""
     override = _job_option(job, 'quality')
-    if override in ('720p', '1080p', 'best'):
+    if override in ('480p', '720p', '1080p', '2160p', 'best'):
         return override
     try:
         settings = UserSettings.query.first()
         quality = (getattr(settings, 'video_quality', '1080p') or '1080p').strip()
     except Exception:
         return '1080p'
-    return quality if quality in ('720p', '1080p', 'best') else '1080p'
+    return quality if quality in ('480p', '720p', '1080p', '2160p', 'best') else '1080p'
+
+
+def _audio_quality_cap(job=None):
+    """Sound ceiling for video jobs: per-submit override wins, else the
+    setting. 'best' keeps whatever the site serves; a kbps number caps the
+    audio bitrate (smaller files). Audio-only conversions always take the
+    best source since they re-encode it anyway."""
+    override = _job_option(job, 'audio_quality')
+    if override in ('320', '192', '128'):
+        return override
+    try:
+        settings = UserSettings.query.first()
+        quality = (getattr(settings, 'audio_quality', 'best') or 'best').strip()
+    except Exception:
+        return 'best'
+    return quality if quality in ('320', '192', '128') else 'best'
 
 
 def _download_selector(job):
-    if _download_kind(job) == 'video':
-        cap = _video_quality_cap(job)
-        if cap == 'best':
-            return 'bestvideo+bestaudio/best'
-        height = 720 if cap == '720p' else 1080
-        return (f'bestvideo[height<={height}]+bestaudio/'
-                f'best[height<={height}]/best')
-    return 'bestaudio/best'
+    if _download_kind(job) != 'video':
+        return 'bestaudio/best'
+    vcap = _video_quality_cap(job)
+    acap = _audio_quality_cap(job)
+    audio_sel = 'bestaudio' if acap == 'best' else f'bestaudio[abr<={acap}]/bestaudio'
+    if vcap == 'best':
+        return f'bestvideo+{audio_sel}/best'
+    height = {'480p': 480, '720p': 720, '2160p': 2160}.get(vcap, 1080)
+    return (f'bestvideo[height<={height}]+{audio_sel}/'
+            f'best[height<={height}]/best')
 
 
 def download_audio(url, temp_audio, job=None):
@@ -4761,6 +4869,68 @@ def _is_collection_url(url):
     return False
 
 
+def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
+    """List episode/video URLs on a generic series or listing page.
+
+    Same flat-playlist machinery as native playlists, but driven by
+    yt-dlp's generic extractor so series pages on media sites resolve to
+    their episodes. Returns {'success', 'title', 'urls'}; a single video
+    page yields exactly one URL (the page itself).
+    """
+    try:
+        result = _run_ytdlp(
+            ['--no-warnings', '--flat-playlist', '--dump-single-json',
+             '--playlist-end', str(max_items), url],
+            url, timeout=60,
+        )
+    except Exception as e:
+        return {'success': False, 'error': f'Could not read that page: {str(e)}'}
+    if result is None or result.returncode != 0:
+        tail = ''
+        if result:
+            tail = (result.stderr or result.stdout or '')[-300:]
+        return {'success': False,
+                'error': f'This site blocks automated reading: {tail}'.strip()
+                or 'This site blocks automated reading.'}
+    try:
+        info = json.loads(result.stdout)
+    except ValueError:
+        return {'success': False, 'error': 'That page gave unreadable data.'}
+    if not isinstance(info, dict):
+        return {'success': False, 'error': 'That page gave unreadable data.'}
+    entries = info.get('entries')
+    if not entries:
+        # A single video page: just this URL.
+        return {'success': True, 'title': str(info.get('title') or '').strip(),
+                'urls': [url]}
+    try:
+        host = (urlparse(url).hostname or '').lower()
+    except Exception:
+        host = ''
+    title = (str(info.get('title') or '').strip()
+             or (f'Videos from {host}' if host else 'Videos'))
+    urls = []
+    seen = set()
+    for entry in entries:
+        if not entry or not isinstance(entry, dict):
+            continue
+        track_url = entry.get('webpage_url') or entry.get('url') or ''
+        track_url = str(track_url).strip()
+        if not track_url.startswith(('http://', 'https://')):
+            continue
+        track_url = sanitize_url(track_url)
+        if track_url in seen:
+            continue
+        seen.add(track_url)
+        urls.append(track_url)
+        if len(urls) >= max_items:
+            break
+    if not urls:
+        return {'success': False,
+                'error': 'No downloadable videos found on that page.'}
+    return {'success': True, 'title': title, 'urls': urls}
+
+
 def resolve_playlist(url, max_items=PLAYLIST_MAX_ITEMS):
     """List the track URLs in a playlist without downloading each one.
 
@@ -5573,9 +5743,9 @@ def api_inspect():
     url = sanitize_url(raw_url) if _privacy_on() else raw_url
     if not url:
         return jsonify({'ok': False, 'message': 'Paste a link first.'}), 400
-    if not _is_supported_url(url):
+    if not _is_supported_video_url(url):
         return jsonify({'ok': False,
-                        'message': 'That link is not from a supported site.'}), 400
+                        'message': 'That link cannot be used for video.'}), 400
     if _is_collection_url(url) or _is_streaming_playlist_url(url):
         return jsonify({'ok': False,
                         'message': 'Single videos only — playlists queue directly.'}), 400

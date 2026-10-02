@@ -158,6 +158,7 @@ _SCHEMA_MIGRATIONS = {
         ('auto_update_ytdlp', 'BOOLEAN DEFAULT 0'),
         ('default_format', 'VARCHAR(20) DEFAULT "flac"'),
         ('video_quality', 'VARCHAR(10) DEFAULT "1080p"'),
+        ('audio_quality', 'VARCHAR(10) DEFAULT "best"'),
         ('video_crf', 'INTEGER DEFAULT 23'),
         ('video_preset', 'VARCHAR(20) DEFAULT "veryfast"'),
         ('default_video_format', 'VARCHAR(20) DEFAULT "video_mp4"'),

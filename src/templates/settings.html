@@ -102,11 +102,24 @@
                     <div class="col-md-6">
                         <label for="video_quality" class="form-label">Video quality cap</label>
                         <select class="form-select" id="video_quality" name="video_quality">
-                            <option value="720p" {% if video_quality == '720p' %}selected{% endif %}>720p (fast, small)</option>
+                            <option value="480p" {% if video_quality == '480p' %}selected{% endif %}>480p (fast, small)</option>
+                            <option value="720p" {% if video_quality == '720p' %}selected{% endif %}>720p</option>
                             <option value="1080p" {% if video_quality == '1080p' %}selected{% endif %}>1080p (recommended)</option>
-                            <option value="best" {% if video_quality == 'best' %}selected{% endif %}>Best available (slow, huge)</option>
+                            <option value="2160p" {% if video_quality == '2160p' %}selected{% endif %}>4K (huge files, slow)</option>
+                            <option value="best" {% if video_quality == 'best' %}selected{% endif %}>Best available</option>
                         </select>
                         <small class="form-text text-muted">Caps full-video downloads. Higher than 1080p often blows past the track timeout.</small>
+                    </div>
+
+                    <div class="col-md-6">
+                        <label for="audio_quality" class="form-label">Sound quality for videos</label>
+                        <select class="form-select" id="audio_quality" name="audio_quality">
+                            <option value="best" {% if audio_quality == 'best' %}selected{% endif %}>Best available</option>
+                            <option value="320" {% if audio_quality == '320' %}selected{% endif %}>Up to 320 kbps</option>
+                            <option value="192" {% if audio_quality == '192' %}selected{% endif %}>Up to 192 kbps</option>
+                            <option value="128" {% if audio_quality == '128' %}selected{% endif %}>Up to 128 kbps</option>
+                        </select>
+                        <small class="form-text text-muted">Caps the audio bitrate on video downloads. Audio-only conversions always take the best source.</small>
                     </div>
 
                     <div class="col-md-6">

@@ -67,6 +67,8 @@ class UserSettings(db.Model):
     nfo_files = db.Column(db.Boolean, nullable=False, default=False)
     # Video download cap: '720p', '1080p', or 'best' (no cap).
     video_quality = db.Column(db.String(10), nullable=False, default='1080p')
+    # Sound ceiling for video downloads: 'best' or a kbps cap.
+    audio_quality = db.Column(db.String(10), nullable=False, default='best')
     # Tidal login (all optional). Client id/secret come from the user's own
     # free app at developer.tidal.com; tokens are filled in by the login flow.
     tidal_client_id = db.Column(db.String(200), nullable=False, default='')

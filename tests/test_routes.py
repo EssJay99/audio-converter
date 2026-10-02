@@ -5634,8 +5634,13 @@ def test_inspect_endpoint(client, monkeypatch):
                        json={'url': 'https://www.youtube.com/watch?v=x'}).get_json()
     assert data['ok'] is True
     assert data['title'] == 'Song' and data['duration'] == 200
+    # Generic public sites pass the video gate (the download may still fail).
     data = client.post('/api/inspect',
-                       json={'url': 'https://evil.com/x'})
+                       json={'url': 'https://evil.com/x'}).get_json()
+    assert data['ok'] is True
+    # Intranet targets are still refused.
+    data = client.post('/api/inspect',
+                       json={'url': 'http://127.0.0.1/x'})
     assert data.status_code == 400
     data = client.post('/api/inspect',
                        json={'url': 'https://www.youtube.com/playlist?list=x'})
@@ -5859,3 +5864,178 @@ def test_org_settings_round_trip(client):
     for marker in ('name="finish_action"', 'name="numbered_filenames"',
                    'name="nfo_files"'):
         assert marker in page
+
+
+def test_video_allowlist_gating():
+    assert convert_module._is_supported_video_url(
+        'https://www.youtube.com/watch?v=x') is True
+    assert convert_module._is_supported_video_url(
+        'https://soundcloud.com/a/t') is True
+    assert convert_module._is_supported_video_url('file:///etc/passwd') is False
+    assert convert_module._is_supported_video_url('ftp://x/y') is False
+    assert convert_module._is_supported_video_url('http://127.0.0.1/x') is False
+    assert convert_module._is_supported_video_url('http://localhost:8080/x') is False
+    assert convert_module._is_supported_video_url('not a url') is False
+
+
+def test_video_allowlist_generic_public(monkeypatch):
+    monkeypatch.setattr(convert_module, '_is_public_http_url',
+                        lambda url, timeout=5: url == 'https://media.example/v/1')
+    assert convert_module._is_supported_video_url(
+        'https://media.example/v/1') is True
+    assert convert_module._is_supported_video_url(
+        'https://other.example/v/1') is False
+
+
+def test_convert_video_generic_and_blocked(client, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    monkeypatch.setattr(convert_module, '_is_public_http_url',
+                        lambda u, timeout=5: 'media.example' in u)
+    monkeypatch.setattr(convert_module, '_resolve_generic_collection',
+                        lambda url: {'success': True, 'title': '', 'urls': [url]})
+    resp = client.post('/convert', data={
+        'url': 'https://media.example/v/1', 'format': 'video_mp4',
+        'output_path': '/tmp/out'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        job = ConversionHistory.query.order_by(
+            ConversionHistory.created_at.desc()).first()
+        assert job is not None and job.format == 'MP4 Video'
+        assert not job.is_playlist
+    # Audio formats still reject unknown hosts.
+    resp = client.post('/convert', data={
+        'url': 'https://media.example/v/1', 'format': 'flac',
+        'output_path': '/tmp/out'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        assert ConversionHistory.query.filter_by(format='FLAC').count() == 0
+    # Intranet video URLs are rejected.
+    resp = client.post('/convert', data={
+        'url': 'http://127.0.0.1/v/1', 'format': 'video_mp4',
+        'output_path': '/tmp/out'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        assert ConversionHistory.query.filter(
+            ConversionHistory.url.like('%127.0.0.1%')).count() == 0
+
+
+def test_generic_collection_resolve(monkeypatch):
+    import json as _json
+
+    def fake_run(args, url, timeout):
+        assert '--flat-playlist' in args
+        assert '--playlist-end' in args
+
+        class R:
+            returncode = 0
+            stdout = _json.dumps({
+                'title': 'Series',
+                'entries': [
+                    {'webpage_url': 'https://media.example/ep3'},
+                    {'webpage_url': 'https://media.example/ep1'},
+                    {'url': '/relative/path'},
+                    {'webpage_url': 'https://media.example/ep1'},
+                    None,
+                ]})
+        return R()
+
+    monkeypatch.setattr(convert_module, '_run_ytdlp', fake_run)
+    result = convert_module._resolve_generic_collection('https://media.example/s')
+    assert result['success'] is True
+    assert result['title'] == 'Series'
+    assert result['urls'] == ['https://media.example/ep3',
+                              'https://media.example/ep1']
+
+    def fake_single(args, url, timeout):
+        class R:
+            returncode = 0
+            stdout = _json.dumps({'title': 'One', 'id': 'x'})
+        return R()
+
+    monkeypatch.setattr(convert_module, '_run_ytdlp', fake_single)
+    result = convert_module._resolve_generic_collection('https://media.example/1')
+    assert result['success'] is True and result['urls'] == ['https://media.example/1']
+
+    def fake_fail(args, url, timeout):
+        class R:
+            returncode = 1
+            stdout = ''
+            stderr = 'ERROR: Cloudflare challenge'
+        return R()
+
+    monkeypatch.setattr(convert_module, '_run_ytdlp', fake_fail)
+    result = convert_module._resolve_generic_collection('https://media.example/2')
+    assert result['success'] is False
+    assert 'blocks' in result['error']
+
+
+def test_generic_series_submit_creates_folder_job(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    monkeypatch.setattr(convert_module, '_is_public_http_url',
+                        lambda u, timeout=5: 'media.example' in u)
+    monkeypatch.setattr(convert_module, '_resolve_generic_collection', lambda url: {
+        'success': True, 'title': 'Show',
+        'urls': ['https://media.example/e1', 'https://media.example/e2']})
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    resp = client.post('/convert', data={
+        'url': 'https://media.example/show', 'format': 'video_mp4',
+        'output_path': str(outdir), 'quality': '720p'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        parent = ConversionHistory.query.filter_by(is_playlist=True).one()
+        assert parent.playlist_title == 'Show'
+        assert parent.import_source == 'generic'
+        assert parent.format == 'MP4 Video'
+        children = ConversionHistory.query.filter_by(
+            parent_id=parent.id).order_by(ConversionHistory.item_index).all()
+        assert [c.url for c in children] == ['https://media.example/e1',
+                                             'https://media.example/e2']
+        import json as _json
+        assert _json.loads(children[0].job_options).get('quality') == '720p'
+        assert (outdir / 'Show').is_dir()
+
+
+def test_selector_audio_quality(client):
+    from app.models import UserSettings
+
+    class FakeJob:
+        format = 'MP4 Video'
+        job_options = '{}'
+
+    with client.application.app_context():
+        if not UserSettings.query.first():
+            db.session.add(UserSettings(output_path='/tmp/x'))
+            db.session.commit()
+        settings = UserSettings.query.first()
+        settings.video_quality = '1080p'
+        settings.audio_quality = 'best'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best')
+        settings.audio_quality = '192'
+        db.session.commit()
+        assert convert_module._download_selector(FakeJob()) == (
+            'bestvideo[height<=1080]+bestaudio[abr<=192]/bestaudio/'
+            'best[height<=1080]/best')
+        settings.video_quality = '480p'
+        settings.audio_quality = '128'
+        db.session.commit()
+        sel = convert_module._download_selector(FakeJob())
+        assert 'height<=480' in sel and 'abr<=128' in sel
+
+
+def test_audio_quality_settings_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x', 'audio_quality': '192'})
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        assert UserSettings.query.first().audio_quality == '192'
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'name="audio_quality"' in page
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x', 'audio_quality': 'lossless'})
+    assert resp.status_code == 302
+    with client.application.app_context():
+        assert UserSettings.query.first().audio_quality == 'best'
