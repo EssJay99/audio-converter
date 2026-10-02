@@ -2402,16 +2402,47 @@ def _active_bandwidth_limit(now=None):
     return limit
 
 
+# Request pacing: YouTube throttles bursts (HTTP 429), most famously the
+# hundreds of subtitle requests `--sub-langs all` used to fire. Curated
+# languages plus a beat between subtitle files keeps us under the radar;
+# exponential backoff on HTTP retries recovers gracefully when a limit
+# still bites. No steady-state cost: these only sleep around/failing
+# requests, never media fragments.
+_YTDLP_POLITENESS_FLAGS = [
+    '--sleep-subtitles', '1',
+    '--retry-sleep', 'exp=1:20',
+]
+
+
 def _ytdlp_net_args():
-    """Proxy + speed-limit flags for yt-dlp. Safe without an app context."""
+    """Speed-limit flags for yt-dlp. Safe without an app context.
+
+    The proxy deliberately does NOT travel here: command lines are visible
+    to every local user via `ps`, and proxy URLs often carry credentials.
+    Use _ytdlp_env() for that.
+    """
     args = []
-    proxy = _get_proxy()
-    if proxy:
-        args += ['--proxy', proxy]
     limit = _active_bandwidth_limit()
     if limit > 0:
         args += ['--limit-rate', f'{limit}K']
     return args
+
+
+def _ytdlp_env():
+    """Subprocess environment for yt-dlp, or None for plain inheritance.
+
+    A configured proxy is injected as *proxy environment variables (which
+    yt-dlp honors) instead of a --proxy flag, keeping credentials out of
+    the process table.
+    """
+    proxy = _get_proxy()
+    if not proxy:
+        return None
+    env = dict(os.environ)
+    for key in ('http_proxy', 'https_proxy', 'all_proxy',
+                'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'):
+        env[key] = proxy
+    return env
 
 
 def _disk_ok(directory):
@@ -2439,7 +2470,8 @@ def _run_ytdlp(args, url, timeout):
       litter metadata sidecars next to downloads.
     - ``--no-mark-watched``: never report watch history back.
     """
-    privacy = _active_privacy_flags() + _ytdlp_net_args()
+    privacy = (_active_privacy_flags() + _ytdlp_net_args()
+               + list(_YTDLP_POLITENESS_FLAGS))
     attempts = [privacy + list(args)]
     if _is_youtube(url) and '--extractor-args' not in args:
         attempts.append(privacy + [
@@ -2450,9 +2482,11 @@ def _run_ytdlp(args, url, timeout):
         ] + list(args))
 
     last_result = None
+    env = _ytdlp_env()
     for cmd_args in attempts:
         result = subprocess.run(_ytdlp_command() + cmd_args,
-                                capture_output=True, text=True, timeout=timeout)
+                                capture_output=True, text=True,
+                                timeout=timeout, env=env)
         if result.returncode == 0:
             return result
         last_result = result
@@ -2492,6 +2526,7 @@ def download_audio(url, temp_audio, job=None):
     """Download best-quality audio (or video), reporting live progress."""
     selector = _download_selector(job)
     base = (list(_YTDLP_PRIVACY_FLAGS) + _ytdlp_net_args()
+            + list(_YTDLP_POLITENESS_FLAGS)
             + ['--no-playlist', '--continue', '-f', selector,
                '--newline', '-o', temp_audio])
     if _download_kind(job) == 'video':
@@ -2509,7 +2544,7 @@ def download_audio(url, temp_audio, job=None):
 
     proc = None
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, env=_ytdlp_env())
     if job is not None:
         with _paused_lock:
             _active_downloads[job.id] = proc
@@ -2540,10 +2575,12 @@ def download_audio(url, temp_audio, job=None):
     want_video = _download_kind(job) == 'video'
     if proc.returncode != 0 and _is_youtube(url):
         fallback = (_active_privacy_flags() + _ytdlp_net_args()
+                    + list(_YTDLP_POLITENESS_FLAGS)
                     + ['--no-playlist', '-f', selector, '-o', temp_audio,
                        '--extractor-args', 'youtube:player_client=android_vr,tv,web_embedded', url])
         retry = subprocess.run(_ytdlp_command() + fallback,
-                               capture_output=True, text=True, timeout=300)
+                               capture_output=True, text=True, timeout=300,
+                               env=_ytdlp_env())
         if retry.returncode == 0:
             if _normalize_download(temp_audio, want_video=want_video):
                 return {'success': True}

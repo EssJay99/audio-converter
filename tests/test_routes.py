@@ -1531,10 +1531,22 @@ def test_ytdlp_net_args_proxy_and_rate(client, monkeypatch):
                                     proxy='socks5://127.0.0.1:9050'))
         db.session.commit()
         args = convert_module._ytdlp_net_args()
-    assert '--proxy' in args
-    assert 'socks5://127.0.0.1:9050' in args
     assert '--limit-rate' in args
     assert '500K' in args
+    # Proxy credentials must not appear in argv (visible via ps);
+    # they travel in the subprocess environment instead.
+    assert '--proxy' not in args
+    assert not any('9050' in a for a in args)
+    with client.application.app_context():
+        env = convert_module._ytdlp_env()
+    assert env is not None
+    assert env['https_proxy'] == 'socks5://127.0.0.1:9050'
+    assert env['HTTPS_PROXY'] == 'socks5://127.0.0.1:9050'
+
+
+def test_ytdlp_env_none_without_proxy(client):
+    with client.application.app_context():
+        assert convert_module._ytdlp_env() is None
 
 
 def test_ytdlp_net_args_empty_by_default(client):
@@ -5483,3 +5495,43 @@ def test_video_subs_use_bounded_auto_langs(client, monkeypatch, tmp_path):
     auto_langs = cmd[cmd.index('--sub-langs', auto_idx[0]) + 1]
     assert auto_langs != 'all,-live_chat'
     assert len(auto_langs.split(',')) <= 20
+
+
+def test_politeness_flags_in_commands(client, monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeStdout:
+        def readline(self):
+            return ''
+
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = FakeStdout()
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        seen['cmd'] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(convert_module.subprocess, 'Popen', fake_popen)
+    convert_module.download_audio(
+        'https://www.youtube.com/watch?v=x', str(tmp_path / 't.tmp'),
+        job=None)
+    cmd = seen['cmd']
+    assert '--sleep-subtitles' in cmd
+    assert cmd[cmd.index('--sleep-subtitles') + 1] == '1'
+    assert '--retry-sleep' in cmd
+
+
+def test_host_guard(client):
+    assert client.get('/', base_url='http://localhost/').status_code == 200
+    assert client.get('/', base_url='http://127.0.0.1:57600/').status_code == 200
+    resp = client.get('/', base_url='http://evil.com/')
+    assert resp.status_code == 403
+    assert resp.get_json()['ok'] is False
+    resp = client.get('/', base_url='http://127.0.0.1.evil.com/')
+    assert resp.status_code == 403

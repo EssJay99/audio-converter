@@ -78,6 +78,27 @@ def _security_headers(response):
     return response
 
 
+@app.before_request
+def _local_host_only():
+    """Refuse requests addressed anywhere but this machine.
+
+    The server binds 127.0.0.1, but a rebinding or forwarded Host could
+    otherwise make the browser treat it as a foreign origin. Only
+    loopback names (with any port) get through.
+    """
+    from flask import request as _request
+    host = (_request.host or '').lower()
+    if host.startswith('['):
+        name = host.split(']')[0].lstrip('[')
+    elif host.count(':') > 1:
+        name = host  # malformed IPv6 literal: reject below
+    else:
+        name = host.split(':')[0]
+    if name not in ('127.0.0.1', 'localhost', '::1'):
+        return {'ok': False,
+                'message': 'This app only answers on localhost.'}, 403
+
+
 from app.models import db
 
 db.init_app(app)

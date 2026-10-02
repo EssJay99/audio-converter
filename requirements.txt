@@ -3,6 +3,7 @@ Flask-SQLAlchemy==3.0.5
 requests==2.34.2
 urllib3>=2.8
 yt-dlp>=2024.1.1
+curl-cffi>=0.10
 python-dotenv==1.2.4
 flask-wtf>=1.2.0
 send2trash>=1.8
