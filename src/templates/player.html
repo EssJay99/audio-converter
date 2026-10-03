@@ -64,39 +64,6 @@
                     <h5>Recently Played</h5>
                     <ul id="tabRecent" class="list-group list-group-flush tab-queue"></ul>
                 </div>
-
-                <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                    <h5>Playback</h5>
-                    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-                        <label class="small text-muted" for="appPlayerFadeSecs">Fade-out</label>
-                        <select id="appPlayerFadeSecs" class="form-select form-select-sm" style="width:auto;" title="Sleep-timer fade length">
-                            <option value="3">3 s</option>
-                            <option value="5">5 s</option>
-                            <option value="8">8 s</option>
-                            <option value="15">15 s</option>
-                        </select>
-                        <div class="form-check ms-2">
-                            <input class="form-check-input" type="checkbox" id="appAutoLyrics">
-                            <label class="form-check-label small" for="appAutoLyrics">Auto-show lyrics</label>
-                        </div>
-                    </div>
-                    <form id="tabSaveQueue" class="d-flex gap-2">
-                        <input type="text" id="tabSaveQueueName" class="form-control" placeholder="Save queue as playlist…" maxlength="200" autocomplete="off">
-                        <button type="submit" class="btn btn-outline-primary">Save</button>
-                    </form>
-                </div>
-
-                <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                    <h5>Smart Mixes</h5>
-                    <p class="text-muted small mb-2">Auto-built from your library — no curation needed.</p>
-                    <div id="tabSmart" class="d-flex flex-wrap gap-2"></div>
-                </div>
-
-                <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                    <h5>Duplicates</h5>
-                    <p class="text-muted small mb-2">Same song in more than one folder. Deleting here removes the file from disk.</p>
-                    <div id="tabDupes"><span class="text-muted small">Scanning…</span></div>
-                </div>
             </div>
 
             <div class="col-lg-7">
@@ -142,6 +109,44 @@
                         <button type="button" class="btn btn-sm btn-primary" id="libBulkApply">Apply tags</button>
                         <button type="button" class="btn btn-sm btn-link" id="libBulkClear">Clear</button>
                     </div>
+                </div>
+
+                <div class="row mt-3 g-3">
+                    <div class="col-md-6">
+                        <div class="card p-4 shadow-sm border-0 rounded h-100">
+                            <h5>Smart Mixes</h5>
+                            <p class="text-muted small mb-2">Auto-built from your library — no curation needed.</p>
+                            <div id="tabSmart" class="d-flex flex-wrap gap-2"></div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card p-4 shadow-sm border-0 rounded h-100">
+                            <h5>Playback</h5>
+                            <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                                <label class="small text-muted" for="appPlayerFadeSecs">Fade-out</label>
+                                <select id="appPlayerFadeSecs" class="form-select form-select-sm" style="width:auto;" title="Sleep-timer fade length">
+                                    <option value="3">3 s</option>
+                                    <option value="5">5 s</option>
+                                    <option value="8">8 s</option>
+                                    <option value="15">15 s</option>
+                                </select>
+                                <div class="form-check ms-2">
+                                    <input class="form-check-input" type="checkbox" id="appAutoLyrics">
+                                    <label class="form-check-label small" for="appAutoLyrics">Auto-show lyrics</label>
+                                </div>
+                            </div>
+                            <form id="tabSaveQueue" class="d-flex gap-2">
+                                <input type="text" id="tabSaveQueueName" class="form-control" placeholder="Save queue as playlist…" maxlength="200" autocomplete="off">
+                                <button type="submit" class="btn btn-outline-primary">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h5>Duplicates</h5>
+                    <p class="text-muted small mb-2">Same song in more than one folder. Deleting here removes the file from disk.</p>
+                    <div id="tabDupes"><span class="text-muted small">Scanning…</span></div>
                 </div>
             </div>
         </div>

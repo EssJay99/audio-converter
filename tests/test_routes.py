@@ -6584,3 +6584,14 @@ def test_welcome_tour_markup(client):
         assert marker in page
     # The tour is an overlay, not page content: hidden by default.
     assert 'id="firstRunTour" class="tour-overlay d-none"' in page
+
+
+def test_player_layout_order(client):
+    html = client.get('/player').data.decode('utf-8')
+    lib = html.index('id="libGrid"')
+    # Secondary cards live in the right column, after the library.
+    for marker in ('id="tabSmart"', 'id="tabSaveQueue"', 'id="tabDupes"'):
+        assert html.index(marker) > lib, marker
+    # Now-playing column keeps the core cards.
+    for marker in ('id="tabQueue"', 'id="tabPlaylists"', 'id="tabRecent"'):
+        assert marker in html

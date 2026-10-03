@@ -1615,3 +1615,19 @@ html[data-density="compact"] h3 {
 .tour-dots span.on {
     background: var(--accent, #0d6efd);
 }
+
+/* --- Library empty state --- */
+.lib-empty {
+    padding: 28px 12px;
+    text-align: center;
+    border: 2px dashed var(--bs-border-color, #dee2e6);
+    border-radius: 10px;
+}
+.lib-empty p {
+    max-width: 420px;
+    margin-left: auto;
+    margin-right: auto;
+}
+.lib-empty .d-flex {
+    justify-content: center;
+}

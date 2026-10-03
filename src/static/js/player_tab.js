@@ -90,7 +90,41 @@
         }
         grid.innerHTML = '';
         if (!rows.length) {
-            grid.innerHTML = '<span class="text-muted small">Nothing here yet — convert something first.</span>';
+            if (!library.length && !q) {
+                const empty = document.createElement('div');
+                empty.className = 'lib-empty';
+                const title = document.createElement('h5');
+                title.textContent = 'Your library is empty';
+                empty.appendChild(title);
+                const text = document.createElement('p');
+                text.className = 'text-muted small';
+                text.textContent = 'Convert a link, adopt a folder of files you already own, or drop audio files right here.';
+                empty.appendChild(text);
+                const actions = document.createElement('div');
+                actions.className = 'd-flex flex-wrap gap-2';
+                const convert = document.createElement('a');
+                convert.className = 'btn btn-primary';
+                convert.href = '/';
+                convert.textContent = 'Convert your first track';
+                actions.appendChild(convert);
+                const adopt = document.createElement('button');
+                adopt.type = 'button';
+                adopt.className = 'btn btn-outline-secondary';
+                adopt.textContent = 'Adopt a folder instead';
+                adopt.addEventListener('click', function () {
+                    const form = document.getElementById('libAdoptForm');
+                    if (form) {
+                        form.classList.remove('d-none');
+                        const input = document.getElementById('libAdoptPath');
+                        if (input) input.focus();
+                    }
+                });
+                actions.appendChild(adopt);
+                empty.appendChild(actions);
+                grid.appendChild(empty);
+            } else {
+                grid.innerHTML = '<span class="text-muted small">No tracks match.</span>';
+            }
             return;
         }
         rows.slice(0, libShown).forEach(function (item) {
