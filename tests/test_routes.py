@@ -6393,3 +6393,122 @@ def test_theater_controls_markers(client):
                    'appPicBright', 'appTheaterFit', 'appTheaterSubSize',
                    'appPlayerMute'):
         assert marker in page
+
+
+def test_db_stats_shape(client):
+    data = client.get('/api/db/stats').get_json()
+    assert data['ok'] is True
+    assert data['bytes'] >= 0
+    assert 'conversion_history' in data['tables']
+    assert isinstance(data['backups'], list)
+
+
+def test_db_snapshot_and_backups(client):
+    data = client.post('/api/db/snapshot').get_json()
+    assert data['ok'] is True and data['name'].endswith('.db')
+    data = client.get('/api/db/stats').get_json()
+    assert len(data['backups']) >= 1
+    name = data['backups'][0]['name']
+    assert client.get(f'/api/db/backups/{name}').status_code == 200
+    assert client.get('/api/db/backups/../x.db').status_code == 404
+    assert client.post(f'/api/db/backups/{name}/delete').get_json() == {'ok': True}
+    names = [b['name'] for b in client.get('/api/db/stats').get_json()['backups']]
+    assert name not in names
+
+
+def test_db_clear_and_factory_reset(client):
+    from app.models import Notice, Subscription
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/c1', format='FLAC',
+            output_path='/tmp/c1.flac', status='completed'))
+        db.session.add(Notice(title='Hi', body='there'))
+        db.session.add(Subscription(url='https://youtu.be/pl', format='FLAC',
+                                    output_path='/tmp/pl'))
+        db.session.commit()
+    data = client.post('/api/db/clear-history').get_json()
+    assert data['ok'] is True
+    with client.application.app_context():
+        assert ConversionHistory.query.count() == 0
+        assert Notice.query.count() == 0
+        assert Subscription.query.count() == 0
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/c2', format='FLAC',
+            output_path='/tmp/c2.flac', status='completed'))
+        db.session.commit()
+    data = client.post('/api/db/factory-reset').get_json()
+    assert data['ok'] is True and data['backup'] is True
+    with client.application.app_context():
+        assert ConversionHistory.query.count() == 0
+
+
+def test_db_restore_round_trip(client, tmp_path):
+    import io
+    import sqlite3
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/keep', format='FLAC',
+            output_path='/tmp/keep.flac', status='completed'))
+        db.session.commit()
+    snap = client.post('/api/db/snapshot').get_json()
+    assert snap['ok'] is True
+    with client.application.app_context():
+        ConversionHistory.query.delete()
+        db.session.commit()
+        assert ConversionHistory.query.count() == 0
+    from app import app as _app
+    backup_path = None
+    with _app.app_context():
+        from app.routes.convert import _backups_dir as _bd
+        d = _bd()
+        assert d is not None
+        backup_path = [f for f in __import__('os').listdir(d)
+                       if f.endswith('.db')][-1]
+        with open(__import__('os').path.join(d, backup_path), 'rb') as f:
+            payload = f.read()
+    data = client.post('/api/db/restore',
+                       data={'file': (io.BytesIO(payload), 'config-20240101-000000.db')},
+                       content_type='multipart/form-data').get_json()
+    assert data['ok'] is True
+    with client.application.app_context():
+        assert ConversionHistory.query.filter_by(
+            url='https://youtu.be/keep').count() == 1
+    bad = client.post('/api/db/restore',
+                      data={'file': (io.BytesIO(b'not a database'), 'x.db')},
+                      content_type='multipart/form-data')
+    assert bad.status_code == 400
+
+
+def test_failed_convert_leaves_no_output(client, tmp_path, monkeypatch):
+    import subprocess as _sp
+    src = tmp_path / 'tone.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    monkeypatch.setattr(convert_module, 'extract_metadata', lambda url: {
+        'title': 'Song', 'duration': 1.0, 'thumbnail': ''})
+    monkeypatch.setattr(convert_module, '_should_skip_duplicates', lambda: False)
+    monkeypatch.setattr(convert_module, 'check_ffmpeg', lambda: True)
+    monkeypatch.setattr(convert_module, '_fetch_thumbnail', lambda url: None)
+
+    def fake_download(url, temp_audio, job=None):
+        import shutil as _sh
+        _sh.copyfile(str(src), temp_audio)
+        return {'success': True}
+
+    monkeypatch.setattr(convert_module, 'download_audio', fake_download)
+    monkeypatch.setattr(convert_module, 'convert_audio_file',
+                        lambda *a, **k: {'success': False,
+                                         'error': 'boom'})
+    with client.application.app_context():
+        job = ConversionHistory(url='https://youtu.be/f1', format='FLAC',
+                                output_path=str(tmp_path), status='downloading')
+        db.session.add(job)
+        db.session.commit()
+        result = convert_module.download_and_convert(
+            job.url, 'flac', str(tmp_path), job)
+    assert result['success'] is False
+    leftovers = [p for p in tmp_path.iterdir()
+                 if p.suffix.lower() in ('.flac', '.tmp') and p.name != 'tone.wav']
+    assert leftovers == []

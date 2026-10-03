@@ -382,6 +382,25 @@
             </div>
             <small id="maintNote" class="text-muted d-block mt-2"></small>
         </div>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h3>Database</h3>
+            <p class="text-muted small">Your library lives in a file on this Mac. Back it up, restore one, or start over — files on disk are never touched by any of these.</p>
+            <div id="dbInfo" class="small mb-2"><span class="text-muted">Loading…</span></div>
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" id="dbSnapshot" class="btn btn-sm btn-outline-secondary">Back up now</button>
+                <a href="/api/backup" class="btn btn-sm btn-outline-secondary">Download backup</a>
+                <button type="button" id="dbClear" class="btn btn-sm btn-outline-warning">Clear history…</button>
+                <button type="button" id="dbReset" class="btn btn-sm btn-outline-danger">Factory reset…</button>
+            </div>
+            <div id="dbBackups" class="mt-2"></div>
+            <small id="dbNote" class="text-muted d-block mt-2"></small>
+            <div class="mt-2 d-flex gap-2 align-items-center flex-wrap">
+                <label class="btn btn-sm btn-outline-secondary mb-0" for="dbRestoreFile">Restore from file…</label>
+                <input type="file" id="dbRestoreFile" accept=".db" class="d-none">
+                <small class="text-muted">Replaces the live database (a backup is taken first).</small>
+            </div>
+        </div>
     </div>
 
     <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
@@ -510,6 +529,132 @@
                 .catch(() => maintNote('Failed.'));
         });
         refreshAutostart();
+        const dbNote = (msg) => {
+            document.getElementById('dbNote').textContent = msg;
+        };
+        const dbToken = () => {
+            const token = document.querySelector('meta[name="csrf-token"]');
+            return token ? token.getAttribute('content') : '';
+        };
+        const dbPost = (url, body, isFile) => {
+            const opts = { method: 'POST', headers: { 'X-CSRFToken': dbToken() } };
+            if (isFile) {
+                const form = new FormData();
+                form.append('file', body);
+                form.append('csrf_token', dbToken());
+                opts.body = form;
+            } else if (body !== undefined) {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.body = JSON.stringify(body);
+            }
+            return fetch(url, opts).then((r) => r.json());
+        };
+        const fmtBytes = (n) => {
+            n = Number(n) || 0;
+            if (n < 1024) return n + ' B';
+            const units = ['KB', 'MB', 'GB'];
+            let u = -1;
+            do { n /= 1024; u += 1; } while (n >= 1024 && u < units.length - 1);
+            return n.toFixed(1) + ' ' + units[u];
+        };
+        const refreshDb = () => {
+            fetch('/api/db/stats')
+                .then((r) => r.json())
+                .then((d) => {
+                    if (!d.ok) {
+                        document.getElementById('dbInfo').textContent = 'Unavailable.';
+                        return;
+                    }
+                    const t = d.tables || {};
+                    const rows = (t.conversion_history || 0) + ' tracks · ' +
+                        (t.subscription || 0) + ' follows · ' +
+                        (t.player_playlist || 0) + ' playlists';
+                    const infoBox = document.getElementById('dbInfo');
+                    infoBox.innerHTML = '';
+                    const info = document.createElement('div');
+                    info.textContent = d.path + ' · ' + fmtBytes(d.bytes) + ' · ' + rows;
+                    info.title = d.path;
+                    infoBox.appendChild(info);
+                    const box = document.getElementById('dbBackups');
+                    box.innerHTML = '';
+                    (d.backups || []).forEach((b) => {
+                        const row = document.createElement('div');
+                        row.className = 'd-flex gap-2 align-items-center small py-1';
+                        const label = document.createElement('span');
+                        label.textContent = b.name + ' (' + fmtBytes(b.bytes) + ')';
+                        row.appendChild(label);
+                        const dl = document.createElement('a');
+                        dl.className = 'btn btn-sm btn-link py-0';
+                        dl.href = '/api/db/backups/' + encodeURIComponent(b.name);
+                        dl.textContent = 'Download';
+                        row.appendChild(dl);
+                        const del = document.createElement('button');
+                        del.type = 'button';
+                        del.className = 'btn btn-sm btn-link py-0 text-danger';
+                        del.textContent = 'Delete';
+                        del.addEventListener('click', () => {
+                            if (!confirm('Delete backup ' + b.name + '?')) return;
+                            dbPost('/api/db/backups/' + encodeURIComponent(b.name) + '/delete')
+                                .then((res) => {
+                                    dbNote(res.ok ? 'Backup deleted.' : (res.message || 'Failed.'));
+                                    refreshDb();
+                                })
+                                .catch(() => dbNote('Failed.'));
+                        });
+                        row.appendChild(del);
+                        box.appendChild(row);
+                    });
+                    if (!(d.backups || []).length) {
+                        box.innerHTML = '<span class="text-muted small">No stored backups yet.</span>';
+                    }
+                })
+                .catch(() => {});
+        };
+        document.getElementById('dbSnapshot').addEventListener('click', () => {
+            dbNote('Backing up…');
+            dbPost('/api/db/snapshot')
+                .then((d) => {
+                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
+                    refreshDb();
+                })
+                .catch(() => dbNote('Failed.'));
+        });
+        document.getElementById('dbClear').addEventListener('click', () => {
+            if (!confirm('Delete all conversion history, follows, and notices? Settings and playlists are kept. Files on disk stay.')) return;
+            dbPost('/api/db/clear-history')
+                .then((d) => {
+                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
+                    refreshDb();
+                })
+                .catch(() => dbNote('Failed.'));
+        });
+        document.getElementById('dbReset').addEventListener('click', () => {
+            if (!confirm('Factory reset: back up, then erase EVERYTHING (history, settings, playlists)? Files on disk stay.')) return;
+            if (!confirm('Really reset? This cannot be undone except from the backup.')) return;
+            dbNote('Resetting…');
+            dbPost('/api/db/factory-reset')
+                .then((d) => {
+                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
+                    refreshDb();
+                    setTimeout(() => window.location.reload(), 1500);
+                })
+                .catch(() => dbNote('Failed.'));
+        });
+        document.getElementById('dbRestoreFile').addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            e.target.value = '';
+            if (!file) return;
+            if (!confirm('Replace the live database with ' + file.name + '? A backup is taken first.')) return;
+            dbNote('Restoring…');
+            dbPost('/api/db/restore', file, true)
+                .then((d) => {
+                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
+                    refreshDb();
+                    if (d.ok) setTimeout(() => window.location.reload(), 1500);
+                })
+                .catch(() => dbNote('Failed.'));
+        });
+        refreshDb();
         document.getElementById('helpersUpdate').addEventListener('click', function () {
             const btn = this;
             btn.disabled = true;

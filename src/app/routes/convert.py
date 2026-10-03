@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
 from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
@@ -145,6 +145,7 @@ def _convert_local_job(job):
         result = convert_audio_file(src, fmt_key, job.output_path, meta,
                                     cover, job)
         if not result.get('success'):
+            _cleanup(job.output_path)
             raise ValueError(result.get('error') or 'Conversion failed')
         duration = _store_file_facts(job, job.output_path)
         if not _job_finish(job, status='completed', progress=100,
@@ -2353,6 +2354,7 @@ def download_and_convert(url, format_type, output_path, job=None):
         result = convert_audio_file(temp_audio, format_type, output_file, meta, cover_file,
                                     job)
         if not result.get('success'):
+            _cleanup(output_file)
             return result
 
         # FLAC/ALAC carry the art inside the file; for OGG/WAV the art is
@@ -4979,6 +4981,292 @@ def backup_database():
     stamp = time.strftime('%Y%m%d-%H%M%S')
     return send_file(tmp_path, as_attachment=True,
                      download_name=f'audio-converter-backup-{stamp}.db')
+
+
+# ------------------------------------------------- database care ----
+# The library database lives next to the app data and can be inspected,
+# backed up, restored, or reset from Settings — no command line needed.
+
+_MANAGED_TABLES = ('conversion_history', 'user_settings', 'subscription',
+                   'player_playlist', 'player_playlist_item', 'notice')
+
+
+def _live_db_path():
+    try:
+        db_path = db.engine.url.database
+    except Exception:
+        return None
+    if not db_path or db_path == ':memory:' or not os.path.isfile(db_path):
+        return None
+    return db_path
+
+
+def _backups_dir(create=False):
+    db_path = _live_db_path()
+    if not db_path:
+        return None
+    backup_dir = os.path.join(os.path.dirname(db_path), 'backups')
+    if create:
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+        except OSError:
+            return None
+    return backup_dir if os.path.isdir(backup_dir) else None
+
+
+def _reset_runtime_state():
+    """Forget everything referencing database rows after a wipe/restore."""
+    for queue in (_conversion_queue, _priority_queue):
+        try:
+            while True:
+                queue.get_nowait()
+        except Exception:
+            pass
+    try:
+        _paused_jobs.clear()
+    except Exception:
+        pass
+    try:
+        _stat_cache.clear()
+    except Exception:
+        pass
+    try:
+        _meta_cache.clear()
+    except Exception:
+        pass
+    try:
+        _progress_cache.clear()
+    except Exception:
+        pass
+    global _resumed_count, _finish_armed
+    _resumed_count = 0
+    _finish_armed = False
+
+
+def _table_counts():
+    counts = {}
+    for table in _MANAGED_TABLES:
+        try:
+            counts[table] = db.session.execute(
+                text(f'SELECT COUNT(*) FROM {table}')).scalar() or 0
+        except Exception:
+            db.session.rollback()
+    return counts
+
+
+@bp.route('/api/db/stats')
+def api_db_stats():
+    """Database size, location, row counts, and available backups."""
+    db_path = _live_db_path()
+    if not db_path:
+        return jsonify({'ok': False, 'message': 'No local database found'}), 404
+    try:
+        total = os.path.getsize(db_path)
+        for suffix in ('-wal', '-shm'):
+            try:
+                total += os.path.getsize(db_path + suffix)
+            except OSError:
+                pass
+    except OSError:
+        total = 0
+    backups = []
+    backup_dir = _backups_dir()
+    if backup_dir:
+        try:
+            for name in sorted(os.listdir(backup_dir), reverse=True):
+                if not re.fullmatch(r'config-\d{8}-\d{6}\.db', name):
+                    continue
+                full = os.path.join(backup_dir, name)
+                try:
+                    backups.append({'name': name,
+                                    'bytes': os.path.getsize(full),
+                                    'created': time.strftime(
+                                        '%Y-%m-%d %H:%M',
+                                        time.localtime(os.path.getmtime(full)))})
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    return jsonify({'ok': True, 'path': db_path, 'bytes': total,
+                    'tables': _table_counts(), 'backups': backups})
+
+
+@bp.route('/api/db/snapshot', methods=['POST'])
+def api_db_snapshot():
+    """Take a timestamped backup now (kept alongside auto-backups)."""
+    from app import _backup_database
+    dest = _backup_database(_live_db_path())
+    if not dest:
+        return jsonify({'ok': False,
+                        'message': 'Backup failed.'}), 500
+    return jsonify({'ok': True, 'name': os.path.basename(dest),
+                    'message': f'Backed up as {os.path.basename(dest)}.'})
+
+
+@bp.route('/api/db/backups/<name>')
+def api_db_backup_download(name):
+    """Download one stored backup. Names are strictly validated."""
+    if not re.fullmatch(r'config-\d{8}-\d{6}\.db', name or ''):
+        abort(404)
+    backup_dir = _backups_dir()
+    if not backup_dir:
+        abort(404)
+    full = os.path.realpath(os.path.join(backup_dir, name))
+    if os.path.dirname(full) != os.path.realpath(backup_dir):
+        abort(404)
+    if not os.path.isfile(full):
+        abort(404)
+    return send_file(full, as_attachment=True, download_name=name)
+
+
+@bp.route('/api/db/backups/<name>/delete', methods=['POST'])
+def api_db_backup_delete(name):
+    """Delete one stored backup."""
+    if not re.fullmatch(r'config-\d{8}-\d{6}\.db', name or ''):
+        return jsonify({'ok': False, 'message': 'Unknown backup.'}), 404
+    backup_dir = _backups_dir()
+    if not backup_dir:
+        return jsonify({'ok': False, 'message': 'No backups found.'}), 404
+    full = os.path.realpath(os.path.join(backup_dir, name))
+    if os.path.dirname(full) != os.path.realpath(backup_dir):
+        return jsonify({'ok': False, 'message': 'Unknown backup.'}), 404
+    try:
+        os.remove(full)
+    except OSError:
+        return jsonify({'ok': False,
+                        'message': 'Could not delete it.'}), 500
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/db/restore', methods=['POST'])
+def api_db_restore():
+    """Replace the live database with an uploaded backup file.
+
+    The upload is validated (real SQLite, expected tables) before it
+    touches anything; the engine is drained and reopened so no restart
+    is needed. Active downloads are dropped — restore on a quiet app.
+    """
+    from app import _setup_db
+    db_path = _live_db_path()
+    if not db_path:
+        return jsonify({'ok': False, 'message': 'No local database found'}), 404
+    upload = request.files.get('file')
+    if upload is None or not (upload.filename or '').endswith('.db'):
+        return jsonify({'ok': False,
+                        'message': 'Choose a .db backup file.'}), 400
+    from app import _backup_database
+    try:
+        _backup_database(db_path)
+    except Exception:
+        pass
+    fd, tmp_path = tempfile.mkstemp(prefix='audio-converter-restore-',
+                                    suffix='.db')
+    os.close(fd)
+    try:
+        upload.save(tmp_path)
+        import sqlite3
+        try:
+            check = sqlite3.connect(f'file:{tmp_path}?mode=ro', uri=True,
+                                    timeout=10)
+            try:
+                tables = {row[0] for row in check.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+            finally:
+                check.close()
+        except Exception:
+            return jsonify({'ok': False,
+                            'message': 'That file is not a database.'}), 400
+        if 'conversion_history' not in tables:
+            return jsonify({'ok': False,
+                            'message': 'Not an app database backup.'}), 400
+        try:
+            db.session.remove()
+            db.engine.dispose()
+        except Exception:
+            pass
+        try:
+            os.replace(tmp_path, db_path)
+            tmp_path = ''
+            for suffix in ('-wal', '-shm', '-journal'):
+                try:
+                    os.remove(db_path + suffix)
+                except OSError:
+                    pass
+        except OSError as e:
+            return jsonify({'ok': False,
+                            'message': f'Could not install it: {str(e)}'}), 500
+        try:
+            with db.engine.begin() as conn:
+                pass
+            _setup_db()
+        except Exception as e:
+            return jsonify({'ok': False,
+                            'message': f'Restored but setup failed: {str(e)}'}), 500
+        _reset_runtime_state()
+    finally:
+        if tmp_path:
+            _cleanup(tmp_path)
+    return jsonify({'ok': True,
+                    'message': 'Database restored. Library reloaded.'})
+
+
+@bp.route('/api/db/clear-history', methods=['POST'])
+def api_db_clear_history():
+    """Delete library data (conversions, follows, notices) but keep
+    settings and user playlists. Files on disk are never touched."""
+    try:
+        for model in (ConversionHistory,):
+            db.session.query(model).delete()
+        from app.models import Subscription, Notice
+        db.session.query(Subscription).delete()
+        db.session.query(Notice).delete()
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'ok': False,
+                        'message': f'Could not clear: {str(e)}'}), 500
+    _reset_runtime_state()
+    return jsonify({'ok': True,
+                    'message': 'Library history cleared. Settings and playlists kept.'})
+
+
+@bp.route('/api/db/factory-reset', methods=['POST'])
+def api_db_factory_reset():
+    """Back up, then wipe every table and compact the file."""
+    from app import _backup_database
+    backup = _backup_database(_live_db_path())
+    try:
+        for table in _MANAGED_TABLES:
+            db.session.execute(text(f'DELETE FROM {table}'))
+        try:
+            db.session.execute(text(
+                "DELETE FROM sqlite_sequence WHERE name IN "
+                "('conversion_history','subscription','player_playlist',"
+                "'player_playlist_item','notice')"))
+        except Exception:
+            pass
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'ok': False,
+                        'message': f'Could not reset: {str(e)}'}), 500
+    _reset_runtime_state()
+    try:
+        import sqlite3
+        db_path = _live_db_path()
+        if db_path:
+            con = sqlite3.connect(db_path, timeout=30)
+            try:
+                con.execute('VACUUM')
+                con.commit()
+            finally:
+                con.close()
+    except Exception:
+        pass
+    message = 'Database reset to empty.'
+    if backup:
+        message += f' Previous data backed up as {os.path.basename(backup)}.'
+    return jsonify({'ok': True, 'message': message, 'backup': bool(backup)})
 
 
 @bp.route('/api/delete-playlist/<int:parent_id>', methods=['POST'])
