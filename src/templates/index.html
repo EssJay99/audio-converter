@@ -43,38 +43,67 @@
 
         <div class="row">
             <div class="col-lg-5">
-                <div class="card p-4 shadow-sm border-0 rounded d-none" id="firstRun">
-                    <h3>Welcome 👋</h3>
-                    <p class="text-muted small">Three quick choices and your first download is on its way. Everything stays on this Mac.</p>
-                    <form method="POST" action="/convert" id="firstRunForm">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <div class="mb-2">
-                            <label class="form-label small" for="firstRunPath">Save music to</label>
-                            <input type="text" class="form-control" id="firstRunPath" name="output_path"
-                                   value="{{ default_output_path }}" data-path-browser autocomplete="off">
+                <div id="firstRunTour" class="tour-overlay d-none" role="dialog" aria-label="Welcome tour">
+                    <div class="tour-card">
+                        <div class="tour-dots" aria-hidden="true">
+                            <span data-tour-dot="0"></span><span data-tour-dot="1"></span><span data-tour-dot="2"></span>
                         </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="firstRunFormat">Format</label>
-                            <select class="form-select" id="firstRunFormat" name="format">
-                                <option value="flac">FLAC — best quality</option>
-                                <option value="alac">ALAC — for Apple devices</option>
-                                <option value="wav">WAV — uncompressed</option>
-                                <option value="ogg_vorbis">OGG — smaller files</option>
-                                <option value="mp3">MP3 — universal</option>
-                                <option value="m4a">M4A — portable</option>
-                                <option value="opus">Opus — smallest</option>
-                            </select>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label small" for="firstRunUrl">Paste a YouTube or SoundCloud link</label>
-                            <input type="text" class="form-control" id="firstRunUrl" name="url" required
-                                   placeholder="https://…" autocomplete="off" spellcheck="false">
-                        </div>
-                        <div class="d-flex gap-2">
-                            <button type="submit" class="btn btn-primary">Download my first track</button>
-                            <button type="button" class="btn btn-link btn-sm" id="firstRunSkip">Skip tour</button>
-                        </div>
-                    </form>
+                        <form method="POST" action="/convert" id="firstRunForm">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div data-tour-step="0">
+                                <h3>Welcome 👋</h3>
+                                <p class="text-muted small">Three quick choices and your first download is on its way. Everything stays on this Mac.</p>
+                                <div class="mb-3">
+                                    <label class="form-label small" for="firstRunPath">Save music to</label>
+                                    <input type="text" class="form-control" id="firstRunPath" name="output_path"
+                                           value="{{ default_output_path }}" data-path-browser autocomplete="off">
+                                </div>
+                                <div class="d-flex gap-2 justify-content-between">
+                                    <button type="button" class="btn btn-link btn-sm tour-skip">Skip tour</button>
+                                    <button type="button" class="btn btn-primary" data-tour-next>Next</button>
+                                </div>
+                            </div>
+                            <div data-tour-step="1" class="d-none">
+                                <h3>Pick a format</h3>
+                                <p class="text-muted small">Lossless for archiving, lossy for portables. You can change this every time.</p>
+                                <div class="mb-3">
+                                    <label class="form-label small" for="firstRunFormat">Format</label>
+                                    <select class="form-select" id="firstRunFormat" name="format">
+                                        <option value="flac">FLAC — best quality</option>
+                                        <option value="alac">ALAC — for Apple devices</option>
+                                        <option value="wav">WAV — uncompressed</option>
+                                        <option value="ogg_vorbis">OGG — smaller files</option>
+                                        <option value="mp3">MP3 — universal</option>
+                                        <option value="m4a">M4A — portable</option>
+                                        <option value="opus">Opus — smallest</option>
+                                    </select>
+                                </div>
+                                <div class="d-flex gap-2 justify-content-between">
+                                    <button type="button" class="btn btn-link btn-sm tour-skip">Skip tour</button>
+                                    <span class="d-flex gap-2">
+                                        <button type="button" class="btn btn-outline-secondary" data-tour-back>Back</button>
+                                        <button type="button" class="btn btn-primary" data-tour-next>Next</button>
+                                    </span>
+                                </div>
+                            </div>
+                            <div data-tour-step="2" class="d-none">
+                                <h3>Paste your first link</h3>
+                                <p class="text-muted small">A YouTube or SoundCloud song, playlist, or channel.</p>
+                                <div class="mb-3">
+                                    <label class="form-label small" for="firstRunUrl">Link</label>
+                                    <input type="text" class="form-control" id="firstRunUrl" name="url" required
+                                           placeholder="https://…" autocomplete="off" spellcheck="false">
+                                </div>
+                                <div class="d-flex gap-2 justify-content-between">
+                                    <button type="button" class="btn btn-link btn-sm tour-skip">Skip tour</button>
+                                    <span class="d-flex gap-2">
+                                        <button type="button" class="btn btn-outline-secondary" data-tour-back>Back</button>
+                                        <button type="submit" class="btn btn-primary">Download</button>
+                                    </span>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
                 </div>
                 <div class="card p-4 shadow-sm border-0 rounded">
                     <h3>Convert Audio</h3>

@@ -6574,3 +6574,13 @@ def test_theme_markers(client):
                    'densityCompact', 'name="mp3_bitrate"',
                    'name="finish_action"'):
         assert marker in page
+
+
+def test_welcome_tour_markup(client):
+    page = client.get('/').data.decode('utf-8')
+    for marker in ('firstRunTour', 'data-tour-step="0"',
+                   'data-tour-step="2"', 'tour-skip', 'data-tour-next',
+                   'data-tour-back', 'firstRunForm', 'firstRunUrl'):
+        assert marker in page
+    # The tour is an overlay, not page content: hidden by default.
+    assert 'id="firstRunTour" class="tour-overlay d-none"' in page

@@ -1582,3 +1582,36 @@ html[data-density="compact"] .lib-grid {
 html[data-density="compact"] h3 {
     font-size: 1.1rem;
 }
+
+/* --- Welcome tour overlay --- */
+.tour-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1090;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    padding: 16px;
+}
+.tour-card {
+    width: min(480px, 100%);
+    background: var(--bs-body-bg, #fff);
+    border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    padding: 24px;
+}
+.tour-dots {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+.tour-dots span {
+    width: 24px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--bs-border-color, #dee2e6);
+}
+.tour-dots span.on {
+    background: var(--accent, #0d6efd);
+}

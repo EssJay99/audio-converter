@@ -1961,25 +1961,48 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
 // Shows once (until the first conversion exists) on Home. Dismissal lasts
 // the browser session; a queued conversion retires it permanently.
 (function firstRun() {
+    // Modal welcome tour: overlay with three steps, skippable anywhere.
+    // Shows once (until the first conversion exists); dismissal lasts the
+    // browser session, a queued conversion retires it permanently.
     function init() {
-        const card = document.getElementById('firstRun');
-        if (!card) return;
+        const overlay = document.getElementById('firstRunTour');
+        if (!overlay) return;
+        const dismiss = () => {
+            overlay.classList.add('d-none');
+            try {
+                sessionStorage.setItem('firstRunDismissed', '1');
+            } catch (err) { /* private mode */ }
+        };
         try {
             if (sessionStorage.getItem('firstRunDismissed')) return;
         } catch (err) { /* private mode */ }
-        const skip = document.getElementById('firstRunSkip');
-        if (skip) {
-            skip.addEventListener('click', () => {
-                card.classList.add('d-none');
-                try {
-                    sessionStorage.setItem('firstRunDismissed', '1');
-                } catch (err) { /* private mode */ }
-            });
-        }
+        const steps = Array.from(overlay.querySelectorAll('[data-tour-step]'));
+        const dots = Array.from(overlay.querySelectorAll('[data-tour-dot]'));
+        let current = 0;
+        const show = (i) => {
+            current = Math.max(0, Math.min(steps.length - 1, i));
+            steps.forEach((el, idx) => el.classList.toggle('d-none', idx !== current));
+            dots.forEach((el, idx) => el.classList.toggle('on', idx <= current));
+        };
+        overlay.querySelectorAll('[data-tour-next]').forEach((btn) => {
+            btn.addEventListener('click', () => show(current + 1));
+        });
+        overlay.querySelectorAll('[data-tour-back]').forEach((btn) => {
+            btn.addEventListener('click', () => show(current - 1));
+        });
+        overlay.querySelectorAll('.tour-skip').forEach((btn) => {
+            btn.addEventListener('click', dismiss);
+        });
+        overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') dismiss();
+        });
         fetch('/api/first-run')
             .then((r) => r.json())
             .then((data) => {
-                if (data.first_run) card.classList.remove('d-none');
+                if (data.first_run) {
+                    show(0);
+                    overlay.classList.remove('d-none');
+                }
             })
             .catch(() => {});
     }
