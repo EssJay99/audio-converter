@@ -6291,3 +6291,105 @@ def test_webm_incompatible_codecs_transcode(tmp_path):
     videos, audios = convert_module._stream_codecs(str(out))
     assert videos[0] in ('vp8', 'vp9', 'av1')
     assert audios[0] in ('vorbis', 'opus')
+
+
+def test_playable_plan_picks_path(monkeypatch):
+    monkeypatch.setattr(
+        convert_module, '_stream_codecs',
+        lambda p: (['h264'], ['aac']) if p.endswith('.mp4') else (['vp9'], ['opus']))
+    assert convert_module._playable_plan('/x/a.mp4') == 'direct'
+    assert convert_module._playable_plan('/x/a.webm') == 'transcode'
+    monkeypatch.setattr(convert_module, '_stream_codecs',
+                        lambda p: (['h264'], ['aac']))
+    assert convert_module._playable_plan('/x/a.mkv') == 'remux'
+    monkeypatch.setattr(convert_module, '_stream_codecs',
+                        lambda p: ([], []))
+    assert convert_module._playable_plan('/x/a.mp4') == 'transcode'
+
+
+def test_playable_endpoint_states(client, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        __import__('pytest').skip('ffmpeg not on PATH')
+    src = tmp_path / 'v.mp4'
+    subprocess.run(
+        [ffmpeg, '-y', '-v', 'error', '-f', 'lavfi',
+         '-i', 'testsrc=duration=1:size=64x64:rate=10',
+         '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac',
+         '-shortest', str(src)],
+        check=True, timeout=120)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/pv', format='MP4 Video',
+            output_path=str(src), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/pv').first().id
+    data = client.get(f'/api/playable/{row}').get_json()
+    assert data == {'ok': True, 'state': 'ready', 'url': f'/audio/{row}'}
+    assert client.get('/api/playable/999999').status_code == 404
+
+
+def test_playable_transcode_flow(client, tmp_path, monkeypatch):
+    track = tmp_path / 'old.avi'
+    track.write_bytes(b'RIFF fake')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/px', format='AVI Video',
+            output_path=str(track), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/px').first().id
+    monkeypatch.setattr(convert_module, '_playable_plan', lambda p: 'transcode')
+    monkeypatch.setattr(convert_module, '_probe_duration', lambda p: 10.0)
+    started = []
+
+    def fake_transcode(row_id, src, dest, duration):
+        started.append(row_id)
+        with convert_module._playable_lock:
+            convert_module._playable_jobs[row_id] = {'state': 'ready',
+                                                     'progress': 100}
+
+    monkeypatch.setattr(convert_module, '_transcode_proxy', fake_transcode)
+    try:
+        data = client.get(f'/api/playable/{row}').get_json()
+        assert data['state'] == 'working'
+        import time as _time
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            data = client.get(f'/api/playable/{row}').get_json()
+            if data.get('state') == 'ready':
+                break
+            _time.sleep(0.05)
+        assert data['state'] == 'ready'
+        assert started == [row]
+    finally:
+        with convert_module._playable_lock:
+            convert_module._playable_jobs.pop(row, None)
+
+
+def test_prune_playables_caps(tmp_path, monkeypatch):
+    import os as _os
+    import tempfile
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
+    target = _os.path.join(str(tmp_path), 'audio-converter-playables')
+    _os.makedirs(target, exist_ok=True)
+    for i in range(4):
+        with open(_os.path.join(target, f'{i}.mp4'), 'wb') as f:
+            f.write(b'x' * 100)
+    monkeypatch.setattr(convert_module, '_PLAYABLE_CAP_FILES', 2)
+    monkeypatch.setattr(convert_module, '_PLAYABLE_CAP_BYTES', 250)
+    assert convert_module._prune_playables() == 2
+    assert len(_os.listdir(target)) == 2
+
+
+def test_theater_controls_markers(client):
+    page = client.get('/player').data.decode('utf-8')
+    for marker in ('appTheaterStatus', 'appTheaterShot', 'appTheaterFull',
+                   'appTheaterPicBtn', 'appTheaterAudio', 'appTheaterChapters',
+                   'appPicBright', 'appTheaterFit', 'appTheaterSubSize',
+                   'appPlayerMute'):
+        assert marker in page

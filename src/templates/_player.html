@@ -102,10 +102,36 @@
             </span>
         </div>
         <video id="appTheaterVideo" controls playsinline preload="metadata"></video>
+        <div id="appTheaterStatus" class="app-theater-status d-none" role="status"></div>
         <div id="appTheaterChapters" class="app-theater-chapters d-none" aria-label="Chapters"></div>
+        <div id="appTheaterPicBox" class="app-theater-picbox d-none" aria-label="Picture settings">
+            <label>Bright <input type="range" id="appPicBright" min="50" max="150" step="1" value="100"></label>
+            <label>Contrast <input type="range" id="appPicContrast" min="50" max="150" step="1" value="100"></label>
+            <label>Saturate <input type="range" id="appPicSaturate" min="0" max="200" step="1" value="100"></label>
+            <label>Fit
+                <select id="appTheaterFit" class="app-player-select">
+                    <option value="contain" selected>Fit</option>
+                    <option value="cover">Fill</option>
+                    <option value="fill">Stretch</option>
+                </select>
+            </label>
+            <label>Subs
+                <select id="appTheaterSubSize" class="app-player-select">
+                    <option value="0.9em">Small</option>
+                    <option value="1em" selected>Medium</option>
+                    <option value="1.3em">Large</option>
+                    <option value="1.6em">Huge</option>
+                </select>
+            </label>
+            <button type="button" id="appPicReset" class="btn btn-sm btn-link">Reset</button>
+        </div>
         <div class="app-theater-foot">
             <a id="appTheaterDownload" class="btn btn-sm btn-success" href="#">Download</a>
             <button type="button" id="appTheaterLyrics" class="btn btn-sm btn-outline-secondary" title="Show lyrics">Lyrics</button>
+            <button type="button" id="appTheaterShot" class="btn btn-sm btn-outline-secondary" title="Save current frame as PNG">Snapshot</button>
+            <button type="button" id="appTheaterFull" class="btn btn-sm btn-outline-secondary" title="Fullscreen">⛶</button>
+            <button type="button" id="appTheaterPicBtn" class="btn btn-sm btn-outline-secondary" title="Picture settings">Picture</button>
+            <select id="appTheaterAudio" class="form-select form-select-sm d-none" style="width:auto;" title="Audio track"></select>
             <span id="appTheaterMeta" class="text-muted small"></span>
         </div>
     </div>

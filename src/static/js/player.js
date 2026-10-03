@@ -172,6 +172,61 @@
                 } catch (err) { /* private mode */ }
             });
         }
+        const shotBtn = $('appTheaterShot');
+        if (shotBtn) shotBtn.addEventListener('click', snapshotFrame);
+        const fullBtn = $('appTheaterFull');
+        if (fullBtn) {
+            fullBtn.addEventListener('click', () => {
+                const overlay = $('appTheater');
+                if (!overlay) return;
+                try {
+                    if (document.fullscreenElement) {
+                        document.exitFullscreen().catch(function () {});
+                    } else if (overlay.requestFullscreen) {
+                        overlay.requestFullscreen().catch(function () {});
+                    }
+                } catch (err) { /* ignore */ }
+            });
+        }
+        const picBtn = $('appTheaterPicBtn');
+        if (picBtn) {
+            picBtn.addEventListener('click', () => {
+                const box = $('appTheaterPicBox');
+                if (box) box.classList.toggle('d-none');
+            });
+        }
+        const picReset = $('appPicReset');
+        if (picReset) {
+            picReset.addEventListener('click', () => {
+                Object.assign(theaterPic, { b: 100, c: 100, s: 100, fit: 'contain', sub: '1em' });
+                syncPicControls();
+                applyTheaterPic();
+            });
+        }
+        ['appPicBright', 'appPicContrast', 'appPicSaturate'].forEach((id, i) => {
+            const slider = $(id);
+            if (slider) {
+                slider.addEventListener('input', () => {
+                    theaterPic[['b', 'c', 's'][i]] = Number(slider.value) || 100;
+                    applyTheaterPic();
+                });
+            }
+        });
+        const fitSel = $('appTheaterFit');
+        if (fitSel) {
+            fitSel.addEventListener('change', () => {
+                theaterPic.fit = fitSel.value || 'contain';
+                applyTheaterPic();
+            });
+        }
+        const subSel = $('appTheaterSubSize');
+        if (subSel) {
+            subSel.addEventListener('change', () => {
+                theaterPic.sub = subSel.value || '1em';
+                applyTheaterPic();
+            });
+        }
+        restoreTheaterPic();
         const pipBtn = $('appTheaterPip');
         if (pipBtn) {
             if (!document.pictureInPictureEnabled) pipBtn.classList.add('d-none');
@@ -763,14 +818,61 @@
                 });
             })
             .catch(function () {});
-        video.src = '/audio/' + item.id;
+        video.dataset.itemId = String(item.id);
+        resolvePlayable(item);
         try {
             video.playbackRate = Player.audio.playbackRate || 1;
         } catch (err) { /* ignore */ }
         overlay.classList.remove('d-none');
         document.body.classList.add('theater-open');
-        const play = video.play();
-        if (play && play.catch) play.catch(function () {});
+        // Playback starts in resolvePlayable once a playable URL is ready.
+    }
+
+    // Resolve a browser-playable stream: direct file, fast remux, or a
+    // background transcode the theater polls until ready.
+    function resolvePlayable(item) {
+        const video = $('appTheaterVideo');
+        if (!video) return;
+        const status = $('appTheaterStatus');
+        const showStatus = (text) => {
+            if (!status) return;
+            status.textContent = text || '';
+            status.classList.toggle('d-none', !text);
+        };
+        fetch('/api/playable/' + item.id)
+            .then(function (r) {
+                if (!r.ok) throw new Error('unplayable');
+                return r.json();
+            })
+            .then(function (data) {
+                if (String(video.dataset.itemId) !== String(item.id)) return;
+                if (data.state === 'ready' && data.url) {
+                    showStatus('');
+                    video.src = data.url;
+                    const play = video.play();
+                    if (play && play.catch) play.catch(function () {});
+                } else if (data.state === 'working') {
+                    showStatus('Preparing playable version… ' +
+                        (data.progress || 0) + '%');
+                    setTimeout(function () {
+                        if (String(video.dataset.itemId) === String(item.id) &&
+                            isTheaterOpen()) {
+                            resolvePlayable(item);
+                        }
+                    }, 3000);
+                } else {
+                    throw new Error('unplayable');
+                }
+            })
+            .catch(function () {
+                if (String(video.dataset.itemId) !== String(item.id)) return;
+                showStatus('');
+                if (typeof toast === 'function') {
+                    toast('This video format will not play here — use Download.', 'info');
+                }
+                const dl = $('appTheaterDownload');
+                if (dl) dl.focus();
+            });
     }
 
     function closeTheater(silent) {
@@ -1388,6 +1490,7 @@
     }
 
     function onTheaterLoaded() {
+        loadAudioTracks();
         const video = $('appTheaterVideo');
         const id = theaterTrackId();
         if (!video || !id) return;
@@ -1798,6 +1901,12 @@
     }
 
     function toggleMute() {
+        const video = $('appTheaterVideo');
+        if (isTheaterOpen() && video) {
+            try { video.muted = !video.muted; } catch (err) {}
+            updateMuteIcon();
+            return;
+        }
         if (!Player.audio) return;
         if (Player.audio.volume > 0) {
             Player.mutedVol = Player.audio.volume;
@@ -1815,7 +1924,17 @@
 
     function updateMuteIcon() {
         const btn = $('appPlayerMute');
-        if (!btn || !Player.audio) return;
+        if (!btn) return;
+        const video = $('appTheaterVideo');
+        if (isTheaterOpen() && video) {
+            let muted = false;
+            try { muted = !!video.muted; } catch (err) {}
+            btn.innerHTML = muted ? '&#128263;' : '&#128266;';
+            btn.title = muted ? 'Unmute (M)' : 'Mute (M)';
+            btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+            return;
+        }
+        if (!Player.audio) return;
         const muted = Player.audio.volume === 0;
         btn.innerHTML = muted ? '&#128263;' : '&#128266;';
         btn.title = muted ? 'Unmute (M)' : 'Mute (M)';
@@ -1851,6 +1970,116 @@
     }
 
     window.AudioLightbox = { open: openLightbox, close: closeLightbox };
+
+    // -------------------------------------------- theater picture ----
+
+    const theaterPic = { b: 100, c: 100, s: 100, fit: 'contain', sub: '1em' };
+
+    function restoreTheaterPic() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('appTheaterPic') || 'null');
+            if (saved && typeof saved === 'object') {
+                if (saved.b) theaterPic.b = Math.max(50, Math.min(150, Number(saved.b)));
+                if (saved.c) theaterPic.c = Math.max(50, Math.min(150, Number(saved.c)));
+                if (saved.s != null) theaterPic.s = Math.max(0, Math.min(200, Number(saved.s)));
+                if (saved.fit) theaterPic.fit = saved.fit;
+                if (saved.sub) theaterPic.sub = saved.sub;
+            }
+        } catch (err) { /* private mode */ }
+        syncPicControls();
+        applyTheaterPic();
+    }
+
+    function syncPicControls() {
+        const map = { appPicBright: theaterPic.b, appPicContrast: theaterPic.c,
+                      appPicSaturate: theaterPic.s };
+        Object.keys(map).forEach((id) => {
+            const el = $(id);
+            if (el) el.value = String(map[id]);
+        });
+        const fit = $('appTheaterFit');
+        if (fit) fit.value = theaterPic.fit;
+        const sub = $('appTheaterSubSize');
+        if (sub) sub.value = theaterPic.sub;
+    }
+
+    function applyTheaterPic() {
+        const video = $('appTheaterVideo');
+        if (video) {
+            video.style.filter = 'brightness(' + (theaterPic.b / 100) + ') ' +
+                'contrast(' + (theaterPic.c / 100) + ') ' +
+                'saturate(' + (theaterPic.s / 100) + ')';
+            video.style.objectFit = theaterPic.fit;
+            try {
+                video.style.setProperty('--cue-size', theaterPic.sub);
+            } catch (err) { /* ignore */ }
+        }
+        try {
+            localStorage.setItem('appTheaterPic', JSON.stringify(theaterPic));
+        } catch (err) { /* private mode */ }
+    }
+
+    function snapshotFrame() {
+        const video = $('appTheaterVideo');
+        if (!video || !video.videoWidth) {
+            if (typeof toast === 'function') toast('No video frame yet.', 'info');
+            return;
+        }
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            canvas.toBlob(function (blob) {
+                if (!blob) {
+                    if (typeof toast === 'function') toast('Snapshot failed.', 'danger');
+                    return;
+                }
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                const title = ($('appTheaterTitle') || {}).textContent || 'frame';
+                a.download = title.replace(/[^\w\- ]+/g, '').trim().slice(0, 60) + '.png';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(function () {
+                    URL.revokeObjectURL(a.href);
+                    a.remove();
+                }, 1000);
+            }, 'image/png');
+        } catch (err) {
+            if (typeof toast === 'function') toast('Snapshot failed.', 'danger');
+        }
+    }
+
+    function loadAudioTracks() {
+        const sel = $('appTheaterAudio');
+        const video = $('appTheaterVideo');
+        if (!sel || !video) return;
+        sel.innerHTML = '';
+        sel.classList.add('d-none');
+        let tracks = null;
+        try {
+            tracks = video.audioTracks || null;
+        } catch (err) {
+            tracks = null;
+        }
+        if (!tracks || tracks.length < 2) return;
+        for (let i = 0; i < tracks.length; i++) {
+            const opt = document.createElement('option');
+            opt.value = String(i);
+            const label = tracks[i].label || tracks[i].language || ('Track ' + (i + 1));
+            opt.textContent = (tracks[i].language ? tracks[i].language + ' — ' : '') + label;
+            if (tracks[i].enabled) opt.selected = true;
+            sel.appendChild(opt);
+        }
+        sel.classList.remove('d-none');
+        sel.onchange = () => {
+            const idx = Number(sel.value) || 0;
+            for (let i = 0; i < tracks.length; i++) {
+                try { tracks[i].enabled = (i === idx); } catch (err) {}
+            }
+        };
+    }
 
     document.addEventListener('DOMContentLoaded', init);
 

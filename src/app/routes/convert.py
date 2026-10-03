@@ -3316,6 +3316,219 @@ def _stream_types(ffmpeg_stderr):
     return kinds
 
 
+# Browser-playable proxy cache: files the <video> tag cannot decode
+# (MKV/AVI/MOV containers, HEVC/VP9-only streams...) are remuxed fast or
+# transcoded in the background to MP4/H.264/AAC, which plays everywhere.
+_PLAYABLE_DIRNAME = 'audio-converter-playables'
+_PLAYABLE_CAP_BYTES = 2 * 1024 * 1024 * 1024
+_PLAYABLE_CAP_FILES = 20
+_playable_jobs = {}
+_playable_lock = threading.Lock()
+
+_DIRECT_VIDEO = frozenset(['h264'])
+_DIRECT_IMAGE = frozenset(['mjpeg', 'png'])
+_DIRECT_AUDIO = frozenset(['aac', 'mp3'])
+
+
+def _playable_path(row_id):
+    return os.path.join(tempfile.gettempdir(), _PLAYABLE_DIRNAME,
+                         f'{int(row_id)}.mp4')
+
+
+def _playable_plan(path):
+    """How to make a file browser-playable: 'direct', 'remux', or 'transcode'.
+
+    Direct means MP4 with web codecs throughout. Remux (seconds) suffices
+    when the streams already fit MP4 and only the container is exotic.
+    Anything else needs a real transcode.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    videos, audios = _stream_codecs(path)
+    if not videos:
+        return 'transcode'
+    if (ext in ('.mp4', '.m4v')
+            and all(v in _DIRECT_VIDEO or v in _DIRECT_IMAGE for v in videos)
+            and all(a in _DIRECT_AUDIO for a in audios)):
+        return 'direct'
+    if (videos[0] in _DIRECT_VIDEO
+            and all(a in _DIRECT_AUDIO or a in ('ac3', 'eac3') for a in audios)):
+        return 'remux'
+    return 'transcode'
+
+
+def _prune_playables():
+    try:
+        cache = os.path.join(tempfile.gettempdir(), _PLAYABLE_DIRNAME)
+        entries = []
+        for name in os.listdir(cache):
+            full = os.path.join(cache, name)
+            try:
+                if os.path.isfile(full):
+                    entries.append((os.path.getmtime(full),
+                                    os.path.getsize(full), full))
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    entries.sort()
+    removed = 0
+    total = sum(size for _mtime, size, _path in entries)
+    while entries and (len(entries) > _PLAYABLE_CAP_FILES
+                       or total > _PLAYABLE_CAP_BYTES):
+        _mtime, size, full = entries.pop(0)
+        try:
+            os.remove(full)
+            removed += 1
+            total -= size
+        except OSError:
+            pass
+    return removed
+
+
+def _remux_proxy(src, dest):
+    """Fast container swap for already-compatible streams."""
+    res = subprocess.run(
+        ['ffmpeg', '-y', '-v', 'error', '-i', src, '-c', 'copy',
+         '-movflags', '+faststart', dest],
+        capture_output=True, text=True, timeout=300)
+    return res.returncode == 0 and os.path.isfile(dest)
+
+
+def _transcode_proxy(row_id, src, dest, duration):
+    """Background H.264/AAC transcode with progress for polling."""
+    try:
+        with _playable_lock:
+            _playable_jobs[row_id] = {'state': 'working', 'progress': 0}
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        # Temp file keeps a real container extension: ffmpeg picks its
+        # muxer from the name and rejects unknown ones like `.part`.
+        tmp = dest + '.tmp.mp4'
+        proc = subprocess.Popen(
+            ['ffmpeg', '-y', '-v', 'error', '-i', src,
+             '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+             '-c:a', 'aac', '-movflags', '+faststart',
+             '-progress', 'pipe:1', '-nostats', tmp],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        out_ms = 0
+        dur_us = max(1, int((duration or 0) * 1000000))
+        try:
+            for line in iter(proc.stdout.readline, ''):
+                if line.startswith('out_time_ms='):
+                    try:
+                        out_ms = int(line.split('=')[1].strip())
+                    except (ValueError, IndexError):
+                        pass
+                    pct = max(0, min(99, int(out_ms * 100 / dur_us)))
+                    with _playable_lock:
+                        state = _playable_jobs.get(row_id)
+                        if state:
+                            state['progress'] = pct
+            proc.wait(timeout=3600)
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+        ok = proc.returncode == 0 and os.path.isfile(tmp)
+        if ok:
+            os.replace(tmp, dest)
+            _prune_playables()
+        else:
+            _cleanup(tmp)
+        with _playable_lock:
+            _playable_jobs[row_id] = {'state': 'ready' if ok else 'failed',
+                                      'progress': 100 if ok else 0}
+    except Exception:
+        try:
+            with _playable_lock:
+                _playable_jobs[row_id] = {'state': 'failed', 'progress': 0}
+        except Exception:
+            pass
+
+
+@bp.route('/api/playable/<int:conversion_id>')
+def api_playable(conversion_id):
+    """A browser-playable URL for any video file.
+
+    {state: ready, url} streams immediately (direct file, fresh remux, or
+    finished transcode). {state: working, progress} means a transcode is
+    running — poll this endpoint. {state: failed} (or 404) keeps the old
+    download-instead fallback.
+    """
+    history = _playable_file_or_404(conversion_id)
+    if not history:
+        abort(404)
+    src = history.output_path or ''
+    if not src or not os.path.isfile(src):
+        abort(404)
+    dest = _playable_path(history.id)
+    try:
+        fresh = (os.path.isfile(dest)
+                 and os.path.getmtime(dest) >= os.path.getmtime(src))
+    except OSError:
+        fresh = False
+    if fresh:
+        return jsonify({'ok': True, 'state': 'ready',
+                        'url': f'/playable/{history.id}'})
+    with _playable_lock:
+        running = _playable_jobs.get(history.id)
+    if running and running.get('state') == 'working':
+        return jsonify({'ok': True, 'state': 'working',
+                        'progress': running.get('progress', 0)})
+    if running and running.get('state') == 'ready':
+        return jsonify({'ok': True, 'state': 'ready',
+                        'url': f'/playable/{history.id}'})
+    if running and running.get('state') == 'failed':
+        # Report once, then forget: the next theater open retries fresh
+        # instead of hot-looping a doomed transcode while polling.
+        with _playable_lock:
+            _playable_jobs.pop(history.id, None)
+        return jsonify({'ok': True, 'state': 'failed'})
+    plan = _playable_plan(src)
+    if plan == 'direct':
+        return jsonify({'ok': True, 'state': 'ready',
+                        'url': f'/audio/{history.id}'})
+    if plan == 'remux':
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            ok = _remux_proxy(src, dest)
+        except Exception:
+            ok = False
+        if ok:
+            _prune_playables()
+            return jsonify({'ok': True, 'state': 'ready',
+                            'url': f'/playable/{history.id}'})
+    try:
+        duration = _probe_duration(src)
+    except Exception:
+        duration = 0
+    with _playable_lock:
+        _playable_jobs[history.id] = {'state': 'working', 'progress': 0}
+    thread = threading.Thread(target=_transcode_proxy,
+                              args=(history.id, src, dest, duration),
+                              daemon=True, name='playable-transcode')
+    thread.start()
+    return jsonify({'ok': True, 'state': 'working', 'progress': 0})
+
+
+@bp.route('/playable/<int:conversion_id>')
+def playable_stream(conversion_id):
+    """Stream a cached browser-playable proxy (Range-enabled for seek)."""
+    history = db.session.get(ConversionHistory, conversion_id)
+    if not history or history.status not in ('completed', 'skipped'):
+        abort(404)
+    dest = _playable_path(history.id)
+    src = history.output_path or ''
+    try:
+        fresh = (os.path.isfile(dest) and os.path.isfile(src)
+                 and os.path.getmtime(dest) >= os.path.getmtime(src))
+    except OSError:
+        fresh = False
+    if not fresh:
+        abort(404)
+    return send_file(dest, conditional=True)
+
+
 def _has_video_stream(path):
     """True when ffmpeg sees a video stream in the file."""
     try:
