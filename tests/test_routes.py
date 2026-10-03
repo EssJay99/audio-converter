@@ -3708,15 +3708,16 @@ def test_player_tab_has_new_sections(client):
 
 # ------------------------------------------------------- video tab ----
 
-def test_video_page_video_only(client):
+def test_video_page_url_form_video_only(client):
     page = client.get('/video')
     assert page.status_code == 200
     html = page.data.decode('utf-8')
+    url_form = html.split('id="format"')[1].split('</select>')[0]
     for value in ('video_mp4', 'video_webm', 'video_mkv'):
-        assert f'value="{value}"' in html
+        assert f'value="{value}"' in url_form
     for value in ('value="flac"', 'value="alac"', 'value="wav"',
                   'value="ogg_vorbis"'):
-        assert value not in html
+        assert value not in url_form
 
 
 def test_audio_forms_have_no_video_options(client):
@@ -3800,17 +3801,6 @@ def test_player_tab_markers_present(client):
 
 
 # ------------------------------------------------------- video tab ----
-
-def test_video_page_video_only(client):
-    page = client.get('/video')
-    assert page.status_code == 200
-    html = page.data.decode('utf-8')
-    for value in ('video_mp4', 'video_webm', 'video_mkv'):
-        assert f'value="{value}"' in html
-    for value in ('value="flac"', 'value="alac"', 'value="wav"',
-                  'value="ogg_vorbis"'):
-        assert value not in html
-
 
 def test_theater_markup_present(client):
     for path in ('/', '/player'):
@@ -6247,3 +6237,57 @@ def test_ogg_mono_source_converts(client, tmp_path, monkeypatch):
             {'title': 'Mono'}, None, row)
     assert result == {'success': True}
     assert (tmp_path / 'mono.ogg').stat().st_size > 0
+
+
+def test_video_page_local_convert_markers(client):
+    page = client.get('/video').data.decode('utf-8')
+    for marker in ('fileDropzone', 'fileBrowseInput', 'localFormat',
+                   'Convert Local Videos'):
+        assert marker in page
+
+
+def test_upload_convert_video_target(client, tmp_path):
+    import io
+    import subprocess as _sp
+    src = tmp_path / 'clip.mp4'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'testsrc=duration=1:size=128x128:rate=10',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+             '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', str(src)],
+            check=True)
+    with open(src, 'rb') as f:
+        payload = f.read()
+    data = client.post(
+        '/api/upload-convert',
+        data={'format': 'video_webm',
+              'files': [(io.BytesIO(payload), 'clip.mp4')]},
+        content_type='multipart/form-data').get_json()
+    assert data['ok'] is True and data['queued'] == 1
+    with client.application.app_context():
+        row = ConversionHistory.query.filter(
+            ConversionHistory.url.like('local:%')).one()
+        assert row.format == 'WebM Video'
+
+
+def test_webm_incompatible_codecs_transcode(tmp_path):
+    import subprocess as _sp
+    src = tmp_path / 'phone.mp4'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'testsrc=duration=1:size=128x128:rate=10',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+             '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', str(src)],
+            check=True)
+    videos, audios = convert_module._stream_codecs(str(src))
+    assert videos and videos[0] == 'mpeg4'
+    assert audios and audios[0] == 'aac'
+    out = tmp_path / 'out.webm'
+    result = convert_module.convert_video_file(
+        str(src), 'video_webm', str(out), {'title': 'T'})
+    assert result == {'success': True}
+    probe = _sp.run(['ffmpeg', '-hide_banner', '-i', str(out)],
+                    capture_output=True, text=True, timeout=30)
+    kinds = convert_module._stream_types(probe.stderr)
+    assert kinds >= {'video', 'audio'}
+    videos, audios = convert_module._stream_codecs(str(out))
+    assert videos[0] in ('vp8', 'vp9', 'av1')
+    assert audios[0] in ('vorbis', 'opus')

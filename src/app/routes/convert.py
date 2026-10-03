@@ -2765,11 +2765,30 @@ def convert_video_file(input_file, format_type, output_file, meta, job=None,
         # A filter forces a re-encode, so copy paths pick per-container
         # codecs instead of failing on `-c copy` plus a filter.
         audio_codec = 'libopus' if fmt['ext'] == 'webm' else 'aac'
-        args += ['-c:v', 'copy', '-c:a', audio_codec, '-filter:a', 'loudnorm']
+        video_args = ['-c:v', 'copy']
+        if fmt['ext'] == 'webm':
+            videos, _audios = _stream_codecs(input_file)
+            if videos and videos[0] not in _WEBM_VIDEO_CODECS:
+                video_args = ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0']
+        args += video_args + ['-c:a', audio_codec, '-filter:a', 'loudnorm']
         if sub_inputs:
             args += ['-c:s', 'copy' if fmt['ext'] == 'mkv' else 'mov_text']
     else:
-        args += ['-c', 'copy']
+        if fmt['ext'] == 'webm':
+            # WebM only holds VP8/VP9/AV1 video plus Vorbis/Opus audio: a
+            # stream-copy of anything else (phone H.264/AAC clips included)
+            # fails, so re-encode just the incompatible side.
+            videos, audios = _stream_codecs(input_file)
+            if videos and videos[0] not in _WEBM_VIDEO_CODECS:
+                args += ['-c:v', 'libvpx-vp9', '-crf', '30', '-b:v', '0']
+            else:
+                args += ['-c:v', 'copy']
+            if audios and audios[0] not in _WEBM_AUDIO_CODECS:
+                args += ['-c:a', 'libopus']
+            else:
+                args += ['-c:a', 'copy']
+        else:
+            args += ['-c', 'copy']
         if sub_inputs:
             args += ['-c:s', 'copy' if fmt['ext'] == 'mkv' else 'mov_text']
 
@@ -6117,6 +6136,27 @@ def api_chapters(conversion_id):
     if not history:
         abort(404)
     return jsonify({'ok': True, 'chapters': _file_chapters(history.output_path)})
+
+
+_WEBM_VIDEO_CODECS = frozenset(['vp8', 'vp9', 'av1'])
+_WEBM_AUDIO_CODECS = frozenset(['vorbis', 'opus'])
+
+
+def _stream_codecs(path):
+    """First video/audio codec names in a file, via `ffmpeg -i`."""
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', path],
+            capture_output=True, text=True, timeout=20)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}, {}
+    video, audio = [], []
+    for match in re.finditer(
+            r'(?im)^\s*Stream #\d+:\d+.*?:\s*(Video|Audio)\s*:\s*([^,\s(]+)',
+            res.stderr or ''):
+        (video if match.group(1).lower() == 'video' else audio).append(
+            match.group(2).lower())
+    return video, audio
 
 
 def _quality_line(ffmpeg_stderr):
