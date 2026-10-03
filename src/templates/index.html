@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     <meta charset="UTF-8">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8E%B5%3C/text%3E%3C/svg%3E">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -59,6 +60,9 @@
                                 <option value="alac">ALAC — for Apple devices</option>
                                 <option value="wav">WAV — uncompressed</option>
                                 <option value="ogg_vorbis">OGG — smaller files</option>
+                                <option value="mp3">MP3 — universal</option>
+                                <option value="m4a">M4A — portable</option>
+                                <option value="opus">Opus — smallest</option>
                             </select>
                         </div>
                         <div class="mb-3">
@@ -86,10 +90,13 @@
                         <div class="mb-3">
                             <label for="format" class="form-label">Output Format</label>
                             <select class="form-select form-control-lg" id="format" name="format" required>
-                                <option value="flac"{% if default_format == 'flac' %} selected{% endif %}>FLAC (Free Lossless Audio Codec)</option>
+<option value="flac"{% if default_format == 'flac' %} selected{% endif %}>FLAC (Free Lossless Audio Codec)</option>
                                 <option value="alac"{% if default_format == 'alac' %} selected{% endif %}>ALAC (Apple Lossless Audio Codec)</option>
                                 <option value="wav"{% if default_format == 'wav' %} selected{% endif %}>WAV (Uncompressed PCM - truly lossless)</option>
                                 <option value="ogg_vorbis"{% if default_format == 'ogg_vorbis' %} selected{% endif %}>OGG Vorbis (High-quality lossy)</option>
+                                <option value="mp3"{% if default_format == 'mp3' %} selected{% endif %}>MP3 (universal)</option>
+                                <option value="m4a"{% if default_format == 'm4a' %} selected{% endif %}>M4A AAC (Apple/portable)</option>
+                                <option value="opus"{% if default_format == 'opus' %} selected{% endif %}>Opus (smallest files)</option>
                                                                                                                             </select>
                         </div>
 
@@ -129,6 +136,9 @@
                             <option value="alac">ALAC</option>
                             <option value="wav">WAV</option>
                             <option value="ogg_vorbis">OGG</option>
+                            <option value="mp3">MP3</option>
+                            <option value="m4a">M4A</option>
+                            <option value="opus">Opus</option>
                             <option value="video_mp4">MP4</option>
                             <option value="video_webm">WebM</option>
                             <option value="video_mkv">MKV</option>
@@ -278,6 +288,9 @@
                                         <option value="alac">ALAC</option>
                                         <option value="wav">WAV</option>
                                         <option value="ogg_vorbis">OGG</option>
+                                        <option value="mp3">MP3</option>
+                                        <option value="m4a">M4A</option>
+                                        <option value="opus">Opus</option>
                                     </select>
                                     <button type="button" id="bulkTranscode" class="btn btn-sm btn-outline-secondary" title="Convert selections to the chosen format without re-downloading">Transcode</button>
                                     <button type="button" id="bulkDelete" class="btn btn-sm btn-outline-danger" title="Delete all selections from disk">Delete</button>

@@ -27,7 +27,10 @@ def test_is_valid_format():
     assert is_valid_format('flac')
     assert is_valid_format('WAV')
     assert is_valid_format('ogg_vorbis')
-    assert not is_valid_format('mp3')
+    assert is_valid_format('mp3')
+    assert is_valid_format('m4a')
+    assert is_valid_format('opus')
+    assert not is_valid_format('wma')
     assert not is_valid_format('')
 
 

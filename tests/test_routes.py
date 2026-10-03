@@ -70,7 +70,7 @@ def test_post_convert_invalid_format(client, monkeypatch):
     monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
     resp = client.post('/convert', data={
         'url': 'https://www.youtube.com/watch?v=abc',
-        'format': 'mp3',
+        'format': 'wma',
         'output_path': '/tmp/out',
     })
     assert resp.status_code == 302
@@ -4864,7 +4864,7 @@ def test_transcode_creates_sibling_row(client, tmp_path):
         assert new is not None and new.format == 'WAV'
         assert new.duration > 0
     assert client.post('/api/transcode',
-                       json={'ids': [row], 'format': 'mp3'}).status_code == 400
+                       json={'ids': [row], 'format': 'wma'}).status_code == 400
     assert client.post('/api/transcode',
                        json={'ids': [999999], 'format': 'wav'}).get_json() == {
         'ok': True, 'converted': 0, 'failed': [999999]}
@@ -6137,7 +6137,7 @@ def test_convert_local_queues_rows(client, tmp_path):
     assert client.post('/api/convert-local',
                        json={'paths': [], 'format': 'flac'}).status_code == 400
     assert client.post('/api/convert-local',
-                       json={'paths': [str(src)], 'format': 'mp3'}).status_code == 400
+                       json={'paths': [str(src)], 'format': 'wma'}).status_code == 400
 
 
 def test_upload_convert_queues_rows(client, tmp_path):
@@ -6512,3 +6512,65 @@ def test_failed_convert_leaves_no_output(client, tmp_path, monkeypatch):
     leftovers = [p for p in tmp_path.iterdir()
                  if p.suffix.lower() in ('.flac', '.tmp') and p.name != 'tone.wav']
     assert leftovers == []
+
+
+def test_new_audio_formats_convert(client, tmp_path):
+    import subprocess as _sp
+    src = tmp_path / 'tone.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    with client.application.app_context():
+        for fmt, ext in (('mp3', 'mp3'), ('m4a', 'm4a'), ('opus', 'opus')):
+            out = tmp_path / f'out.{ext}'
+            result = convert_module.convert_audio_file(
+                str(src), fmt, str(out), {'title': 'T'}, None, None)
+            assert result == {'success': True}, (fmt, result)
+            assert out.stat().st_size > 0
+
+
+def test_passthrough_copies_identical_codec(client, tmp_path, monkeypatch):
+    import subprocess as _sp
+    src = tmp_path / 'song.flac'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=1', '-c:a', 'flac',
+             str(src)], check=True)
+    seen = {}
+    real_run = convert_module.subprocess.run
+
+    def spy(cmd, **kwargs):
+        seen['cmd'] = cmd
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(convert_module.subprocess, 'run', spy)
+    with client.application.app_context():
+        out = tmp_path / 'copy.flac'
+        result = convert_module.convert_audio_file(
+            str(src), 'flac', str(out), {'title': 'T'}, None, None)
+    assert result == {'success': True}
+    assert seen['cmd'].count('copy') >= 1
+    assert 'libmp3lame' not in ' '.join(seen['cmd'])
+
+
+def test_adopt_maps_new_audio_labels(client, tmp_path):
+    for name, label in (('a.mp3', 'MP3'), ('b.m4a', 'M4A'), ('c.opus', 'Opus')):
+        (tmp_path / name).write_bytes(b'x' * 100)
+    data = client.post('/api/adopt', json={'path': str(tmp_path)}).get_json()
+    assert data['ok'] is True and data['added'] == 3
+    with client.application.app_context():
+        labels = {r.output_path.rsplit('/', 1)[-1]: r.format
+                  for r in ConversionHistory.query.all()}
+    assert labels['a.mp3'] == 'MP3'
+    assert labels['b.m4a'] == 'M4A'
+    assert labels['c.opus'] == 'Opus'
+
+
+def test_theme_markers(client):
+    for path in ('/', '/player', '/settings'):
+        page = client.get(path).data.decode('utf-8')
+        assert 'js/theme.js' in page
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('data-theme-opt="dark"', 'data-accent-opt="purple"',
+                   'densityCompact', 'name="mp3_bitrate"',
+                   'name="finish_action"'):
+        assert marker in page

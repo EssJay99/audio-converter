@@ -67,6 +67,9 @@ def get_settings_dict():
         'video_preset': 'veryfast',
         'default_video_format': 'video_mp4',
         'audio_quality': 'best',
+        'mp3_bitrate': 192,
+        'm4a_bitrate': 192,
+        'opus_bitrate': 128,
         'finish_action': 'nothing',
     }
     user_settings = UserSettings.query.first()
@@ -87,6 +90,9 @@ def get_settings_dict():
             defaults['bandwidth_limit'] = user_settings.bandwidth_limit
         if getattr(user_settings, 'offpeak_limit', None) is not None:
             defaults['offpeak_limit'] = user_settings.offpeak_limit
+        for _field in ('mp3_bitrate', 'm4a_bitrate', 'opus_bitrate'):
+            if getattr(user_settings, _field, None) is not None:
+                defaults[_field] = getattr(user_settings, _field)
         if getattr(user_settings, 'offpeak_start', None) is not None:
             defaults['offpeak_start'] = user_settings.offpeak_start
         if getattr(user_settings, 'offpeak_end', None) is not None:
@@ -128,7 +134,8 @@ def save_settings():
     data['close_behavior'] = request.form.get('close_behavior', 'ask').strip()
     if data['close_behavior'] not in ('ask', 'quit'):
         data['close_behavior'] = 'ask'
-    if data.get('default_format') not in ('flac', 'alac', 'wav', 'ogg_vorbis'):
+    if data.get('default_format') not in ('flac', 'alac', 'wav', 'ogg_vorbis',
+                                           'mp3', 'm4a', 'opus'):
         data['default_format'] = 'flac'
     if data.get('video_quality') not in ('480p', '720p', '1080p', '2160p',
                                            'best'):
@@ -136,6 +143,9 @@ def save_settings():
     if data.get('audio_quality') not in ('best', '320', '192', '128'):
         data['audio_quality'] = 'best'
     data['video_crf'] = _int_from_form(request, 'video_crf', 23, 18, 32)
+    data['mp3_bitrate'] = _int_from_form(request, 'mp3_bitrate', 192, 96, 320)
+    data['m4a_bitrate'] = _int_from_form(request, 'm4a_bitrate', 192, 96, 320)
+    data['opus_bitrate'] = _int_from_form(request, 'opus_bitrate', 128, 64, 256)
     data['video_preset'] = request.form.get('video_preset', 'veryfast').strip()
     if data['video_preset'] not in ('ultrafast', 'superfast', 'veryfast',
                                     'faster', 'fast', 'medium', 'slow'):
@@ -161,6 +171,9 @@ def save_settings():
         user_settings.job_timeout = data['job_timeout']
         user_settings.bandwidth_limit = data['bandwidth_limit']
         user_settings.offpeak_limit = data['offpeak_limit']
+        user_settings.mp3_bitrate = data['mp3_bitrate']
+        user_settings.m4a_bitrate = data['m4a_bitrate']
+        user_settings.opus_bitrate = data['opus_bitrate']
         user_settings.offpeak_start = data['offpeak_start']
         user_settings.offpeak_end = data['offpeak_end']
         user_settings.video_crf = data['video_crf']

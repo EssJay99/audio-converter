@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     <meta charset="UTF-8">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%8E%B5%3C/text%3E%3C/svg%3E">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -97,6 +98,40 @@
                         <input type="number" class="form-control" id="ogg_quality" name="ogg_quality"
                                min="-1" max="10" value="{{ ogg_quality }}">
                         <small class="form-text text-muted">10 is highest quality. 8 is near-transparent.</small>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label for="mp3_bitrate" class="form-label">MP3 bitrate (kbps)</label>
+                        <select class="form-select" id="mp3_bitrate" name="mp3_bitrate">
+                            <option value="96" {% if mp3_bitrate == 96 %}selected{% endif %}>96</option>
+                            <option value="128" {% if mp3_bitrate == 128 %}selected{% endif %}>128</option>
+                            <option value="192" {% if mp3_bitrate == 192 %}selected{% endif %}>192</option>
+                            <option value="256" {% if mp3_bitrate == 256 %}selected{% endif %}>256</option>
+                            <option value="320" {% if mp3_bitrate == 320 %}selected{% endif %}>320</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label for="m4a_bitrate" class="form-label">M4A bitrate (kbps)</label>
+                        <select class="form-select" id="m4a_bitrate" name="m4a_bitrate">
+                            <option value="96" {% if m4a_bitrate == 96 %}selected{% endif %}>96</option>
+                            <option value="128" {% if m4a_bitrate == 128 %}selected{% endif %}>128</option>
+                            <option value="192" {% if m4a_bitrate == 192 %}selected{% endif %}>192</option>
+                            <option value="256" {% if m4a_bitrate == 256 %}selected{% endif %}>256</option>
+                            <option value="320" {% if m4a_bitrate == 320 %}selected{% endif %}>320</option>
+                        </select>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label for="opus_bitrate" class="form-label">Opus bitrate (kbps)</label>
+                        <select class="form-select" id="opus_bitrate" name="opus_bitrate">
+                            <option value="64" {% if opus_bitrate == 64 %}selected{% endif %}>64</option>
+                            <option value="96" {% if opus_bitrate == 96 %}selected{% endif %}>96</option>
+                            <option value="128" {% if opus_bitrate == 128 %}selected{% endif %}>128</option>
+                            <option value="192" {% if opus_bitrate == 192 %}selected{% endif %}>192</option>
+                            <option value="256" {% if opus_bitrate == 256 %}selected{% endif %}>256</option>
+                        </select>
+                        <small class="form-text text-muted">Opus stays transparent at low bitrates; 128 is plenty.</small>
                     </div>
 
                     <div class="col-md-6">
@@ -371,6 +406,38 @@
         </div>
 
         <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <h3>Appearance</h3>
+            <p class="text-muted small">Applies instantly on this device.</p>
+            <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+                <span class="small text-muted">Theme</span>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Theme">
+                    <button type="button" class="btn btn-outline-secondary" data-theme-opt="light">Light</button>
+                    <button type="button" class="btn btn-outline-secondary" data-theme-opt="dark">Dark</button>
+                    <button type="button" class="btn btn-outline-secondary" data-theme-opt="system">System</button>
+                </div>
+            </div>
+            <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+                <span class="small text-muted">Accent</span>
+                <button type="button" class="app-accent-dot" data-accent-opt="blue" style="color:#0d6efd;background:#0d6efd;" title="Blue" aria-label="Blue accent"></button>
+                <button type="button" class="app-accent-dot" data-accent-opt="green" style="color:#198754;background:#198754;" title="Green" aria-label="Green accent"></button>
+                <button type="button" class="app-accent-dot" data-accent-opt="purple" style="color:#6f42c1;background:#6f42c1;" title="Purple" aria-label="Purple accent"></button>
+                <button type="button" class="app-accent-dot" data-accent-opt="orange" style="color:#fd7e14;background:#fd7e14;" title="Orange" aria-label="Orange accent"></button>
+                <button type="button" class="app-accent-dot" data-accent-opt="red" style="color:#dc3545;background:#dc3545;" title="Red" aria-label="Red accent"></button>
+            </div>
+            <div class="d-flex flex-wrap gap-3 align-items-center">
+                <span class="small text-muted">Density</span>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="density" id="densityComfy" checked>
+                    <label class="form-check-label small" for="densityComfy">Comfortable</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="density" id="densityCompact">
+                    <label class="form-check-label small" for="densityCompact">Compact</label>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-4 shadow-sm border-0 rounded mt-3">
             <h3>Maintenance</h3>
             <p class="text-muted small">One-click housekeeping. Nothing here touches your music unless it says so.</p>
             <div class="d-flex flex-wrap gap-2">
@@ -529,6 +596,30 @@
                 .catch(() => maintNote('Failed.'));
         });
         refreshAutostart();
+        // Appearance controls drive window.Theme (theme.js).
+        document.querySelectorAll('[data-theme-opt]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                if (window.Theme) window.Theme.setMode(btn.dataset.themeOpt);
+            });
+        });
+        document.querySelectorAll('[data-accent-opt]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                if (window.Theme) window.Theme.setAccent(btn.dataset.accentOpt);
+            });
+        });
+        const densityComfy = document.getElementById('densityComfy');
+        const densityCompact = document.getElementById('densityCompact');
+        if (densityCompact) {
+            densityCompact.addEventListener('change', () => {
+                if (window.Theme) window.Theme.setDensity('compact');
+            });
+        }
+        if (densityComfy) {
+            densityComfy.addEventListener('change', () => {
+                if (window.Theme) window.Theme.setDensity('comfortable');
+            });
+        }
+        if (window.Theme) window.Theme.sync();
         const dbNote = (msg) => {
             document.getElementById('dbNote').textContent = msg;
         };

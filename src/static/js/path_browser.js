@@ -70,6 +70,7 @@
 
     var CONVERT_FORMATS = [
         ['flac', 'FLAC'], ['alac', 'ALAC'], ['wav', 'WAV'], ['ogg_vorbis', 'OGG'],
+        ['mp3', 'MP3'], ['m4a', 'M4A'], ['opus', 'Opus'],
         ['video_mp4', 'MP4'], ['video_webm', 'WebM'], ['video_mkv', 'MKV'],
     ];
 

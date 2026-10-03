@@ -32,6 +32,12 @@ VALID_FORMATS = {
     'ogg_vorbis': {'ext': 'ogg', 'label': 'OGG Vorbis', 'kind': 'audio',
                    'base_args': ['-c:a', 'vorbis', '-q:a', '8', '-ac', '2',
                                  '-strict', 'experimental']},
+    'mp3': {'ext': 'mp3', 'label': 'MP3', 'kind': 'audio',
+            'base_args': ['-c:a', 'libmp3lame', '-b:a', '192k']},
+    'm4a': {'ext': 'm4a', 'label': 'M4A', 'kind': 'audio',
+            'base_args': ['-c:a', 'aac', '-b:a', '192k']},
+    'opus': {'ext': 'opus', 'label': 'Opus', 'kind': 'audio',
+             'base_args': ['-c:a', 'libopus', '-b:a', '128k']},
     'video_mp4': {'ext': 'mp4', 'label': 'MP4 Video', 'kind': 'video',
                   'base_args': []},
     'video_webm': {'ext': 'webm', 'label': 'WebM Video', 'kind': 'video',
@@ -47,7 +53,7 @@ BROWSER_VIDEO_EXTS = ('mp4', 'm4v', 'webm', 'ogv')
 LABEL_TO_KEY = {v['label']: k for k, v in VALID_FORMATS.items()}
 
 # Formats that support embedded cover art
-COVER_FORMATS = ('flac', 'alac')
+COVER_FORMATS = ('flac', 'alac', 'mp3', 'm4a')
 
 # ---------------------------------------------------------------- queue ----
 
@@ -2664,8 +2670,11 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file,
     args += ['-map', '0:a']
     if cover_file and format_type in COVER_FORMATS:
         args += ['-map', '1:v', '-c:v', 'copy', '-disposition:v', 'attached_pic']
+        if format_type == 'mp3':
+            # ID3v2.3 cover art: readable everywhere, unlike v2.4 tags.
+            args += ['-id3v2_version', '3']
 
-    args += _format_args(format_type)
+    args += _format_args(format_type, input_file, job)
     if _want_normalize(job):
         # Single-pass EBU R128 normalization so playlists play at even volume.
         args += ['-filter:a', 'loudnorm']
@@ -2811,12 +2820,14 @@ def convert_video_file(input_file, format_type, output_file, meta, job=None,
         return {'success': False, 'error': f'FFmpeg conversion failed: {error_msg}'}
 
 
-def _format_args(format_type):
-    """Build the ffmpeg audio codec args from the user's format settings."""
-    settings = UserSettings.query.first()
-    fmt = VALID_FORMATS[format_type]
-    args = list(fmt['base_args'])
+def _format_args(format_type, input_file=None, job=None):
+    """Build the ffmpeg audio codec args from the user's format settings.
 
+    When the source already matches the target (same codec, fitting
+    bitrate), the file is copied instead of re-encoded: instant and
+    bit-identical. Normalization always re-encodes.
+    """
+    settings = UserSettings.query.first()
     if format_type == 'flac':
         level = str(getattr(settings, 'flac_compression', None) or 5)
         args = ['-c:a', 'flac', '-compression_level', level]
@@ -2833,8 +2844,37 @@ def _format_args(format_type):
         # upmixing mono is a no-op for real stereo.
         args = ['-c:a', 'vorbis', '-q:a', quality, '-ac', '2',
                 '-strict', 'experimental']
+    elif format_type == 'mp3':
+        args = ['-c:a', 'libmp3lame', '-b:a',
+                _clamp_bitrate(getattr(settings, 'mp3_bitrate', 192),
+                               (96, 128, 192, 256, 320))]
+    elif format_type == 'm4a':
+        args = ['-c:a', 'aac', '-b:a',
+                _clamp_bitrate(getattr(settings, 'm4a_bitrate', 192),
+                               (96, 128, 192, 256, 320))]
+    elif format_type == 'opus':
+        args = ['-c:a', 'libopus', '-b:a',
+                _clamp_bitrate(getattr(settings, 'opus_bitrate', 128),
+                               (64, 96, 128, 192, 256))]
+    else:
+        args = list(VALID_FORMATS[format_type]['base_args'])
 
+    if input_file and not _want_normalize(job):
+        copy = _passthrough_args(format_type, input_file, settings)
+        if copy is not None:
+            return copy
     return args
+
+
+def _clamp_bitrate(value, choices):
+    """Snap a bitrate setting to a valid choice, defaulting to the middle."""
+    try:
+        kbps = int(value or 0)
+    except (TypeError, ValueError):
+        kbps = 0
+    if kbps in choices:
+        return f'{kbps}k'
+    return f'{choices[len(choices) // 2]}k'
 
 
 def unique_file_path(directory, filename):
@@ -4016,8 +4056,8 @@ def _windows_update_install():
 # Audio extensions the library understands, mapped to display labels for
 # adopted files (which were never converted through a format choice).
 _ADOPT_FORMATS = {
-    '.flac': 'FLAC', '.m4a': 'ALAC', '.alac': 'ALAC', '.wav': 'WAV',
-    '.ogg': 'OGG Vorbis', '.opus': 'OGG Vorbis', '.mp3': 'MP3',
+    '.flac': 'FLAC', '.m4a': 'M4A', '.alac': 'ALAC', '.wav': 'WAV',
+    '.ogg': 'OGG Vorbis', '.opus': 'Opus', '.mp3': 'MP3',
     '.mp4': 'MP4 Video', '.webm': 'WebM Video', '.mkv': 'MKV Video',
     '.mov': 'MOV Video', '.avi': 'AVI Video',
 }
@@ -6658,6 +6698,54 @@ def _stream_codecs(path):
         (video if match.group(1).lower() == 'video' else audio).append(
             match.group(2).lower())
     return video, audio
+
+
+def _source_audio(path):
+    """(codec, kbps) of the first audio stream, for passthrough decisions."""
+    try:
+        res = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', path],
+            capture_output=True, text=True, timeout=20)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return '', 0
+    match = re.search(
+        r'(?im)^\s*Stream #\d+:\d+.*?:\s*Audio\s*:\s*([^,\s(]+)'
+        r'(?:.*?(\d+)\s*kb/s)?', res.stderr or '')
+    if not match:
+        return '', 0
+    codec = (match.group(1) or '').lower()
+    try:
+        kbps = int(match.group(2) or 0)
+    except (TypeError, ValueError):
+        kbps = 0
+    return codec, kbps
+
+
+def _passthrough_args(format_type, input_file, settings):
+    """Copy args when the source already matches the target, else None.
+
+    Lossless-to-lossless is always bit-identical; lossy copies only when
+    the source bitrate fits inside the requested one (never upscales, and
+    normalization forces a real re-encode anyway). Instant and lossless.
+    """
+    codec, kbps = _source_audio(input_file)
+    if format_type == 'flac' and codec == 'flac':
+        return ['-c:a', 'copy']
+    if format_type == 'alac' and codec == 'alac':
+        return ['-c:a', 'copy']
+    targets = {'mp3': ('mp3', 'mp3_bitrate', 192),
+               'm4a': ('aac', 'm4a_bitrate', 192),
+               'opus': ('opus', 'opus_bitrate', 128)}
+    if format_type in targets:
+        want_codec, setting, default = targets[format_type]
+        if codec == want_codec:
+            try:
+                target = int(getattr(settings, setting, default) or default)
+            except (TypeError, ValueError):
+                target = default
+            if kbps > 0 and kbps <= target:
+                return ['-c:a', 'copy']
+    return None
 
 
 def _quality_line(ffmpeg_stderr):
