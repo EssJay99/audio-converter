@@ -3721,8 +3721,9 @@ def test_video_page_video_only(client):
 
 def test_audio_forms_have_no_video_options(client):
     html = client.get('/').data.decode('utf-8')
+    url_form = html.split('id="format"')[1].split('</select>')[0]
     for value in ('video_mp4', 'video_webm', 'video_mkv'):
-        assert value not in html
+        assert value not in url_form
 
 
 def test_nav_has_video_tab(client):
@@ -6118,3 +6119,131 @@ def test_queue_top_endpoint(client, monkeypatch):
     assert client.post(f'/api/queue/top/{row}').get_json()['ok'] is True
     assert convert_module._queue_has(row) is True
     convert_module._priority_queue.get_nowait()
+
+
+def _make_tone(tmp_path, name='tone.wav', seconds=2):
+    import subprocess as _sp
+    src = tmp_path / name
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', f'sine=frequency=440:duration={seconds}', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    return src
+
+
+def test_convert_local_queues_rows(client, tmp_path):
+    src = _make_tone(tmp_path)
+    (tmp_path / 'notes.txt').write_text('nope')
+    data = client.post('/api/convert-local', json={
+        'paths': [str(src), str(tmp_path / 'notes.txt'),
+                  str(tmp_path / 'missing.flac'), '/etc/passwd'],
+        'format': 'flac'}).get_json()
+    assert data['ok'] is True and data['queued'] == 1
+    assert len(data['skipped']) == 3
+    with client.application.app_context():
+        row = ConversionHistory.query.filter(
+            ConversionHistory.url.like('local:%')).one()
+        assert row.format == 'FLAC' and row.status == 'pending'
+        assert row.output_path.endswith('.flac')
+    assert client.post('/api/convert-local',
+                       json={'paths': [], 'format': 'flac'}).status_code == 400
+    assert client.post('/api/convert-local',
+                       json={'paths': [str(src)], 'format': 'mp3'}).status_code == 400
+
+
+def test_upload_convert_queues_rows(client, tmp_path):
+    import io
+    src = _make_tone(tmp_path)
+    with open(src, 'rb') as f:
+        payload = f.read()
+    data = client.post(
+        '/api/upload-convert',
+        data={'format': 'ogg_vorbis',
+              'files': [(io.BytesIO(payload), 'song.wav'),
+                        (io.BytesIO(b'x'), 'evil.exe')]},
+        content_type='multipart/form-data').get_json()
+    assert data['ok'] is True and data['queued'] == 1
+    assert data['skipped'] == ['evil.exe']
+    with client.application.app_context():
+        row = ConversionHistory.query.filter(
+            ConversionHistory.url.like('local:%')).one()
+        assert 'audio-converter-uploads' in row.url
+
+
+def test_convert_local_job_transcodes(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(convert_module, '_ensure_worker', lambda: None)
+    src = _make_tone(tmp_path)
+    outdir = tmp_path / 'out'
+    outdir.mkdir()
+    monkeypatch.setattr(convert_module, 'effective_output_path',
+                        lambda: str(outdir))
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='local:' + str(src), format='FLAC',
+            output_path=str(outdir / 'song.flac'), status='pending'))
+        db.session.commit()
+        job = ConversionHistory.query.filter(
+            ConversionHistory.url.like('local:%')).first()
+        job_id = job.id
+        convert_module._convert_local_job(
+            db.session.get(ConversionHistory, job_id))
+        done = db.session.get(ConversionHistory, job_id)
+        assert done.status == 'completed'
+        assert done.duration > 0
+    assert (outdir / 'song.flac').is_file()
+
+
+def test_convert_local_job_missing_source(client):
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='local:/nope/gone.wav', format='FLAC',
+            output_path='/tmp/zz.flac', status='pending', retry_attempts=9))
+        db.session.commit()
+        job = ConversionHistory.query.filter_by(
+            url='local:/nope/gone.wav').first()
+        convert_module._convert_local_job(job)
+        assert db.session.get(
+            ConversionHistory, job.id).status == 'failed'
+
+
+def test_directories_lists_media_files(client, tmp_path):
+    _make_tone(tmp_path, name='a.wav')
+    (tmp_path / 'b.txt').write_text('x')
+    data = client.get('/api/directories',
+                      query_string={'q': str(tmp_path),
+                                    'files': '1'}).get_json()
+    names = [f['name'] for f in data['files']]
+    assert 'a.wav' in names
+    assert 'b.txt' not in names
+    assert data['files'][0]['size'] > 0
+    data = client.get('/api/directories',
+                      query_string={'q': str(tmp_path)}).get_json()
+    assert data['files'] == []
+
+
+def test_home_local_convert_markers(client):
+    page = client.get('/').data.decode('utf-8')
+    for marker in ('fileDropzone', 'fileBrowseInput', 'localFormat',
+                   'fileBrowseBtn'):
+        assert marker in page
+    js = client.get('/static/js/main.js').data.decode('utf-8')
+    assert '/api/upload-convert' in js
+
+
+def test_ogg_mono_source_converts(client, tmp_path, monkeypatch):
+    import subprocess as _sp
+    src = tmp_path / 'mono.wav'
+    _sp.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+             '-i', 'sine=frequency=440:duration=1', '-c:a', 'pcm_s16le',
+             str(src)], check=True)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/mono', format='OGG Vorbis',
+            output_path=str(tmp_path / 'mono.ogg'), status='completed'))
+        db.session.commit()
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/mono').first()
+        result = convert_module.convert_audio_file(
+            str(src), 'ogg_vorbis', str(tmp_path / 'mono.ogg'),
+            {'title': 'Mono'}, None, row)
+    assert result == {'success': True}
+    assert (tmp_path / 'mono.ogg').stat().st_size > 0

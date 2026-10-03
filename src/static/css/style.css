@@ -1472,3 +1472,26 @@ body {
 .row-speed:empty {
     display: none;
 }
+
+/* --- Convert local files: browser rows + home dropzone --- */
+.path-browser-file {
+    cursor: default;
+}
+.path-browser-file .btn {
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+.file-dropzone {
+    border: 2px dashed var(--bs-border-color, #dee2e6);
+    border-radius: 10px;
+    padding: 18px;
+    text-align: center;
+    color: var(--bs-secondary-color, #6c757d);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+.file-dropzone.dragging,
+.file-dropzone:hover {
+    border-color: var(--bs-primary, #0d6efd);
+    background: var(--bs-tertiary-bg, #f8f9fa);
+}

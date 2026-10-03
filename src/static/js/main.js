@@ -1877,6 +1877,86 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
     });
 })();
 
+// --- Convert local files: dropzone + file picker -----------------------------
+// Dropped/chosen files upload to /api/upload-convert (loopback-fast) and
+// queue as conversion jobs; progress shows in History like any download.
+(function localConvert() {
+    function init() {
+        const zone = document.getElementById('fileDropzone');
+        if (!zone) return;
+        const input = document.getElementById('fileBrowseInput');
+        const fmtSel = document.getElementById('localFormat');
+        const browse = document.getElementById('fileBrowseBtn');
+        if (browse && input) {
+            browse.addEventListener('click', (e) => {
+                e.stopPropagation();
+                input.click();
+            });
+        }
+        zone.addEventListener('click', (e) => {
+            if (input && e.target !== browse) input.click();
+        });
+        zone.addEventListener('keydown', (e) => {
+            if ((e.key === 'Enter' || e.key === ' ') && input) {
+                e.preventDefault();
+                input.click();
+            }
+        });
+        ['dragenter', 'dragover'].forEach((ev) => {
+            zone.addEventListener(ev, (e) => {
+                e.preventDefault();
+                zone.classList.add('dragging');
+            });
+        });
+        ['dragleave', 'drop'].forEach((ev) => {
+            zone.addEventListener(ev, (e) => {
+                e.preventDefault();
+                zone.classList.remove('dragging');
+            });
+        });
+        zone.addEventListener('drop', (e) => {
+            const files = (e.dataTransfer && e.dataTransfer.files) || [];
+            if (files.length) uploadLocalFiles(files);
+        });
+        if (input) {
+            input.addEventListener('change', () => {
+                if (input.files && input.files.length) uploadLocalFiles(input.files);
+                input.value = '';
+            });
+        }
+
+        function targetFormat() {
+            return fmtSel ? fmtSel.value : 'flac';
+        }
+
+        function uploadLocalFiles(files) {
+            const form = new FormData();
+            form.append('csrf_token', csrfToken());
+            form.append('format', targetFormat());
+            let count = 0;
+            Array.from(files).slice(0, 50).forEach((f) => {
+                form.append('files', f, f.name);
+                count += 1;
+            });
+            if (!count) return;
+            toast('Uploading ' + count + ' file(s)…', 'info');
+            fetch('/api/upload-convert', { method: 'POST', body: form })
+                .then((r) => r.json())
+                .then((data) => {
+                    toast(data.ok ? (data.message || 'Queued.') : (data.message || 'Could not convert.'),
+                          data.ok ? 'success' : 'danger');
+                    if (data.ok && typeof refreshTable === 'function') refreshTable();
+                })
+                .catch(() => toast('Upload failed.', 'danger'));
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+
 // --- First-run wizard --------------------------------------------------------
 // Shows once (until the first conversion exists) on Home. Dismissal lasts
 // the browser session; a queued conversion retires it permanently.

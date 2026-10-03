@@ -115,6 +115,28 @@
                     </form>
                 </div>
 
+                <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                    <h3>Convert Local Files</h3>
+                    <p class="text-muted small mb-2">Have audio or video files already? Drop them here (or browse) to convert them to another format — no link needed.</p>
+                    <div class="file-dropzone" id="fileDropzone" role="button" tabindex="0" aria-label="Drop files to convert">
+                        <div>Drop audio/video files here, or <button type="button" class="btn btn-sm btn-outline-primary" id="fileBrowseBtn">browse files</button></div>
+                        <input type="file" id="fileBrowseInput" class="d-none" multiple accept="audio/*,video/*,.mkv,.opus,.m4a,.flac,.ogg,.oga,.wav,.mp3,.mp4,.webm,.mov,.avi,.m4v">
+                    </div>
+                    <div class="d-flex gap-2 align-items-center mt-2">
+                        <label class="small text-muted" for="localFormat">Convert to</label>
+                        <select class="form-select form-select-sm" id="localFormat" style="width:auto;">
+                            <option value="flac">FLAC</option>
+                            <option value="alac">ALAC</option>
+                            <option value="wav">WAV</option>
+                            <option value="ogg_vorbis">OGG</option>
+                            <option value="video_mp4">MP4</option>
+                            <option value="video_webm">WebM</option>
+                            <option value="video_mkv">MKV</option>
+                        </select>
+                        <small class="text-muted">Converted files land in your output folder.</small>
+                    </div>
+                </div>
+
                 <script>
                     document.addEventListener('DOMContentLoaded', function () {
                         const form = document.querySelector('#homeConvertForm');

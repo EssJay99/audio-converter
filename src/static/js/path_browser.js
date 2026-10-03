@@ -51,10 +51,45 @@
     var modalCounter = 0;
 
     function loadDirs(path) {
-        return fetch('/api/directories?q=' + encodeURIComponent(path) + '&depth=1')
+        return fetch('/api/directories?q=' + encodeURIComponent(path) + '&depth=1&files=1')
             .then(function (r) { return r.json(); })
             .then(function (data) {
-                return { dirs: data.directories || [], path: data.base || path };
+                return { dirs: data.directories || [], files: data.files || [],
+                         path: data.base || path };
+            });
+    }
+
+    function csrfHeader() {
+        var token = '';
+        try {
+            var meta = document.querySelector('meta[name="csrf-token"]');
+            token = meta ? meta.getAttribute('content') : '';
+        } catch (err) {}
+        return { 'Content-Type': 'application/json', 'X-CSRFToken': token };
+    }
+
+    var CONVERT_FORMATS = [
+        ['flac', 'FLAC'], ['alac', 'ALAC'], ['wav', 'WAV'], ['ogg_vorbis', 'OGG'],
+        ['video_mp4', 'MP4'], ['video_webm', 'WebM'], ['video_mkv', 'MKV'],
+    ];
+
+    function convertFile(path, format) {
+        fetch('/api/convert-local', {
+            method: 'POST',
+            headers: csrfHeader(),
+            body: JSON.stringify({ paths: [path], format: format }),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (typeof toast === 'function') {
+                    toast(data.ok ? (data.message || 'Queued for conversion.')
+                                  : (data.message || 'Could not queue.'),
+                          data.ok ? 'success' : 'danger');
+                }
+                if (data.ok && typeof refreshTable === 'function') refreshTable();
+            })
+            .catch(function () {
+                if (typeof toast === 'function') toast('Could not queue.', 'danger');
             });
     }
 
@@ -98,6 +133,18 @@
         var homeBtn = el('button', { 'type': 'button', 'class': 'btn btn-sm btn-outline-secondary' }, 'Home');
         toolbar.appendChild(upBtn);
         toolbar.appendChild(homeBtn);
+        var fmtSel = document.createElement('select');
+        fmtSel.id = 'path-browser-convert-format';
+        fmtSel.className = 'form-select form-select-sm';
+        fmtSel.style.width = 'auto';
+        fmtSel.title = 'Target format for file Convert buttons';
+        CONVERT_FORMATS.forEach(function (pair) {
+            var opt = document.createElement('option');
+            opt.value = pair[0];
+            opt.textContent = pair[1];
+            fmtSel.appendChild(opt);
+        });
+        toolbar.appendChild(fmtSel);
         var nativeBtn = null;
         if (window.pywebview && window.pywebview.api &&
             typeof window.pywebview.api.pick_directory === 'function') {
@@ -182,13 +229,20 @@
             loadDirs(state.path).then(function (result) {
                 if (token !== state.searchToken) return; // stale
                 body.innerHTML = '';
-                empty.textContent = 'This folder has no subfolders.';
-                empty.hidden = result.dirs.length > 0;
                 active = -1;
 
                 result.dirs.forEach(function (dir) {
                     body.appendChild(makeRow(dir));
                 });
+                (result.files || []).forEach(function (f) {
+                    body.appendChild(makeFileRow(f));
+                });
+                if (!result.dirs.length && !(result.files || []).length) {
+                    empty.textContent = 'This folder is empty.';
+                    empty.hidden = false;
+                } else {
+                    empty.hidden = true;
+                }
             });
         }
 
@@ -240,6 +294,40 @@
             row.appendChild(el('span', { 'class': 'path-browser-row-path' }, dir));
             row.addEventListener('click', function () { selectRow(dir); });
             row.addEventListener('dblclick', function () { setPath(dir); });
+            return row;
+        }
+
+        function readableSize(bytes) {
+            var n = Number(bytes) || 0;
+            if (n < 1024) return n + ' B';
+            var units = ['KB', 'MB', 'GB'];
+            var u = -1;
+            do {
+                n /= 1024;
+                u += 1;
+            } while (n >= 1024 && u < units.length - 1);
+            return n.toFixed(1) + ' ' + units[u];
+        }
+
+        function convertFormat() {
+            var sel = document.getElementById('path-browser-convert-format');
+            return sel ? sel.value : 'flac';
+        }
+
+        function makeFileRow(f) {
+            var row = el('div', { 'class': 'path-browser-row path-browser-file' });
+            row.appendChild(el('span', { 'class': 'path-browser-icon' }, '\u266b'));
+            var name = el('span', { 'class': 'path-browser-row-name' }, f.name);
+            name.title = f.path;
+            row.appendChild(name);
+            row.appendChild(el('span', { 'class': 'path-browser-row-path' }, readableSize(f.size)));
+            var btn = el('button', { 'type': 'button', 'class': 'btn btn-sm btn-outline-primary' }, 'Convert');
+            btn.title = 'Convert this file with the app';
+            btn.addEventListener('click', function (ev) {
+                ev.stopPropagation();
+                convertFile(f.path, convertFormat());
+            });
+            row.appendChild(btn);
             return row;
         }
 

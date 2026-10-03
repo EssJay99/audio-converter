@@ -30,7 +30,8 @@ VALID_FORMATS = {
     'wav': {'ext': 'wav', 'label': 'WAV', 'kind': 'audio',
             'base_args': ['-c:a', 'pcm_s16le']},
     'ogg_vorbis': {'ext': 'ogg', 'label': 'OGG Vorbis', 'kind': 'audio',
-                   'base_args': ['-c:a', 'vorbis', '-q:a', '8', '-strict', 'experimental']},
+                   'base_args': ['-c:a', 'vorbis', '-q:a', '8', '-ac', '2',
+                                 '-strict', 'experimental']},
     'video_mp4': {'ext': 'mp4', 'label': 'MP4 Video', 'kind': 'video',
                   'base_args': []},
     'video_webm': {'ext': 'webm', 'label': 'WebM Video', 'kind': 'video',
@@ -109,6 +110,74 @@ def _spawn_workers(count):
         t = threading.Thread(target=_worker_loop, daemon=True,
                              name=f'audio-worker-{index}')
         t.start()
+
+
+def _convert_local_job(job):
+    """Convert a local file job: transcode straight to the target format.
+
+    No download involved; the source is read in place (or from the upload
+    staging dir, whose copy is removed on success). Retries re-run the
+    transcode; a missing source fails fast with a clear message.
+    """
+    src = (job.url or '')[len('local:'):]
+    try:
+        if not src or not os.path.isfile(src):
+            raise ValueError('Source file is gone')
+        _job_update(job, status='converting', progress=10,
+                    dl_speed='', dl_eta='')
+        fmt_key = LABEL_TO_KEY.get(job.format)
+        if fmt_key is None:
+            raise ValueError('Unknown format')
+        meta = {}
+        try:
+            probed = _cached_metadata(src)
+            meta = {'title': probed.get('title') or '',
+                    'artist': probed.get('artist') or '',
+                    'album': probed.get('album') or ''}
+        except Exception:
+            pass
+        if not meta.get('title'):
+            meta['title'] = os.path.splitext(os.path.basename(src))[0]
+        cover = None
+        sidecar = os.path.splitext(src)[0] + '.cover.jpg'
+        if os.path.isfile(sidecar):
+            cover = sidecar
+        result = convert_audio_file(src, fmt_key, job.output_path, meta,
+                                    cover, job)
+        if not result.get('success'):
+            raise ValueError(result.get('error') or 'Conversion failed')
+        duration = _store_file_facts(job, job.output_path)
+        if not _job_finish(job, status='completed', progress=100,
+                           error=None, output_path=job.output_path,
+                           duration=duration):
+            _cleanup(job.output_path)
+        else:
+            _invalidate_stat(job.output_path)
+            try:
+                staged = _staging_dir()
+                if os.path.dirname(os.path.abspath(src)) == os.path.abspath(staged):
+                    _cleanup(src)
+            except Exception:
+                pass
+            if not job.parent_id and not job.is_playlist:
+                _notify('Conversion finished',
+                        os.path.basename(job.output_path))
+    except Exception as e:
+        action, attempts, message = _failure_plan(
+            job.retry_attempts, 3, str(e) or 'Conversion failed')
+        if action == 'retry':
+            if _job_finish(job, status='pending', progress=0,
+                            retry_attempts=attempts, error=message):
+                _conversion_queue.put(job.id)
+        elif _job_finish(job, status='failed', error=message):
+            if not job.parent_id and not job.is_playlist:
+                _notify('Conversion failed', message[:200])
+    finally:
+        if job.parent_id:
+            try:
+                _refresh_playlist_parent(job.parent_id)
+            except Exception:
+                pass
 
 
 def _queue_has(job_id):
@@ -233,6 +302,10 @@ def _worker_loop():
                         # run finished): never re-download a done track.
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
+                        continue
+
+                    if (job.url or '').startswith('local:'):
+                        _convert_local_job(job)
                         continue
 
                     fmt_key = LABEL_TO_KEY.get(job.format)
@@ -2735,7 +2808,10 @@ def _format_args(format_type):
             args += ['-ar', rate]
     elif format_type == 'ogg_vorbis':
         quality = str(getattr(settings, 'ogg_quality', None) or 8)
-        args = ['-c:a', 'vorbis', '-q:a', quality, '-strict', 'experimental']
+        # Native vorbis is experimental (needs -strict) and stereo-only:
+        # upmixing mono is a no-op for real stereo.
+        args = ['-c:a', 'vorbis', '-q:a', quality, '-ac', '2',
+                '-strict', 'experimental']
 
     return args
 
@@ -3713,6 +3789,144 @@ _ADOPT_FORMATS = {
 }
 _ADOPT_SCAN_CAP = 5000
 _ADOPT_ADD_CAP = 300
+
+
+_LOCAL_CONVERT_CAP = 50
+_UPLOAD_STAGING = 'audio-converter-uploads'
+
+
+def _staging_dir():
+    staged = os.path.join(tempfile.gettempdir(), _UPLOAD_STAGING)
+    os.makedirs(staged, exist_ok=True)
+    return staged
+
+
+def _queue_local_files(paths, format_type):
+    """Create pending conversion rows for local source files.
+
+    Returns (queued_ids, skipped_names). Sources stay untouched; results
+    land in the output folder under unique names.
+    """
+    try:
+        dest_dir = effective_output_path()
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError:
+        return [], list(paths)
+    fmt = VALID_FORMATS[format_type]
+    queued, skipped = [], []
+    for raw in list(paths)[:_LOCAL_CONVERT_CAP]:
+        try:
+            real = os.path.realpath(raw or '')
+        except Exception:
+            skipped.append(str(raw or ''))
+            continue
+        if (not real or not os.path.isfile(real)
+                or os.path.splitext(real)[1].lower() not in _ADOPT_FORMATS):
+            skipped.append(os.path.basename(real) or str(raw or ''))
+            continue
+        try:
+            size = os.path.getsize(real)
+        except OSError:
+            size = 0
+        if size <= 0:
+            skipped.append(os.path.basename(real))
+            continue
+        stem = os.path.splitext(os.path.basename(real))[0]
+        dest = unique_file_path(
+            dest_dir, sanitize_filename(stem) + '.' + fmt['ext'])
+        row = ConversionHistory(
+            url='local:' + real, format=fmt['label'], output_path=dest,
+            status='pending', progress=0)
+        db.session.add(row)
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            skipped.append(os.path.basename(real))
+            continue
+        queued.append(row.id)
+    for job_id in queued:
+        _conversion_queue.put(job_id)
+    if queued:
+        _ensure_worker()
+    return queued, skipped
+
+
+@bp.route('/api/convert-local', methods=['POST'])
+def api_convert_local():
+    """Queue conversion of local files picked in the built-in browser.
+
+    Body: {paths: [absolute server paths], format: format key}.
+    Nothing is uploaded: the server reads its own disk.
+    """
+    payload = request.get_json(silent=True) or {}
+    fmt_key = str(payload.get('format') or '').strip()
+    if not is_valid_format(fmt_key):
+        return jsonify({'ok': False, 'message': 'Invalid format'}), 400
+    paths = payload.get('paths') or []
+    if not isinstance(paths, list) or not paths:
+        return jsonify({'ok': False, 'message': 'No files selected'}), 400
+    queued, skipped = _queue_local_files(paths, fmt_key)
+    if not queued:
+        return jsonify({'ok': False,
+                        'message': 'None of those files can be converted.'}), 400
+    message = f'Queued {len(queued)} file(s) for conversion.'
+    if skipped:
+        message += f' Skipped: {", ".join(skipped[:5])}.'
+    return jsonify({'ok': True, 'queued': len(queued),
+                    'skipped': skipped, 'message': message})
+
+
+@bp.route('/api/upload-convert', methods=['POST'])
+def api_upload_convert():
+    """Convert dropped files: bytes come up multipart, convert as local jobs.
+
+    Localhost uploads are loopback-fast; files land in a staging dir and
+    the staged copies are removed once converted.
+    """
+    fmt_key = str(request.form.get('format') or '').strip()
+    if not is_valid_format(fmt_key):
+        return jsonify({'ok': False, 'message': 'Invalid format'}), 400
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'ok': False, 'message': 'No files received'}), 400
+    try:
+        staged = _staging_dir()
+    except OSError:
+        return jsonify({'ok': False,
+                        'message': 'Cannot stage uploads'}), 500
+    saved = []
+    skipped = []
+    for upload in files[:_LOCAL_CONVERT_CAP]:
+        name = sanitize_filename(
+            os.path.basename(upload.filename or ''))[:200]
+        ext = os.path.splitext(name)[1].lower()
+        if not name or ext not in _ADOPT_FORMATS:
+            skipped.append(os.path.basename(upload.filename or ''))
+            continue
+        dest = os.path.join(staged, name)
+        stem, suffix = os.path.splitext(dest)
+        counter = 2
+        while os.path.exists(dest):
+            dest = f'{stem} ({counter}){suffix}'
+            counter += 1
+        try:
+            upload.save(dest)
+            if os.path.getsize(dest) > 0:
+                saved.append(dest)
+            else:
+                _cleanup(dest)
+                skipped.append(name)
+        except Exception:
+            skipped.append(name)
+    queued, skipped2 = _queue_local_files(saved, fmt_key)
+    skipped = skipped + skipped2
+    if not queued:
+        return jsonify({'ok': False,
+                        'message': 'None of those files can be converted.'}), 400
+    return jsonify({'ok': True, 'queued': len(queued),
+                    'skipped': skipped,
+                    'message': f'Queued {len(queued)} file(s) for conversion.'})
 
 
 def _adopt_row(path, existing):

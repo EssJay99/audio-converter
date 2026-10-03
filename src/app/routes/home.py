@@ -393,8 +393,11 @@ def api_directories():
       {
         "directories": ["/path/one", "/path/two"],
         "valid": true,          # is the current q a usable directory?
-        "open_dirs": [...]      # dirs at 'depth' to seed the next expansion
+        "open_dirs": [...],     # dirs at 'depth' to seed the next expansion
+        "files": [...]          # with files=1: media files in q
       }
+    Media extensions mirror the converter's; capped so huge folders stay
+    cheap. Symlinks are never followed.
     """
     q = request.args.get('q', '')
     depth = request.args.get('depth', 2, type=int)
@@ -403,6 +406,9 @@ def api_directories():
     depth = max(1, min(depth, 3))
 
     base = _expand_user_path(q) or os.path.expanduser('~')
+    # File listings always use the asked-for folder; the drive-root
+    # fallback below rewrites `base` for directory navigation only.
+    file_base = base if os.path.isdir(base) else ''
 
     directories = []
     valid = False
@@ -455,12 +461,35 @@ def api_directories():
                 continue
         open_dirs.sort()
 
+    from app.routes.convert import _ADOPT_FORMATS
+    files = []
+    if str(request.args.get('files') or '') == '1' and file_base:
+        try:
+            for name in sorted(os.listdir(file_base)):
+                if name.startswith('.'):
+                    continue
+                if len(files) >= 200:
+                    break
+                child = os.path.join(file_base, name)
+                if os.path.isdir(child) or os.path.islink(child):
+                    continue
+                if os.path.splitext(name)[1].lower() not in _ADOPT_FORMATS:
+                    continue
+                try:
+                    size = os.path.getsize(child)
+                except OSError:
+                    continue
+                files.append({'name': name, 'path': child, 'size': size})
+        except (PermissionError, OSError):
+            pass
+
     return jsonify({
         'base': base,
         'valid': valid,
         'directories': directories,
         'open_dirs': open_dirs,
         'home': os.path.expanduser('~'),
+        'files': files,
     })
 
 
