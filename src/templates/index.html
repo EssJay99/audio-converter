@@ -439,6 +439,11 @@
                                                                     data-delete-playlist="{{ item.id }}" title="Delete every finished track, then the playlist">Delete all</button>
                                                         {% endif %}
                                                         </div>
+                                                        {% if item.format and item.format.endswith('Video') %}
+                                                            <img class="file-thumb" alt="" loading="lazy"
+                                                                 src="/api/cover/{{ item.id }}?size=thumb"
+                                                                 onerror="this.remove()">
+                                                        {% endif %}
                                                         {% if item.output_path %}
                                                             <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
                                                                 <span class="fw-semibold file-name">{{ item.output_path|basename }}</span>
@@ -488,6 +493,11 @@
                                                                         data-delete="{{ item.id }}" title="Delete file from disk and remove from history">Delete</button>
                                                                 {% endif %}
                                                             </div>
+                                                            {% if item.format and item.format.endswith('Video') %}
+                                                                <img class="file-thumb" alt="" loading="lazy"
+                                                                     src="/api/cover/{{ item.id }}?size=thumb"
+                                                                     onerror="this.remove()">
+                                                            {% endif %}
                                                             {% if item.output_path %}
                                                                 <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
                                                                     <span class="fw-semibold file-name">{{ item.output_path|basename }}</span>

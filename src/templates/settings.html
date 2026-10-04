@@ -399,8 +399,12 @@
                        {% if auto_update_ytdlp %}checked{% endif %}>
                 <label class="form-check-label" for="auto_update_ytdlp">Update yt-dlp automatically when a newer release appears</label>
             </div>
-            <div class="mt-2">
+            <div class="mt-2 d-flex flex-wrap gap-2 align-items-center">
                 <a href="/api/diagnostics" class="btn btn-sm btn-outline-secondary">Download diagnostics</a>
+                <button type="button" id="viewLogs" class="btn btn-sm btn-outline-secondary">View logs</button>
+            </div>
+            <pre id="logViewer" class="d-none mt-2 p-2 border rounded small log-viewer"></pre>
+            <div class="mt-2">
                 <small class="text-muted d-block mt-1">Versions, counts, and settings for troubleshooting. Never includes tokens, secrets, or proxy credentials.</small>
             </div>
         </div>
@@ -709,6 +713,27 @@
                     refreshDb();
                 })
                 .catch(() => dbNote('Failed.'));
+        });
+        const logViewer = document.getElementById('logViewer');
+        document.getElementById('viewLogs').addEventListener('click', () => {
+            if (!logViewer.classList.contains('d-none')) {
+                logViewer.classList.add('d-none');
+                return;
+            }
+            logViewer.textContent = 'Loading…';
+            logViewer.classList.remove('d-none');
+            fetch('/api/logs?lines=200')
+                .then((r) => r.json())
+                .then((d) => {
+                    const lines = (d && d.lines) || [];
+                    logViewer.textContent = lines.length
+                        ? lines.join('\n')
+                        : 'No log lines yet.';
+                    logViewer.scrollTop = logViewer.scrollHeight;
+                })
+                .catch(() => {
+                    logViewer.textContent = 'Could not load logs.';
+                });
         });
         document.getElementById('dbClear').addEventListener('click', () => {
             if (!confirm('Delete all conversion history, follows, and notices? Settings and playlists are kept. Files on disk stay.')) return;

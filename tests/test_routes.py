@@ -6595,3 +6595,112 @@ def test_player_layout_order(client):
     # Now-playing column keeps the core cards.
     for marker in ('id="tabQueue"', 'id="tabPlaylists"', 'id="tabRecent"'):
         assert marker in html
+
+
+def test_step_down_retries_lower_quality(client):
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/sd', format='MP4 Video',
+            output_path='/tmp/sd.mp4', status='downloading',
+            job_options='{"quality": "1080p"}'))
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/sd2', format='FLAC',
+            output_path='/tmp/sd2.flac', status='downloading'))
+        db.session.commit()
+        import json as _json
+        vid = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sd').first()
+        assert convert_module._maybe_step_down(vid, 'timeout boom') is True
+        stepped = db.session.get(ConversionHistory, vid.id)
+        assert stepped.status == 'pending'
+        assert _json.loads(stepped.job_options)['quality'] == '720p'
+        assert stepped.retry_attempts == 0
+        audio = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sd2').first()
+        assert convert_module._maybe_step_down(audio, 'timeout') is False
+        vid2 = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sd').first()
+        vid2.job_options = '{"quality": "480p"}'
+        vid2.status = 'downloading'
+        db.session.commit()
+        assert convert_module._maybe_step_down(vid2, 'timeout') is False
+        vid3 = ConversionHistory.query.filter_by(
+            url='https://youtu.be/sd').first()
+        vid3.job_options = '{"quality": "1080p"}'
+        vid3.status = 'downloading'
+        db.session.commit()
+        assert convert_module._maybe_step_down(
+            vid3, 'private video, login required') is False
+
+
+def test_clear_recently_played(client, tmp_path):
+    from datetime import datetime, timezone
+    track = tmp_path / 'rp.flac'
+    track.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/rp', format='FLAC',
+            output_path=str(track), status='completed',
+            play_count=3,
+            last_played_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.session.commit()
+    assert client.get('/api/recently-played').get_json()['items']
+    assert client.post('/api/recently-played/clear').get_json() == {'ok': True}
+    with client.application.app_context():
+        row = ConversionHistory.query.filter_by(
+            url='https://youtu.be/rp').first()
+        assert row.last_played_at is None
+        assert row.play_count == 3
+    assert client.get('/api/recently-played').get_json()['items'] == []
+
+
+def test_folders_endpoint_tree(client, tmp_path):
+    music = tmp_path / 'music'
+    (music / 'sub').mkdir(parents=True)
+    (music / 'a.flac').write_bytes(b'fLaC-x')
+    (music / 'sub' / 'b.mp3').write_bytes(b'ID3xx')
+    (music / 'notes.txt').write_bytes(b'nope')
+    import app.routes.convert as cm
+    import os as _os
+    real_path = _os.path.realpath(str(music))
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/f1', format='FLAC',
+            output_path=_os.path.join(real_path, 'a.flac'),
+            status='completed'))
+        db.session.commit()
+        row_id = ConversionHistory.query.filter_by(
+            url='https://youtu.be/f1').first().id
+    monkeypatch_target = None
+    import unittest.mock as _mock
+    with _mock.patch.object(cm, 'effective_output_path', return_value=real_path):
+        data = client.get('/api/folders').get_json()
+    assert data['ok'] is True and data['root'] == real_path
+    tree = data['tree']
+    assert tree['tracks'] == 2 and tree['bytes'] > 0
+    top_files = {f['name']: f for f in tree['files']}
+    assert top_files['a.flac']['id'] == row_id
+    assert top_files['a.flac']['format'] == 'FLAC'
+    subs = {d['name']: d for d in tree['dirs']}['sub']
+    assert subs['files'][0]['name'] == 'b.mp3'
+    assert subs['files'][0]['id'] is None
+
+
+def test_logs_endpoint(client):
+    data = client.get('/api/logs').get_json()
+    assert data['ok'] is True and isinstance(data['lines'], list)
+    data = client.get('/api/logs?lines=5').get_json()
+    assert len(data['lines']) <= 5
+    data = client.get('/api/logs?lines=abc').get_json()
+    assert data['ok'] is True
+
+
+def test_upnext_and_chapter_markers(client):
+    page = client.get('/player').data.decode('utf-8')
+    for marker in ('appUpNext', 'appUpNextPlay', 'appUpNextDismiss',
+                   'appUpNextCount', 'appTheaterChapters'):
+        assert marker in page
+    js = client.get('/static/js/player.js').data.decode('utf-8')
+    for marker in ('chapterJump', 'showUpNext', 'Prev chapter',
+                   'Next chapter', 'app-chapter-nav'):
+        assert marker in js

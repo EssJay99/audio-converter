@@ -61,8 +61,11 @@
                 </div>
 
                 <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                    <h5>Recently Played</h5>
-                    <ul id="tabRecent" class="list-group list-group-flush tab-queue"></ul>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Recently Played</h5>
+                        <button type="button" id="tabRecentClear" class="btn btn-sm btn-link" title="Forget when tracks were played">Clear</button>
+                    </div>
+                    <ul id="tabRecent" class="list-group list-group-flush tab-queue mt-2"></ul>
                 </div>
             </div>
 
@@ -75,12 +78,15 @@
                             <button type="button" class="btn btn-outline-secondary active" id="libViewTracks">Tracks</button>
                             <button type="button" class="btn btn-outline-secondary" id="libViewAlbums">Albums</button>
                             <button type="button" class="btn btn-outline-secondary" id="libViewArtists">Artists</button>
+                            <button type="button" class="btn btn-outline-secondary" id="libViewFolders">Folders</button>
                         </div>
                         <select id="tabSort" class="form-select history-status" aria-label="Sort library" style="width:auto;">
                             <option value="recent">Recently added</option>
                             <option value="played">Most played</option>
                             <option value="rated">Top rated</option>
                             <option value="name">Name A–Z</option>
+                            <option value="duration">Longest</option>
+                            <option value="size">Largest files</option>
                         </select>
                         <a href="/api/library.csv" class="btn btn-sm btn-outline-secondary" title="Download the library as CSV">CSV</a>
                         <div class="form-check ms-auto">

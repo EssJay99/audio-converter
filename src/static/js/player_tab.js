@@ -83,6 +83,10 @@
             rows.sort(function (a, b) { return (b.play_count || 0) - (a.play_count || 0); });
         } else if (sort === 'rated') {
             rows.sort(function (a, b) { return (b.rating || 0) - (a.rating || 0); });
+        } else if (sort === 'duration') {
+            rows.sort(function (a, b) { return (b.duration || 0) - (a.duration || 0); });
+        } else if (sort === 'size') {
+            rows.sort(function (a, b) { return (b.file_size || 0) - (a.file_size || 0); });
         } else if (sort === 'name') {
             rows.sort(function (a, b) {
                 return trackTitle(a).localeCompare(trackTitle(b));
@@ -301,6 +305,111 @@
         return h ? h + 'h ' + m + 'm' : m + 'm';
     }
 
+    function fmtFolderBytes(bytes) {
+        bytes = Math.max(0, Number(bytes) || 0);
+        if (bytes < 1024) return bytes + ' B';
+        var units = ['KB', 'MB', 'GB'];
+        var u = -1;
+        do {
+            bytes /= 1024;
+            u += 1;
+        } while (bytes >= 1024 && u < units.length - 1);
+        return bytes.toFixed(1) + ' ' + units[u];
+    }
+
+    function renderFolderView() {
+        var grid = document.getElementById('libGrid');
+        var groups = document.getElementById('libGroups');
+        if (!grid || !groups) return;
+        grid.classList.add('d-none');
+        groups.classList.remove('d-none');
+        groups.innerHTML = '';
+        var loading = document.createElement('span');
+        loading.className = 'text-muted small';
+        loading.textContent = 'Reading folders…';
+        groups.appendChild(loading);
+        fetch('/api/folders')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                groups.innerHTML = '';
+                if (!data.ok || !data.tree) {
+                    groups.innerHTML = '<span class="text-muted small">Could not read folders.</span>';
+                    return;
+                }
+                groups.appendChild(renderFolderNode(data.tree, true));
+            })
+            .catch(function () {
+                groups.innerHTML = '<span class="text-muted small">Could not read folders.</span>';
+            });
+    }
+
+    function renderFolderNode(node, isRoot) {
+        var wrap = document.createElement('div');
+        wrap.className = 'lib-folder';
+        var details = document.createElement('details');
+        if (isRoot) details.open = true;
+        var summary = document.createElement('summary');
+        summary.className = 'lib-folder-head';
+        var fname = document.createElement('strong');
+        fname.textContent = node.name;
+        summary.appendChild(fname);
+        var meta = document.createElement('span');
+        meta.className = 'text-muted small ms-2';
+        meta.textContent = node.tracks + ' track' + (node.tracks === 1 ? '' : 's') +
+            ' · ' + fmtFolderBytes(node.bytes);
+        summary.appendChild(meta);
+        details.appendChild(summary);
+        (node.dirs || []).forEach(function (child) {
+            details.appendChild(renderFolderNode(child, false));
+        });
+        (node.files || []).forEach(function (f) {
+            var row = document.createElement('div');
+            row.className = 'lib-file';
+            var label = document.createElement('span');
+            label.className = 'text-truncate';
+            label.textContent = f.name;
+            label.title = f.path;
+            row.appendChild(label);
+            var sub = document.createElement('span');
+            sub.className = 'text-muted small ms-2';
+            var bits = [fmtFolderBytes(f.size)];
+            if (f.duration) {
+                var m = Math.floor(f.duration / 60);
+                var s = Math.floor(f.duration % 60);
+                bits.push(m + ':' + String(s).padStart(2, '0'));
+            }
+            sub.textContent = bits.join(' · ');
+            row.appendChild(sub);
+            if (f.id) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-sm btn-outline-secondary ms-2';
+                btn.textContent = '\u25B6';
+                btn.title = 'Play';
+                btn.addEventListener('click', function () {
+                    fetch('/api/track/' + f.id)
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            if (data.ok && window.AudioPlayer) {
+                                window.AudioPlayer.playItems([data.item], 0, node.name);
+                            }
+                        })
+                        .catch(function () {});
+                });
+                row.appendChild(btn);
+            } else {
+                var hint = document.createElement('span');
+                hint.className = 'text-muted small ms-2';
+                hint.textContent = 'untracked';
+                hint.title = 'Adopt this folder to track it';
+                row.appendChild(hint);
+            }
+            details.appendChild(row);
+        });
+        wrap.appendChild(details);
+        return wrap;
+    }
+
     function renderGroups(kind) {
         var grid = document.getElementById('libGrid');
         var groups = document.getElementById('libGroups');
@@ -410,7 +519,15 @@
 
     function setLibView(view) {
         libView = view;
-        ['Tracks', 'Albums', 'Artists'].forEach(function (v) {
+        if (view === 'folders') {
+            renderFolderView();
+            ['Tracks', 'Albums', 'Artists', 'Folders'].forEach(function (v) {
+                var b = document.getElementById('libView' + v);
+                if (b) b.classList.toggle('active', v.toLowerCase() === view);
+            });
+            return;
+        }
+        ['Tracks', 'Albums', 'Artists', 'Folders'].forEach(function (v) {
             var btn = document.getElementById('libView' + v);
             if (btn) btn.classList.toggle('active', v.toLowerCase() === view);
         });
@@ -946,12 +1063,21 @@
         loadStats();
         loadSmartMixes();
         initLibraryTools();
-        ['Tracks', 'Albums', 'Artists'].forEach(function (v) {
+        ['Tracks', 'Albums', 'Artists', 'Folders'].forEach(function (v) {
             var btn = document.getElementById('libView' + v);
             if (btn) {
                 btn.addEventListener('click', function () { setLibView(v.toLowerCase()); });
             }
         });
+        var recentClear = document.getElementById('tabRecentClear');
+        if (recentClear) {
+            recentClear.addEventListener('click', function () {
+                if (!confirm('Forget when tracks were played? Play counts stay.')) return;
+                postJSON('/api/recently-played/clear', {})
+                    .then(function () { loadRecent(); })
+                    .catch(function () {});
+            });
+        }
         wirePlaybackState();
         document.addEventListener('trackplayed', function () {
             setTimeout(loadRecent, 1500);

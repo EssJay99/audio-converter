@@ -102,6 +102,16 @@
             </span>
         </div>
         <video id="appTheaterVideo" controls playsinline preload="metadata"></video>
+        <div id="appUpNext" class="app-upnext d-none" aria-label="Up next">
+            <img id="appUpNextCover" class="app-upnext-cover d-none" alt="">
+            <div class="min-w-0 flex-grow-1">
+                <div class="small text-muted">Up next in <span id="appUpNextCount">8</span>s</div>
+                <strong id="appUpNextTitle" class="text-truncate d-block">Next video</strong>
+                <div id="appUpNextMeta" class="text-muted small"></div>
+            </div>
+            <button type="button" id="appUpNextPlay" class="btn btn-sm btn-primary text-nowrap">Play now</button>
+            <button type="button" id="appUpNextDismiss" class="btn btn-sm btn-outline-secondary" aria-label="Dismiss">✕</button>
+        </div>
         <div id="appTheaterStatus" class="app-theater-status d-none" role="status"></div>
         <div id="appTheaterChapters" class="app-theater-chapters d-none" aria-label="Chapters"></div>
         <div id="appTheaterPicBox" class="app-theater-picbox d-none" aria-label="Picture settings">

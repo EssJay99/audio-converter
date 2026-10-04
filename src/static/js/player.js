@@ -101,7 +101,7 @@
         if (theaterVideo) {
             theaterVideo.addEventListener('ended', () => {
                 clearPosition();
-                next(true);
+                if (!showUpNext()) next(true);
             });
             theaterVideo.addEventListener('loadedmetadata', onTheaterLoaded);
             theaterVideo.addEventListener('timeupdate', onTheaterTime);
@@ -187,6 +187,17 @@
                     }
                 } catch (err) { /* ignore */ }
             });
+        }
+        const upPlay = $('appUpNextPlay');
+        if (upPlay) {
+            upPlay.addEventListener('click', () => {
+                hideUpNext();
+                next(true);
+            });
+        }
+        const upDismiss = $('appUpNextDismiss');
+        if (upDismiss) {
+            upDismiss.addEventListener('click', () => hideUpNext());
         }
         const picBtn = $('appTheaterPicBtn');
         if (picBtn) {
@@ -787,6 +798,7 @@
         }
         Player.audio.pause();
         Player.theaterId = item.id;
+        hideUpNext();
         updateMediaSession(item, data);
         renderChapters(item.id);
         const title = (data.meta && data.meta.title) || item.display;
@@ -875,7 +887,57 @@
             });
     }
 
+    let upNextTimer = null;
+
+    function hideUpNext() {
+        if (upNextTimer) {
+            try { clearInterval(upNextTimer); } catch (err) {}
+            upNextTimer = null;
+        }
+        const overlay = $('appUpNext');
+        if (overlay) overlay.classList.add('d-none');
+    }
+
+    // Netflix-style card when a video ends and more is queued.
+    // Returns true when it took over (caller must not advance).
+    function showUpNext() {
+        hideUpNext();
+        if (Player.repeat === 'one') return false;
+        const coming = Player.queue[Player.index + 1];
+        if (!coming) return false;
+        const overlay = $('appUpNext');
+        if (!overlay) {
+            next(true);
+            return true;
+        }
+        $('appUpNextTitle').textContent = coming.display || 'Next video';
+        $('appUpNextMeta').textContent = coming.format || '';
+        const cover = $('appUpNextCover');
+        if (cover) {
+            cover.classList.add('d-none');
+            cover.removeAttribute('src');
+            cover.onload = () => cover.classList.remove('d-none');
+            cover.onerror = () => cover.classList.add('d-none');
+            cover.src = '/api/cover/' + coming.id + '?size=thumb';
+        }
+        const count = $('appUpNextCount');
+        let remaining = 8;
+        const tick = () => {
+            remaining -= 1;
+            if (count) count.textContent = String(Math.max(0, remaining));
+            if (remaining <= 0) {
+                hideUpNext();
+                next(true);
+            }
+        };
+        if (count) count.textContent = String(remaining);
+        upNextTimer = setInterval(tick, 1000);
+        overlay.classList.remove('d-none');
+        return true;
+    }
+
     function closeTheater(silent) {
+        hideUpNext();
         const overlay = $('appTheater');
         const video = $('appTheaterVideo');
         if (!overlay || overlay.classList.contains('d-none')) return;
@@ -969,6 +1031,7 @@
 
     function next(auto) {
         if (Player.fading) finishFadeNow();
+        hideUpNext();
         if (Player.queue.length === 0) return;
         if (auto && Player.sleepMode === 'end-track') {
             sleepStop();
@@ -1580,6 +1643,35 @@
 
     // -------------------------------------------- chapters ----
 
+    var theaterChapters = [];
+
+    function chapterJump(direction) {
+        const video = $('appTheaterVideo');
+        if (!video || !theaterChapters.length) return;
+        const pos = video.currentTime || 0;
+        let target = null;
+        if (direction < 0) {
+            for (let i = theaterChapters.length - 1; i >= 0; i--) {
+                if (theaterChapters[i].t < pos - 2) {
+                    target = theaterChapters[i].t;
+                    break;
+                }
+            }
+            if (target === null) target = 0;
+        } else {
+            for (let i = 0; i < theaterChapters.length; i++) {
+                if (theaterChapters[i].t > pos + 1) {
+                    target = theaterChapters[i].t;
+                    break;
+                }
+            }
+            if (target === null && video.duration) target = video.duration;
+        }
+        if (target !== null) {
+            try { video.currentTime = target; } catch (err) {}
+        }
+    }
+
     function renderChapters(itemId) {
         const box = $('appTheaterChapters');
         if (!box) return;
@@ -1590,6 +1682,26 @@
             .then(function (data) {
                 const chapters = (data && data.chapters) || [];
                 if (!chapters.length) return;
+                theaterChapters = chapters.map(function (ch) {
+                    return { t: Number(ch.start) || 0, title: ch.title || '' };
+                });
+                const nav = document.createElement('div');
+                nav.className = 'app-chapter-nav';
+                const prevBtn = document.createElement('button');
+                prevBtn.type = 'button';
+                prevBtn.className = 'app-chapter-btn';
+                prevBtn.textContent = '\u23EE Prev chapter';
+                prevBtn.title = 'Previous chapter';
+                prevBtn.addEventListener('click', function () { chapterJump(-1); });
+                const nextBtn = document.createElement('button');
+                nextBtn.type = 'button';
+                nextBtn.className = 'app-chapter-btn';
+                nextBtn.textContent = 'Next chapter \u23ED';
+                nextBtn.title = 'Next chapter';
+                nextBtn.addEventListener('click', function () { chapterJump(1); });
+                nav.appendChild(prevBtn);
+                nav.appendChild(nextBtn);
+                box.appendChild(nav);
                 chapters.forEach(function (ch) {
                     const btn = document.createElement('button');
                     btn.type = 'button';
@@ -1724,6 +1836,26 @@
     const Lyrics = {
         itemId: 0,
         lines: [],
+        cacheGet: function (itemId) {
+            try {
+                const cache = JSON.parse(localStorage.getItem('appLyricsCache') || '{}');
+                const entry = cache[itemId];
+                if (!entry) return null;
+                if (Date.now() - (entry.saved || 0) > 30 * 86400000) return null;
+                return entry.data || null;
+            } catch (err) {
+                return null;
+            }
+        },
+        cachePut: function (itemId, data) {
+            try {
+                const cache = JSON.parse(localStorage.getItem('appLyricsCache') || '{}');
+                cache[itemId] = { saved: Date.now(), data: data };
+                const keys = Object.keys(cache);
+                if (keys.length > 50) delete cache[keys[0]];
+                localStorage.setItem('appLyricsCache', JSON.stringify(cache));
+            } catch (err) { /* private mode or quota */ }
+        },
         open: function (itemId) {
             const overlay = $('appLyrics');
             const body = $('appLyricsBody');
@@ -1738,10 +1870,10 @@
             loading.textContent = 'Loading…';
             body.appendChild(loading);
             overlay.classList.remove('d-none');
-            fetch('/api/lyrics/' + itemId)
-                .then(function (r) { return r.json(); })
-                .then(function (data) {
-                    if (!data.ok) throw new Error('');
+            const cached = Lyrics.cacheGet(itemId);
+            const render = function (data) {
+                Lyrics.cachePut(itemId, data);
+                if (!data.ok) throw new Error('');
                     $('appLyricsTitle').textContent =
                         (data.title && data.artist) ? data.title + ' · ' + data.artist
                         : (data.title || 'Lyrics');
@@ -1773,14 +1905,21 @@
                         none.textContent = 'No lyrics found for this track.';
                         body.appendChild(none);
                     }
-                })
-                .catch(function () {
-                    body.innerHTML = '';
-                    const none = document.createElement('span');
-                    none.className = 'text-muted small';
-                    none.textContent = 'Could not load lyrics.';
-                    body.appendChild(none);
-                });
+                };
+            if (cached && cached.ok) {
+                render(cached);
+            } else {
+                fetch('/api/lyrics/' + itemId)
+                    .then(function (r) { return r.json(); })
+                    .then(render)
+                    .catch(function () {
+                        body.innerHTML = '';
+                        const none = document.createElement('span');
+                        none.className = 'text-muted small';
+                        none.textContent = 'Could not load lyrics.';
+                        body.appendChild(none);
+                    });
+            }
         },
         close: function () {
             const overlay = $('appLyrics');

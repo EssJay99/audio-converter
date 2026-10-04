@@ -270,6 +270,18 @@ def api_duplicates():
     return jsonify({'ok': True, 'groups': dupes})
 
 
+@bp.route('/api/recently-played/clear', methods=['POST'])
+def api_clear_recently_played():
+    """Forget when tracks were played (play counts are kept)."""
+    try:
+        db.session.query(ConversionHistory).update({'last_played_at': None})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False, 'message': 'Could not clear.'}), 500
+    return jsonify({'ok': True})
+
+
 @bp.route('/api/recently-played')
 def api_recently_played():
     """Most recently played tracks, newest listen first."""

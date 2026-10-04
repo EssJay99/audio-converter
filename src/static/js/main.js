@@ -29,8 +29,22 @@ function showCopyStatus(statusEl) {
 
 // Renders the "File / Saved to" cell for a completed conversion, mirroring
 // the server-rendered markup so live-polled rows match the initial page.
+function isVideoItem(item) {
+    return /video$/i.test(item.format || '');
+}
+
 function renderSavedFileCell(cell, item) {
     cell.innerHTML = '';
+
+    if (isVideoItem(item)) {
+        const thumb = document.createElement('img');
+        thumb.className = 'file-thumb';
+        thumb.alt = '';
+        thumb.loading = 'lazy';
+        thumb.src = '/api/cover/' + item.id + '?size=thumb';
+        thumb.onerror = function () { thumb.remove(); };
+        cell.appendChild(thumb);
+    }
 
     const actions = document.createElement('div');
     actions.className = 'd-flex flex-wrap gap-1 align-items-center file-actions';

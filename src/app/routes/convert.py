@@ -378,15 +378,22 @@ def _worker_loop():
                                                 retry_attempts=attempts,
                                                 error=message):
                                     _conversion_queue.put(job.id)
+                            elif _maybe_step_down(job, message):
+                                _conversion_queue.put(job.id)
                             elif _job_finish(job, status='failed', error=message):
                                 _cleanup_partials(output_dir, job.id)
                                 if not job.parent_id and not job.is_playlist:
                                     _notify('Download failed',
                                             (job.url or '')[:200])
                     except TimeoutError as te:
-                        # Job exceeded overall time budget — treat as permanent failure
-                        _job_finish(job, status='failed', error=f'Timeout: {str(te)}')
-                        _cleanup_partials(output_dir, job.id)
+                        # Timeouts usually mean too big a format: step down
+                        # first, fail only at the bottom rung.
+                        if _maybe_step_down(
+                                job, f'Timeout: {str(te)}'):
+                            _conversion_queue.put(job.id)
+                        else:
+                            _job_finish(job, status='failed', error=f'Timeout: {str(te)}')
+                            _cleanup_partials(output_dir, job.id)
                     except Exception as e:
                         # Network/Unexpected error — check retry budget, but only if we haven't exceeded timeout
                         db.session.commit()
@@ -407,9 +414,12 @@ def _worker_loop():
                                             error=f'Retry {attempts}/{max_retries}: Internal error — will retry'):
                                 _conversion_queue.put(job.id)
                         else:
-                            _job_finish(job, status='failed', error=_note_stale_helper(
-                                        f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
-                            _cleanup_partials(output_dir, job.id)
+                            if _maybe_step_down(job, str(e) or 'Internal error'):
+                                _conversion_queue.put(job.id)
+                            else:
+                                _job_finish(job, status='failed', error=_note_stale_helper(
+                                            f'Max retries ({max_retries}) exceeded: {str(e) if str(e) else "Permanent error"}'))
+                                _cleanup_partials(output_dir, job.id)
                     finally:
                         if job.parent_id:
                             _refresh_playlist_parent(job.parent_id)
@@ -1183,6 +1193,54 @@ def _looks_like_nospace(error):
             or 'no space available' in text)
 
 
+_QUALITY_LADDER = ('best', '2160p', '1080p', '720p', '480p')
+_STEP_DOWN_SKIP = ('invalid url', 'video unavailable', 'private video',
+                   'audio format not supported', 'no video stream',
+                   'not from a supported', 'login', 'age', 'copyright',
+                   'no playable', 'empty or private')
+
+
+def _maybe_step_down(job, error_text):
+    """Retry a failed VIDEO job one rung lower (4K down to 480p).
+
+    Blocked/unsupported formats fail identically at every rung, so those
+    errors stay terminal. Anything else (timeouts, throttles, flaky
+    extractors) gets a fresh retry budget at the next lower cap. Returns
+    True when the job was requeued.
+    """
+    try:
+        if VALID_FORMATS.get(
+                LABEL_TO_KEY.get(job.format, ''), {}).get('kind') != 'video':
+            return False
+        lowered = str(error_text or '').lower()
+        if any(s in lowered for s in _STEP_DOWN_SKIP):
+            return False
+        try:
+            options = json.loads(job.job_options or '{}')
+        except (TypeError, ValueError):
+            options = {}
+        if not isinstance(options, dict):
+            options = {}
+        current = _video_quality_cap(job)
+        if current not in _QUALITY_LADDER:
+            current = '1080p'
+        idx = _QUALITY_LADDER.index(current) + 1
+        if idx >= len(_QUALITY_LADDER):
+            return False
+        options['quality'] = _QUALITY_LADDER[idx]
+        try:
+            options_json = json.dumps(options)
+        except (TypeError, ValueError):
+            return False
+        note = (f"{current} failed; retrying at {_QUALITY_LADDER[idx]}"
+                + (f': {error_text}' if error_text else ''))
+        return bool(_job_finish(job, status='pending', progress=0,
+                               retry_attempts=0, error=note[:500],
+                               job_options=options_json))
+    except Exception:
+        return False
+
+
 def _failure_plan(retry_attempts, max_retries, error):
     """Decide a download failure's fate.
 
@@ -1637,6 +1695,80 @@ def record_played(conversion_id):
     history.last_played_at = utcnow()
     db.session.commit()
     return jsonify({'ok': True, 'play_count': history.play_count})
+
+
+@bp.route('/api/folders')
+def api_folders():
+    """Browse the output folder as a tree: dirs with track counts/sizes.
+
+    Joined against the library so known files carry their id, format,
+    and duration for one-click play. Unknown media files show without
+    an id (adopt them from the Player tab to track them).
+    """
+    try:
+        root = os.path.abspath(effective_output_path())
+    except Exception:
+        return jsonify({'ok': False, 'message': 'No output folder.'}), 400
+    if not os.path.isdir(root):
+        return jsonify({'ok': False, 'message': 'No output folder.'}), 400
+    try:
+        known = {}
+        for row in db.session.query(ConversionHistory).filter(
+                ConversionHistory.status.in_(['completed', 'skipped'])).all():
+            if row.output_path:
+                known[os.path.abspath(row.output_path)] = {
+                    'id': row.id, 'format': row.format,
+                    'duration': row.duration or 0}
+    except Exception:
+        known = {}
+
+    def build(path, depth):
+        node = {'name': os.path.basename(path) or path, 'path': path,
+                'dirs': [], 'files': [], 'bytes': 0, 'tracks': 0}
+        if depth > 4:
+            return node
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError:
+            return node
+        if len(entries) > 2000:
+            entries = entries[:2000]
+        for name in entries:
+            if name.startswith('.'):
+                continue
+            full = os.path.join(path, name)
+            try:
+                if os.path.islink(full):
+                    continue
+                if os.path.isdir(full):
+                    child = build(full, depth + 1)
+                    node['dirs'].append(child)
+                    node['bytes'] += child['bytes']
+                    node['tracks'] += child['tracks']
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in _ADOPT_FORMATS:
+                    continue
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    continue
+                entry = {'name': name, 'path': full, 'size': size,
+                         'id': None, 'format': '', 'duration': 0}
+                hit = known.get(os.path.abspath(full))
+                if hit:
+                    entry.update(hit)
+                node['files'].append(entry)
+                node['bytes'] += size
+                node['tracks'] += 1
+            except OSError:
+                continue
+        node['dirs'].sort(key=lambda d: d['name'].lower())
+        node['files'].sort(key=lambda f: f['name'].lower())
+        return node
+
+    tree = build(root, 0)
+    return jsonify({'ok': True, 'root': root, 'tree': tree})
 
 
 @bp.route('/api/library')
@@ -4555,6 +4687,7 @@ def _serialize(item):
     except (ValueError, TypeError):
         missed = 0
     file_exists = False
+    _size = 0
     if saved_path:
         file_exists, _size = _cached_stat(saved_path)
     return {
@@ -4568,6 +4701,7 @@ def _serialize(item):
         # whether that file still exists on disk (it may have been moved).
         'filename': os.path.basename(saved_path) if saved_path else '',
         'file_exists': file_exists,
+        'file_size': _size if file_exists else 0,
         # Playlist grouping. Parent rows have is_playlist=True and no file;
         # child rows point at their parent and carry their track index.
         'parent_id': item.parent_id,
@@ -4960,6 +5094,17 @@ def api_diagnostics():
     return Response(json.dumps(bundle, indent=2), mimetype='application/json',
                     headers={'Content-Disposition':
                              'attachment; filename="audio-converter-diagnostics.json"'})
+
+
+@bp.route('/api/logs')
+def api_logs():
+    """Recent app log lines for the in-app viewer (redacted like exports)."""
+    try:
+        limit = int(request.args.get('lines', 200))
+    except (TypeError, ValueError):
+        limit = 200
+    limit = min(500, max(20, limit))
+    return jsonify({'ok': True, 'lines': _recent_log_tail(limit=limit)})
 
 
 def _recent_log_tail(limit=40):

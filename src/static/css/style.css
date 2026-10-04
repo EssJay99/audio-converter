@@ -1631,3 +1631,42 @@ html[data-density="compact"] h3 {
 .lib-empty .d-flex {
     justify-content: center;
 }
+
+/* --- History video thumbs --- */
+.file-thumb {
+    width: 96px;
+    height: 54px;
+    object-fit: cover;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    display: block;
+    background: #000;
+}
+
+/* --- Up-next overlay --- */
+.app-upnext {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--bs-border-color, #dee2e6);
+    border-radius: 10px;
+    background: var(--bs-tertiary-bg, #f8f9fa);
+}
+.app-upnext-cover {
+    width: 72px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #000;
+}
+
+/* --- Log viewer --- */
+.log-viewer {
+    max-height: 320px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    background: var(--bs-tertiary-bg, #f8f9fa);
+}
