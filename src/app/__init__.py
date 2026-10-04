@@ -172,6 +172,7 @@ _SCHEMA_MIGRATIONS = {
         ('default_video_format', 'VARCHAR(20) DEFAULT "video_mp4"'),
         ('finish_action', 'VARCHAR(10) DEFAULT "nothing"'),
         ('seen_version', 'VARCHAR(20) DEFAULT ""'),
+        ('tour_seen', 'BOOLEAN DEFAULT 0'),
         ('numbered_filenames', 'BOOLEAN DEFAULT 0'),
         ('nfo_files', 'BOOLEAN DEFAULT 0'),
         ('mp3_bitrate', 'INTEGER DEFAULT 192'),

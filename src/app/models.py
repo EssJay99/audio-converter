@@ -64,6 +64,8 @@ class UserSettings(db.Model):
     finish_action = db.Column(db.String(10), nullable=False, default='nothing')
     # App version last acknowledged in the What's-new dialog.
     seen_version = db.Column(db.String(20), nullable=False, default='')
+    # The welcome tour has been shown (first launch only, never again).
+    tour_seen = db.Column(db.Boolean, nullable=False, default=False)
     # Playlist children save as `NN - title` instead of plain titles.
     numbered_filenames = db.Column(db.Boolean, nullable=False, default=False)
     # Write a .nfo sidecar (title/artist/uploader/date/URL) per download.

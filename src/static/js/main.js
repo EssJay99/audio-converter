@@ -2016,6 +2016,11 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
                 if (data.first_run) {
                     show(0);
                     overlay.classList.remove('d-none');
+                    // Record it server-side: first launch only, forever.
+                    fetch('/api/first-run/seen', {
+                        method: 'POST',
+                        headers: { 'X-CSRFToken': csrfToken() },
+                    }).catch(() => {});
                 }
             })
             .catch(() => {});

@@ -4970,6 +4970,26 @@ def test_first_run_endpoint(client):
         'ok': True, 'first_run': False}
 
 
+def test_first_run_seen_once_ever(client):
+    from app.models import UserSettings
+    # Empty library, unseen: shows.
+    assert client.get('/api/first-run').get_json()['first_run'] is True
+    # Marking seen retires it permanently, rows or not.
+    assert client.post('/api/first-run/seen').get_json() == {'ok': True}
+    assert client.get('/api/first-run').get_json()['first_run'] is False
+    with client.application.app_context():
+        assert UserSettings.query.first().tour_seen is True
+    # Existing users (rows present, never marked) still don't get it.
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        settings.tour_seen = False
+        db.session.add(ConversionHistory(
+            url='https://youtu.be/y', format='FLAC',
+            output_path='/tmp/y.flac', status='completed'))
+        db.session.commit()
+    assert client.get('/api/first-run').get_json()['first_run'] is False
+
+
 def test_default_format_setting(client):
     from app.models import UserSettings
     with client.application.app_context():

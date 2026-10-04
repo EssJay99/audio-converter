@@ -6774,12 +6774,36 @@ def api_whats_new():
 
 @bp.route('/api/first-run')
 def api_first_run():
-    """True until the first conversion exists: drives the welcome wizard."""
+    """Whether to show the welcome tour: first app launch only.
+
+    True when the tour was never seen AND no conversions exist yet
+    (existing users upgrading never get it sprung on them).
+    """
     try:
+        settings = UserSettings.query.first()
+        seen = bool(getattr(settings, 'tour_seen', False)) if settings else False
+        if seen:
+            return jsonify({'ok': True, 'first_run': False})
         has_rows = db.session.query(ConversionHistory).first() is not None
     except Exception:
-        has_rows = True
+        return jsonify({'ok': True, 'first_run': False})
     return jsonify({'ok': True, 'first_run': not has_rows})
+
+
+@bp.route('/api/first-run/seen', methods=['POST'])
+def api_first_run_seen():
+    """Record the tour as shown so it never appears again."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            settings = UserSettings(output_path=effective_output_path())
+            db.session.add(settings)
+        settings.tour_seen = True
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False}), 500
+    return jsonify({'ok': True})
 
 
 @bp.route('/api/inspect', methods=['POST'])
