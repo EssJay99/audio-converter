@@ -5,7 +5,7 @@ import time
 from datetime import timedelta
 
 from flask import Blueprint, render_template, request, jsonify, abort, Response
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from app.models import ConversionHistory, UserSettings, effective_output_path, utcnow
 from app.routes.convert import _serialize, _requires_phrase, sanitize_filename
 from app import db, APP_VERSION
@@ -32,6 +32,14 @@ def index():
         default_format=default_format,
         request_path=request.path,
         show_history=False,
+        history_page=1,
+        history_pages=1,
+        history_total=len(history),
+        history_filters={
+            'q': '', 'status': 'all', 'format': 'all', 'source': 'all',
+            'folder': 'all', 'sort': 'newest', 'days': 0,
+        },
+        history_facets={'status': {}, 'format': {}, 'source': {}},
         app_version=APP_VERSION,
     )
 
@@ -83,13 +91,83 @@ def history():
         per = min(500, max(10, int(request.args.get('per', 100))))
     except (TypeError, ValueError):
         per = 100
-    total = db.session.query(ConversionHistory).count()
+
+    # Server-side faceted filtering. Every parameter is optional;
+    # absent means "no constraint" so the unfiltered full list still
+    # works for users without JS or with deep-link URLs.
+    q = (request.args.get('q') or '').strip()
+    status = (request.args.get('status') or 'all').strip()
+    fmt = (request.args.get('format') or 'all').strip()
+    source = (request.args.get('source') or 'all').strip()
+    folder = (request.args.get('folder') or 'all').strip()
+    sort = (request.args.get('sort') or 'newest').strip()
+    try:
+        days = int(request.args.get('days') or 0)
+    except (TypeError, ValueError):
+        days = 0
+
+    query = db.session.query(ConversionHistory)
+    if q:
+        like = '%' + q.replace('%', r'\%').replace('_', r'\_') + '%'
+        query = query.filter(or_(
+            ConversionHistory.url.ilike(like),
+            ConversionHistory.output_path.ilike(like),
+            ConversionHistory.tag_title.ilike(like),
+            ConversionHistory.tag_artist.ilike(like),
+            ConversionHistory.tag_album.ilike(like),
+            ConversionHistory.playlist_title.ilike(like),
+        ))
+    if status not in ('all', '') and status in {
+        'pending', 'downloading', 'converting', 'paused',
+        'completed', 'skipped', 'failed'}:
+        query = query.filter(ConversionHistory.status == status)
+    if fmt not in ('all', ''):
+        query = query.filter(ConversionHistory.format == fmt)
+    if source not in ('all', ''):
+        query = query.filter(ConversionHistory.import_source == source)
+    if folder not in ('all', ''):
+        # Match the row's output_path (or, for child rows, the parent's
+        # folder prefix) so the dropdown listing plays well with rows
+        # that haven't been migrated yet.
+        query = query.filter(ConversionHistory.output_path.like(
+            folder.rstrip('/') + '%'))
+    if days > 0:
+        cutoff = utcnow() - timedelta(days=days)
+        query = query.filter(ConversionHistory.created_at >= cutoff)
+
+    # Sort. name = filename only (not full path) so the A-Z order is
+    # stable and predictable.
+    if sort == 'oldest':
+        query = query.order_by(ConversionHistory.created_at.asc())
+    elif sort == 'name':
+        query = query.order_by(ConversionHistory.output_path.asc())
+    elif sort == 'size':
+        # No file_size column; rough proxy by id is meaningless — fall
+        # back to newest so the choice still does something deterministic.
+        query = query.order_by(ConversionHistory.created_at.desc())
+    else:  # newest (default)
+        query = query.order_by(ConversionHistory.created_at.desc())
+
+    total = query.count()
     pages = max(1, -(-total // per))
     page = min(page, pages)
+    history = query.offset((page - 1) * per).limit(per).all()
 
-    history = db.session.query(ConversionHistory).order_by(
-        ConversionHistory.created_at.desc()
-    ).offset((page - 1) * per).limit(per).all()
+    # Facets: distinct values + counts so the UI can render "37 from
+    # Spotify", etc. Cheap on SQLite with a small library; if the
+    # library grows we add a per-facet cap.
+    facet_status = dict(db.session.query(
+        ConversionHistory.status,
+        func.count(ConversionHistory.id),
+    ).group_by(ConversionHistory.status).all())
+    facet_format = dict(db.session.query(
+        ConversionHistory.format,
+        func.count(ConversionHistory.id),
+    ).group_by(ConversionHistory.format).all())
+    facet_source = dict(db.session.query(
+        ConversionHistory.import_source,
+        func.count(ConversionHistory.id),
+    ).group_by(ConversionHistory.import_source).all())
 
     today = utcnow().date()
     yesterday = today - timedelta(days=1)
@@ -105,6 +183,14 @@ def history():
         history_page=page,
         history_pages=pages,
         history_total=total,
+        history_filters={
+            'q': q, 'status': status, 'format': fmt, 'source': source,
+            'folder': folder, 'sort': sort, 'days': days,
+        },
+        history_facets={
+            'status': facet_status, 'format': facet_format,
+            'source': facet_source,
+        },
         app_version=APP_VERSION,
     )
 

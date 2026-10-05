@@ -1450,6 +1450,82 @@ function initBulkActions() {
             step();
         });
     }
+    const norm = document.getElementById('bulkNormalize');
+    if (norm) {
+        norm.addEventListener('click', () => {
+            const items = selectedRows();
+            if (!items.length) return;
+            // Re-encoding in place is destructive; require a typed phrase.
+            const phrase = (typeof window.confirmWithPhrase === 'function')
+                ? window.confirmWithPhrase('CONFIRM',
+                    'Re-encode ' + items.length + ' selected file(s) to -16 LUFS. '
+                    + 'The original is replaced — but the same format/codec is used, '
+                    + 'so quality is preserved.')
+                : window.prompt('Type CONFIRM to normalize ' + items.length + ' file(s):');
+            if (!phrase) return;
+            norm.disabled = true;
+            const original = norm.textContent;
+            norm.textContent = 'Measuring…';
+            fetch('/api/normalize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json',
+                           'X-CSRFToken': csrfToken() },
+                body: JSON.stringify({
+                    ids: items.map((it) => it.id),
+                    confirm: phrase,
+                    target_lufs: -16,
+                }),
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    if (data.ok) {
+                        toast(data.message || 'Normalized.', 'success');
+                    } else {
+                        // 412 is the typed-phrase modal's negative answer.
+                        if (data.message && data.message.indexOf('phrase') === -1) {
+                            toast(data.message || 'Normalize failed.', 'danger');
+                        } else {
+                            toast(data.message || 'Cancelled.', 'info');
+                        }
+                    }
+                    if (typeof refreshTable === 'function') refreshTable();
+                })
+                .catch(() => toast('Normalize failed.', 'danger'))
+                .finally(() => {
+                    norm.disabled = false;
+                    norm.textContent = original;
+                });
+        });
+    }
+    const tidy = document.getElementById('bulkTagsNormalize');
+    if (tidy) {
+        tidy.addEventListener('click', () => {
+            const items = selectedRows();
+            tidy.disabled = true;
+            const original = tidy.textContent;
+            tidy.textContent = 'Tidying…';
+            fetch('/api/tags/normalize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json',
+                           'X-CSRFToken': csrfToken() },
+                body: JSON.stringify({
+                    ids: items.map((it) => it.id),
+                    scope: items.length ? 'selection' : 'library',
+                }),
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    toast(data.message || 'Tag cleanup done.',
+                          data.ok ? 'success' : 'danger');
+                    if (typeof refreshTable === 'function') refreshTable();
+                })
+                .catch(() => toast('Tag cleanup failed.', 'danger'))
+                .finally(() => {
+                    tidy.disabled = false;
+                    tidy.textContent = original;
+                });
+        });
+    }
 }
 
 document.addEventListener('DOMContentLoaded', initBulkActions);
@@ -1473,6 +1549,7 @@ const historyState = { q: '', status: 'all', folder: 'all', sort: 'newest', page
 // bypass applyHistoryFilter (they patch rows in place), so when nothing
 // structural changed we skip all DOM writes to avoid layout churn.
 let historyLastSig = null;
+let historySearchTimer = null;
 
 function historyTopRows() {
     const body = document.getElementById('historyBody');
@@ -1622,6 +1699,13 @@ function buildHistoryFolderOptions() {
         const dir = historyRowDir(tr.dataset.folder);
         if (dir && !seen.has(dir)) seen.set(dir, historyFolderLabel(dir));
     });
+    if (seen.size === 0) {
+        // No folders visible yet (initial render). Stay hidden so the
+        // toolbar doesn't show a one-option dropdown.
+        select.classList.add('d-none');
+        return;
+    }
+    select.classList.remove('d-none');
     const current = select.value || 'all';
     select.innerHTML = '';
     const all = document.createElement('option');
@@ -1670,15 +1754,26 @@ function refreshQueueButton() {
 
 function initHistoryToolbar() {
     if (!document.getElementById('historyBody')) return;
+    const form = document.getElementById('history-form');
     const search = document.getElementById('historySearch');
     const status = document.getElementById('historyStatus');
+    const formatSel = document.getElementById('historyFormat');
+    const sourceSel = document.getElementById('historySource');
+    const daysSel = document.getElementById('historyDays');
+    const sortSel = document.getElementById('historySort');
     const prev = document.getElementById('historyPrev');
     const next = document.getElementById('historyNext');
+
+    // Search box: instant client-side filter on the visible rows, plus a
+    // debounced server round-trip once the user stops typing (so the
+    // query runs server-side too, hitting the indexed tag/url columns).
     if (search) {
         search.addEventListener('input', () => {
             historyState.q = search.value.trim().toLowerCase();
             historyState.page = 0;
             applyHistoryFilter();
+            clearTimeout(historySearchTimer);
+            historySearchTimer = setTimeout(() => form && form.submit(), 500);
         });
     }
     if (status) {
@@ -1686,6 +1781,7 @@ function initHistoryToolbar() {
             historyState.status = status.value;
             historyState.page = 0;
             applyHistoryFilter();
+            form && form.submit();
         });
     }
     buildHistoryFolderOptions();
@@ -1695,6 +1791,20 @@ function initHistoryToolbar() {
             historyState.folder = folder.value;
             historyState.page = 0;
             applyHistoryFilter();
+            form && form.submit();
+        });
+    }
+    // Faceted selects that the client can't filter on: jump to the server
+    // immediately so the page reflects the chosen format / source / age.
+    for (const sel of [formatSel, sourceSel, daysSel]) {
+        if (sel) sel.addEventListener('change', () => form && form.submit());
+    }
+    if (sortSel) {
+        sortSel.addEventListener('change', () => {
+            historyState.sort = sortSel.value;
+            historyState.page = 0;
+            applyHistoryFilter();
+            form && form.submit();
         });
     }
     if (prev) {
@@ -1708,14 +1818,6 @@ function initHistoryToolbar() {
     if (next) {
         next.addEventListener('click', () => {
             historyState.page += 1;
-            applyHistoryFilter();
-        });
-    }
-    const sortSel = document.getElementById('historySort');
-    if (sortSel) {
-        sortSel.addEventListener('change', () => {
-            historyState.sort = sortSel.value;
-            historyState.page = 0;
             applyHistoryFilter();
         });
     }
@@ -2054,20 +2156,40 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
 // Dropped/chosen files upload to /api/upload-convert (loopback-fast) and
 // queue as conversion jobs; progress shows in History like any download.
 (function localConvert() {
+    // Audio/video file extensions we accept. Used for the recursive
+    // directory walk so a folder of mixed content only queues the
+    // music and videos, not random thumbnails.
+    const ACCEPT_EXTS = new Set([
+        'flac', 'wav', 'mp3', 'm4a', 'mp4', 'm4v', 'ogg', 'oga', 'opus',
+        'webm', 'mkv', 'mov', 'avi', 'aac', 'aif', 'aiff', 'flv', 'wma',
+    ]);
+    function extOf(name) {
+        const m = /\.([a-z0-9]+)$/i.exec(name || '');
+        return m ? m[1].toLowerCase() : '';
+    }
+
     function init() {
         const zone = document.getElementById('fileDropzone');
         if (!zone) return;
         const input = document.getElementById('fileBrowseInput');
+        const folderInput = document.getElementById('folderBrowseInput');
         const fmtSel = document.getElementById('localFormat');
         const browse = document.getElementById('fileBrowseBtn');
+        const folderBtn = document.getElementById('folderBrowseBtn');
         if (browse && input) {
             browse.addEventListener('click', (e) => {
                 e.stopPropagation();
                 input.click();
             });
         }
+        if (folderBtn && folderInput) {
+            folderBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                folderInput.click();
+            });
+        }
         zone.addEventListener('click', (e) => {
-            if (input && e.target !== browse) input.click();
+            if (input && e.target !== browse && e.target !== folderBtn) input.click();
         });
         zone.addEventListener('keydown', (e) => {
             if ((e.key === 'Enter' || e.key === ' ') && input) {
@@ -2087,15 +2209,76 @@ document.addEventListener('DOMContentLoaded', initHistoryToolbar);
                 zone.classList.remove('dragging');
             });
         });
+        // Native HTML5 drag/drop exposes files only — directory walking
+        // requires the FileSystem API. When the user drags a folder onto
+        // the zone, items[] carries FileSystemDirectoryEntry; we read it
+        // recursively with createReader() and queue the matching files.
         zone.addEventListener('drop', (e) => {
-            const files = (e.dataTransfer && e.dataTransfer.files) || [];
-            if (files.length) uploadLocalFiles(files);
+            const items = (e.dataTransfer && e.dataTransfer.items) || [];
+            const fileItems = (e.dataTransfer && e.dataTransfer.files) || [];
+            if (items.length && items[0].webkitGetAsEntry) {
+                const files = [];
+                const pending = [];
+                Array.from(items).forEach((it) => {
+                    const entry = it.webkitGetAsEntry && it.webkitGetAsEntry();
+                    if (entry) pending.push(walkEntry(entry, files));
+                    else {
+                        const f = it.getAsFile && it.getAsFile();
+                        if (f) files.push(f);
+                    }
+                });
+                Promise.all(pending).then(() => {
+                    if (files.length) uploadLocalFiles(files);
+                });
+            } else if (fileItems.length) {
+                uploadLocalFiles(fileItems);
+            }
         });
         if (input) {
             input.addEventListener('change', () => {
                 if (input.files && input.files.length) uploadLocalFiles(input.files);
                 input.value = '';
             });
+        }
+        if (folderInput) {
+            folderInput.addEventListener('change', () => {
+                if (folderInput.files && folderInput.files.length) {
+                    uploadLocalFiles(folderInput.files);
+                }
+                folderInput.value = '';
+            });
+        }
+
+        // Read every file under a dropped directory. Limited by the
+        // cap below so a 10,000-item folder doesn't freeze the page.
+        const FOLDER_LIMIT = 500;
+        function walkEntry(entry, files) {
+            if (files.length >= FOLDER_LIMIT) return Promise.resolve();
+            if (entry.isFile) {
+                return new Promise((resolve) => {
+                    entry.file((f) => {
+                        if (ACCEPT_EXTS.has(extOf(f.name))) files.push(f);
+                        resolve();
+                    }, () => resolve());
+                });
+            }
+            if (entry.isDirectory) {
+                return new Promise((resolve) => {
+                    const reader = entry.createReader();
+                    const read = () => {
+                        reader.readEntries((entries) => {
+                            if (!entries.length) {
+                                resolve();
+                                return;
+                            }
+                            const batch = entries.map((sub) => walkEntry(sub, files));
+                            Promise.all(batch).then(read)
+                        });
+                    };
+                    read();
+                });
+            }
+            return Promise.resolve();
         }
 
         function targetFormat() {

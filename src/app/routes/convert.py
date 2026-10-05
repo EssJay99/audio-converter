@@ -2291,6 +2291,145 @@ def bulk_edit_tags():
     return jsonify({'ok': True, 'updated': updated, 'failed': failed})
 
 
+@bp.route('/api/tags/normalize', methods=['POST'])
+def api_normalize_tags():
+    """Clean up messy tags across the library without re-downloading.
+
+    Two passes:
+    1. Whitespace + leading/trailing punctuation on title/artist/album
+       for each selected track (and optionally across the whole
+       library).
+    2. Merge case-only-different artist and album names. The first
+       canonical row wins; subsequent duplicates in the same name fold
+       into the canonical's tag_artist / tag_album.
+
+    Optional `rename_files` flag (default false) renames each affected
+    file on disk to match the new artist/album/title — pass `true` to
+    enable. Files are only renamed when the new name is well-formed
+    (artist + title present) and the destination doesn't already exist.
+    """
+    payload = request.get_json(silent=True) or {}
+    rename_files = bool(payload.get('rename_files'))
+    scope = str(payload.get('scope') or 'selection')
+
+    try:
+        ids = [int(i) for i in (payload.get('ids') or [])][:500]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Invalid track list'}), 400
+
+    query = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(('completed', 'skipped')))
+    if scope == 'selection' and ids:
+        query = query.filter(ConversionHistory.id.in_(ids))
+    rows = query.all()
+
+    # Pass 1: normalize whitespace + case on each row.
+    cleaned = 0
+    for row in rows:
+        new_t = _clean_string(row.tag_title)
+        new_a = _clean_string(row.tag_artist)
+        new_al = _clean_string(row.tag_album)
+        if (new_t != row.tag_title or new_a != row.tag_artist
+                or new_al != row.tag_album):
+            row.tag_title = new_t
+            row.tag_artist = new_a
+            row.tag_album = new_al
+            cleaned += 1
+    db.session.commit()
+
+    # Pass 2: merge case-only-different artists / albums into a canonical form.
+    artist_canon = _case_canonical_map(rows, 'tag_artist')
+    album_canon = _case_canonical_map(rows, 'tag_album')
+    merged = 0
+    for row in rows:
+        new_a = artist_canon.get(row.tag_artist.lower(), row.tag_artist)
+        new_al = album_canon.get(row.tag_album.lower(), row.tag_album)
+        if new_a != row.tag_artist:
+            row.tag_artist = new_a
+            merged += 1
+        if new_al != row.tag_album:
+            row.tag_album = new_al
+            merged += 1
+    db.session.commit()
+
+    # Optional pass 3: rename files on disk. Skip when missing fields.
+    renamed = 0
+    rename_failures = []
+    if rename_files:
+        for row in rows:
+            if not row.output_path or not os.path.isfile(row.output_path):
+                continue
+            new_path = _rename_to_tags(row)
+            if new_path and new_path != row.output_path:
+                try:
+                    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                    if not os.path.exists(new_path):
+                        os.replace(row.output_path, new_path)
+                        row.output_path = new_path
+                        renamed += 1
+                    else:
+                        rename_failures.append(row.id)
+                except OSError:
+                    rename_failures.append(row.id)
+        db.session.commit()
+    return jsonify({'ok': True, 'cleaned': cleaned, 'merged': merged,
+                    'renamed': renamed,
+                    'rename_failures': rename_failures,
+                    'message': (f'Cleaned whitespace on {cleaned}, '
+                                f'merged case-duplicates in {merged} field(s)'
+                                + (f', renamed {renamed} file(s).' if rename_files
+                                   else '.'))})
+
+
+def _clean_string(value):
+    """Normalize a single tag: collapse whitespace, trim, strip trailing
+    punctuation that usually means the artist field bled into the title.
+    """
+    if not value:
+        return ''
+    s = re.sub(r'\s+', ' ', str(value)).strip()
+    return s.strip(' .,;:/-')
+
+
+def _case_canonical_map(rows, field):
+    """Group rows by lowercase value; pick the most-common original form
+    as the canonical spelling, and map lower-case to it.
+    """
+    from collections import Counter
+    counts = Counter()
+    originals = {}
+    for row in rows:
+        key = (getattr(row, field) or '').strip()
+        if not key:
+            continue
+        lk = key.lower()
+        counts[lk] += 1
+        originals.setdefault(lk, key)
+    canonical = {}
+    for lk, _ in counts.most_common():
+        canonical[lk] = originals[lk]
+    return canonical
+
+
+def _rename_to_tags(row):
+    """Suggest a destination path that matches the cleaned tags.
+
+    Returns None if any required piece is missing. Pattern matches the
+    rest of the app's filename construction: "<artist>/<album>/<title>.<ext>"
+    where missing album collapses to "Singles".
+    """
+    if not (row.tag_artist and row.tag_title):
+        return None
+    artist = sanitize_filename(row.tag_artist)
+    album = sanitize_filename(row.tag_album) or 'Singles'
+    title = sanitize_filename(row.tag_title)
+    ext = os.path.splitext(row.output_path)[1].lower()
+    if not ext:
+        return None
+    directory = os.path.dirname(os.path.realpath(row.output_path))
+    return os.path.join(directory, artist, album, title + ext)
+
+
 _COVER_CACHE_CAP = 500
 
 
@@ -5294,6 +5433,135 @@ def reveal_file(conversion_id):
         return jsonify({'ok': True, 'message': 'Opened in your file manager'})
     except Exception as e:
         return jsonify({'ok': False, 'message': str(e)}), 500
+
+
+@bp.route('/api/normalize', methods=['POST'])
+@_requires_phrase('CONFIRM')
+def api_normalize():
+    """Apply EBU R128 loudness normalization to finished downloads.
+
+    For each track: measure integrated loudness with ffmpeg's ebur128
+    filter, then re-encode the file in place with a gain offset that
+    lands the output near -16 LUFS. Re-tags with the same metadata; the
+    operation is lossless in the sense that re-encoding is done with
+    the source codec where possible (FLAC→FLAC, MP3→MP3, etc.) to avoid
+    quality loss from a format change.
+
+    Returns a per-track status dict so the UI can show which files
+    landed where; failures keep their original file.
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        ids = [int(i) for i in (payload.get('ids') or [])][:50]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Invalid track list'}), 400
+    if not ids:
+        return jsonify({'ok': False, 'message': 'No tracks selected'}), 400
+    target_lufs = float(payload.get('target_lufs') or -16.0)
+    results = []
+    for track_id in ids:
+        row = db.session.get(ConversionHistory, track_id)
+        src = (row.output_path or '') if row else ''
+        if (not row or row.status not in ('completed', 'skipped')
+                or not src or not os.path.isfile(src)):
+            results.append({'id': track_id, 'ok': False,
+                            'message': 'Skipped: not a finished file.'})
+            continue
+        try:
+            measured = _measure_lufs(src)
+            target_db = target_lufs - measured
+            new_path = _apply_gain(src, target_db)
+            results.append({'id': track_id, 'ok': True,
+                            'measured_lufs': round(measured, 1),
+                            'gain_db': round(target_db, 1),
+                            'path': new_path})
+        except Exception as e:
+            results.append({'id': track_id, 'ok': False,
+                            'message': str(e)[:200]})
+    ok = sum(1 for r in results if r['ok'])
+    return jsonify({'ok': ok == len(results),
+                    'message': f'Normalized {ok}/{len(results)} file(s).',
+                    'results': results})
+
+
+def _measure_lufs(path):
+    """Run ffmpeg's ebur128 filter to integrated-LUFS the file.
+
+    Returns the integrated loudness in LUFS. Raises on transport /
+    decode failure.
+    """
+    proc = subprocess.run(
+        ['ffmpeg', '-hide_banner', '-nostats', '-i', path,
+         '-filter_complex', 'ebur128=peak=-1',
+         '-f', 'null', '-'],
+        capture_output=True, text=True, timeout=180,
+    )
+    out = (proc.stderr or '') + (proc.stdout or '')
+    # ffmpeg's ebur128 prints "I: -16.5 LUFS" near the end. Be tolerant
+    # of locale-formatted floats ("-16,5" on a French system, etc.).
+    match = re.search(
+        r'I:\s+(-?\d+(?:[.,]\d+)?)\s+LUFS', out)
+    if not match:
+        raise RuntimeError('Could not measure loudness; is ffmpeg installed?')
+    raw = match.group(1).replace(',', '.')
+    return float(raw)
+
+
+def _apply_gain(path, gain_db):
+    """Re-encode `path` in place with the given audio gain (dB).
+
+    Picks a matching container/codec by file extension so the same
+    family (FLAC→FLAC, MP3→MP3, etc.) is used and quality stays high.
+    The result lands next to the source as a sibling, then atomically
+    replaces it.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    ext_to_codec = {
+        '.flac': ('flac', 'flac', '.flac'),
+        '.mp3': ('libmp3lame', 'mp3', '.mp3'),
+        '.m4a': ('aac', 'ipod', '.m4a'),
+        '.ogg': ('libvorbis', 'ogg', '.ogg'),
+        '.opus': ('libopus', 'ogg', '.opus'),
+        '.wav': ('pcm_s24le', 'wav', '.wav'),
+    }
+    if ext not in ext_to_codec:
+        raise RuntimeError(f'Unsupported format: {ext}')
+    codec, container, out_ext = ext_to_codec[ext]
+    bitrate = ''
+    if codec == 'libmp3lame':
+        bitrate = '-b:a 192k'
+    elif codec == 'libvorbis':
+        bitrate = '-b:a 192k'
+    elif codec == 'libopus':
+        bitrate = '-b:a 160k'
+    elif codec == 'aac':
+        bitrate = '-b:a 256k'
+    tmp = path + '.normalize.tmp' + out_ext
+    cmd = ['ffmpeg', '-y', '-hide_banner', '-nostats', '-i', path,
+           '-vn', '-map', '0:a?', '-map', '0:v?', '-map', '0:s?',
+           '-c:a', codec]
+    if bitrate:
+        cmd += bitrate.split()
+    cmd += ['-af', f'volume={gain_db}dB',
+           '-c:v', 'copy', '-c:s', 'copy',
+           '-map_metadata', '0', tmp]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    if res.returncode != 0 or not os.path.isfile(tmp):
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(
+            (res.stderr or '').strip()[-400:] or 'ffmpeg failed')
+    # Swap into place. If the rename fails (read-only volume), copy.
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        import shutil
+        shutil.copyfile(tmp, path)
+        os.remove(tmp)
+    return path
 
 
 @bp.route('/api/queue/pause')

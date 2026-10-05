@@ -153,10 +153,12 @@
 
                 <div class="card p-4 shadow-sm border-0 rounded mt-3">
                     <h3>Convert Local Files</h3>
-                    <p class="text-muted small mb-2">Have audio or video files already? Drop them here (or browse) to convert them to another format — no link needed.</p>
+                    <p class="text-muted small mb-2">Have audio or video files already? Drop them here (or browse) to convert them to another format — no link needed. Folders of mixed audio and video are picked up recursively.</p>
                     <div class="file-dropzone" id="fileDropzone" role="button" tabindex="0" aria-label="Drop files to convert">
-                        <div>Drop audio/video files here, or <button type="button" class="btn btn-sm btn-outline-primary" id="fileBrowseBtn">browse files</button></div>
+                        <div>Drop audio/video files here, or <button type="button" class="btn btn-sm btn-outline-primary" id="fileBrowseBtn">browse</button>
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="folderBrowseBtn">a folder</button></div>
                         <input type="file" id="fileBrowseInput" class="d-none" multiple accept="audio/*,video/*,.mkv,.opus,.m4a,.flac,.ogg,.oga,.wav,.mp3,.mp4,.webm,.mov,.avi,.m4v">
+                        <input type="file" id="folderBrowseInput" class="d-none" multiple webkitdirectory directory>
                     </div>
                     <div class="d-flex gap-2 align-items-center mt-2">
                         <label class="small text-muted" for="localFormat">Convert to</label>
@@ -304,20 +306,27 @@
 
                             {% if show_history %}
                                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                                    <span>Showing {{ history|length }} of {{ history_total }} conversions &middot; page {{ history_page }} of {{ history_pages }}</span>
+                                    <span>
+                                        {% if history_total %}
+                                            Showing {{ ((history_page - 1) * history|length + 1) }}–{{ ((history_page - 1) * history|length + history|length) }} of {{ history_total }} conversions &middot; page {{ history_page }} of {{ history_pages }}
+                                        {% else %}
+                                            No conversions match these filters.
+                                        {% endif %}
+                                    </span>
                                     <span class="d-flex gap-2">
+                                        {% set qs = 'q=' ~ history_filters.q ~ '&status=' ~ history_filters.status ~ '&format=' ~ history_filters.format ~ '&source=' ~ history_filters.source ~ '&folder=' ~ history_filters.folder ~ '&sort=' ~ history_filters.sort ~ '&days=' ~ history_filters.days %}
                                         {% if history_page > 1 %}
-                                            <a href="/history?page={{ history_page - 1 }}" class="btn btn-sm btn-outline-secondary">&lsaquo; Prev page</a>
+                                            <a href="/history?page={{ history_page - 1 }}&{{ qs }}" class="btn btn-sm btn-outline-secondary">&lsaquo; Prev page</a>
                                         {% endif %}
                                         {% if history_page < history_pages %}
-                                            <a href="/history?page={{ history_page + 1 }}" class="btn btn-sm btn-outline-secondary">Next page &rsaquo;</a>
+                                            <a href="/history?page={{ history_page + 1 }}&{{ qs }}" class="btn btn-sm btn-outline-secondary">Next page &rsaquo;</a>
                                         {% endif %}
                                         <a href="/" class="btn btn-sm btn-outline-secondary">Back to Home</a>
                                     </span>
                                 </div>
                             {% endif %}
 
-                            <div class="history-toolbar d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <form id="history-form" method="get" action="/history" class="history-toolbar d-flex flex-wrap gap-2 align-items-center mb-2">
                                 <input type="checkbox" id="selectAll" class="form-check-input" title="Select all visible rows" aria-label="Select all visible rows">
                                 <span id="bulkBar" class="d-none align-items-center gap-2">
                                     <span id="bulkCount" class="small text-muted"></span>
@@ -333,32 +342,67 @@
                                         <option value="opus">Opus</option>
                                     </select>
                                     <button type="button" id="bulkTranscode" class="btn btn-sm btn-outline-secondary" title="Convert selections to the chosen format without re-downloading">Transcode</button>
+                                    <button type="button" id="bulkNormalize" class="btn btn-sm btn-outline-secondary" title="Apply EBU R128 loudness normalization (-16 LUFS) to selections in place">Normalize</button>
+                                    <button type="button" id="bulkTagsNormalize" class="btn btn-sm btn-outline-secondary" title="Clean up messy tags: collapse whitespace, merge case-different artists/albums">Tidy tags</button>
                                     <button type="button" id="bulkDelete" class="btn btn-sm btn-outline-danger" title="Delete all selections from disk">Delete</button>
                                     <button type="button" id="bulkClear" class="btn btn-sm btn-outline-secondary">Clear</button>
                                 </span>
                                 <div class="history-search-wrap">
-                                    <input type="search" id="historySearch" class="form-control form-control-sm history-search"
-                                           placeholder="Search conversions…" aria-label="Search conversions" autocomplete="off">
+                                    <input type="search" id="historySearch" name="q" class="form-control form-control-sm history-search"
+                                           placeholder="Search title, artist, album, URL…" aria-label="Search conversions" autocomplete="off"
+                                           value="{{ history_filters.q }}">
+                                    <select id="historyFolder" name="folder" class="form-select form-select-sm history-folder d-none" aria-label="Filter by folder">
+                                        <option value="all">All folders</option>
+                                    </select>
                                     <ul id="searchResults" class="search-results d-none" aria-live="polite"></ul>
                                 </div>
-                                <select id="historyStatus" class="form-select form-select-sm history-status" aria-label="Filter by status">
-                                    <option value="all">All statuses</option>
-                                    <option value="pending">Pending</option>
-                                    <option value="downloading">Downloading</option>
-                                    <option value="converting">Converting</option>
-                                    <option value="paused">Paused</option>
-                                    <option value="completed">Completed</option>
-                                    <option value="skipped">Skipped</option>
-                                    <option value="failed">Failed</option>
+                                {% if show_history %}
+<select id="historyStatus" name="status" class="form-select form-select-sm history-status" aria-label="Filter by status">
+                                    {% for opt in [('all','All statuses'),('pending','Pending'),('downloading','Downloading'),('converting','Converting'),('paused','Paused'),('completed','Completed'),('skipped','Skipped'),('failed','Failed')] %}
+                                        <option value="{{ opt[0] }}" {% if history_filters.status == opt[0] %}selected{% endif %}>{{ opt[1] }}</option>
+                                    {% endfor %}
                                 </select>
-                                <select id="historyFolder" class="form-select form-select-sm history-folder" aria-label="Filter by folder">
-                                    <option value="all">All folders</option>
+                                <select id="historyFormat" name="format" class="form-select form-select-sm history-format" aria-label="Filter by format">
+                                    {% set fmt_count = history_facets.format or {} %}
+                                    <option value="all" {% if history_filters.format == 'all' %}selected{% endif %}>All formats</option>
+                                    {% for k, v in fmt_count.items() %}
+                                        {% if k %}
+                                            <option value="{{ k }}" {% if history_filters.format == k %}selected{% endif %}>{{ k }} ({{ v }})</option>
+                                        {% endif %}
+                                    {% endfor %}
                                 </select>
-                                <select id="historySort" class="form-select form-select-sm history-sort" aria-label="Sort conversions">
-                                    <option value="newest">Newest first</option>
-                                    <option value="oldest">Oldest first</option>
-                                    <option value="name">Name A–Z</option>
+                                <select id="historySource" name="source" class="form-select form-select-sm history-source" aria-label="Filter by source">
+                                    {% set src_count = history_facets.source or {} %}
+                                    <option value="all" {% if history_filters.source == 'all' %}selected{% endif %}>All sources</option>
+                                    {% for k, v in src_count.items() %}
+                                        {% if k %}
+                                            <option value="{{ k }}" {% if history_filters.source == k %}selected{% endif %}>{{ k|capitalize }} ({{ v }})</option>
+                                        {% endif %}
+                                    {% endfor %}
                                 </select>
+                                <select id="historyDays" name="days" class="form-select form-select-sm history-days" aria-label="Filter by age">
+                                    {% for opt in [(0,'Any time'),(1,'Last 24 h'),(7,'Last 7 d'),(30,'Last 30 d'),(90,'Last 90 d'),(365,'Last year')] %}
+                                        <option value="{{ opt[0] }}" {% if history_filters.days == opt[0] %}selected{% endif %}>{{ opt[1] }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
+                                <select id="historyStatus" name="status" class="form-select form-select-sm history-status" aria-label="Filter by status">
+                                    {% for opt in [('all','All statuses'),('pending','Pending'),('downloading','Downloading'),('converting','Converting'),('paused','Paused'),('completed','Completed'),('skipped','Skipped'),('failed','Failed')] %}
+                                        <option value="{{ opt[0] }}" {% if history_filters.status == opt[0] %}selected{% endif %}>{{ opt[1] }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% endif %}
+                                <select id="historySort" name="sort" class="form-select form-select-sm history-sort" aria-label="Sort conversions">
+                                    <option value="newest" {% if history_filters.sort == 'newest' %}selected{% endif %}>Newest first</option>
+                                    <option value="oldest" {% if history_filters.sort == 'oldest' %}selected{% endif %}>Oldest first</option>
+                                    <option value="name" {% if history_filters.sort == 'name' %}selected{% endif %}>Name A–Z</option>
+                                </select>
+                                {% if show_history %}
+                                <button type="submit" class="btn btn-sm btn-outline-secondary" aria-label="Apply filters">Apply</button>
+                                {% if history_filters.q or history_filters.status != 'all' or history_filters.format != 'all' or history_filters.source != 'all' or history_filters.days or history_filters.sort != 'newest' %}
+                                    <a href="/history" class="btn btn-sm btn-outline-secondary" aria-label="Clear filters">Clear</a>
+                                {% endif %}
+                                {% endif %}
                                 <span id="historyCount" class="text-muted small ms-auto" aria-live="polite"></span>
                                 <span id="storageInfo" class="text-muted small" title="Disk space used by converted files"></span>
                                 <div class="btn-group btn-group-sm" role="group" aria-label="History pages">
@@ -367,7 +411,7 @@
                                 </div>
                                 <button type="button" id="queuePause" class="btn btn-sm btn-outline-secondary" title="Pause or resume all downloads">Pause all</button>
                                 <button type="button" id="verifyFiles" class="btn btn-sm btn-outline-secondary" title="Check every downloaded file for corruption and re-queue the bad ones">Verify files</button>
-                            </div>
+                            </form>
 
                             <div class="table-responsive">
                                 <table class="table table-hover history-table">
