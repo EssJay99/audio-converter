@@ -287,6 +287,17 @@
                     <a href="/settings" class="alert-link">Open Settings</a>.
                     <button type="button" class="btn-close" data-hide-health aria-label="Dismiss"></button>
                 </div>
+                <div id="migrationBanner" class="alert alert-info alert-dismissible d-none" role="alert">
+                    <strong>Database upgraded.</strong>
+                    <span id="migrationBannerText"></span>
+                    <button type="button" class="btn-close" data-hide-migration aria-label="Dismiss"></button>
+                </div>
+                <div id="whatsNewBanner" class="alert alert-primary alert-dismissible d-none" role="alert">
+                    <strong>What's new.</strong>
+                    <span data-whats-new-text></span>
+                    <a href="/changelog" class="alert-link">Read the changelog</a>.
+                    <button type="button" class="btn-close" aria-label="Dismiss"></button>
+                </div>
                 {% if history %}
                         <div class="card p-4 shadow-sm border-0 rounded mt-3">
                             <h5>{% if show_history %}Full History{% else %}Recent Conversions{% endif %}</h5>

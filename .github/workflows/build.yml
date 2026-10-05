@@ -2,13 +2,18 @@ name: build-installers
 
 # Build a ready-to-install package on each OS (PyInstaller cannot
 # cross-compile, so every platform builds natively here).
-# Run manually from the Actions tab, or push a v* tag to also publish a
+# Pushes to main and PRs trigger the matrix build (tests run as the
+# first job) so a regression blocks the merge before the slow
+# installers spin up. Manual dispatch and tag pushes also publish a
 # GitHub Release with all three installers attached.
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write

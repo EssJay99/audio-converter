@@ -77,6 +77,10 @@ class UserSettings(db.Model):
     seen_version = db.Column(db.String(20), nullable=False, default='')
     # The welcome tour has been shown (first launch only, never again).
     tour_seen = db.Column(db.Boolean, nullable=False, default=False)
+    # Bumped every time the migration list gains a non-additive change;
+    # the welcome banner mentions it once after a version bump, then the
+    # user setting records the version so the banner stays quiet.
+    seen_schema_version = db.Column(db.Integer, nullable=False, default=0)
     # Playlist children save as `NN - title` instead of plain titles.
     numbered_filenames = db.Column(db.Boolean, nullable=False, default=False)
     # Write a .nfo sidecar (title/artist/uploader/date/URL) per download.
@@ -97,7 +101,9 @@ class UserSettings(db.Model):
     close_behavior = db.Column(db.String(10), nullable=False, default='ask')
     tray_icon = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, default=utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=utcnow)
+    # updated_at is bumped on every save so the optimistic-concurrency check
+    # in /settings POST can tell a stale tab from the latest one.
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
 
     def __repr__(self):
         return f'<UserSettings {self.id}>'
@@ -163,8 +169,31 @@ class ConversionHistory(db.Model):
     # Source cover-art URL (YouTube/SoundCloud thumbnail), kept so missing
     # artwork can be backfilled later without re-resolving the track.
     cover_url = db.Column(db.String(1000), nullable=False, default='')
+    # Set once a job has exhausted its retry budget and is dead for good
+    # (private video, removed track, auth error). The janitor skips these
+    # so a permanent failure doesn't silently disappear from history.
+    permanent_failure = db.Column(db.Boolean, nullable=False, default=False)
 
     ACTIVE_STATUSES = ('pending', 'downloading', 'converting')
+
+    __table_args__ = (
+        # status gates most filters (active jobs, completed-only views,
+        # failed-only janitor passes); a btree keeps the planner out of
+        # a sequential scan once the library grows past a few thousand.
+        db.Index('ix_history_status', 'status'),
+        # parent_id joins + subtree queries.
+        db.Index('ix_history_parent_id', 'parent_id'),
+        # Library / Artist / Album / Folders views group by tag fields.
+        db.Index('ix_history_tag_artist', 'tag_artist'),
+        db.Index('ix_history_tag_album', 'tag_album'),
+        # Recently-played sidebar ORDER BY last_played_at DESC.
+        db.Index('ix_history_last_played', 'last_played_at'),
+        # Janitor cutoff and subscription re-check queries.
+        db.Index('ix_history_created_at', 'created_at'),
+        db.Index('ix_history_subscription', 'subscription_id'),
+        # dedupe / skip-existing lookup before inserting a new row.
+        db.Index('ix_history_url_status', 'url', 'status'),
+    )
 
     def __repr__(self):
         return f'<ConversionHistory {self.id}>'

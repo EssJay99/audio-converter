@@ -7,6 +7,14 @@ from sqlalchemy import inspect, text
 
 # Bump on each packaged release; shown in the footer and used by update-check.
 APP_VERSION = '1.0.1'
+# Schema migration contract:
+# - Add new columns to _SCHEMA_MIGRATIONS (additive, never destructive).
+# - Bump SCHEMA_VERSION when migrations change shape; the health banner
+#   surfaces "your database was upgraded" once for that version, then
+#   writes seen_schema_version so the banner stops appearing.
+# - Drop a column only after one release cycle, by keeping the column
+#   readable but ignoring it in code.
+SCHEMA_VERSION = 4
 
 
 def _version_tuple(value):
@@ -206,6 +214,7 @@ _SCHEMA_MIGRATIONS = {
         ('job_options', 'TEXT DEFAULT "{}"'),
         ('dl_speed', 'VARCHAR(20) DEFAULT ""'),
         ('dl_eta', 'VARCHAR(20) DEFAULT ""'),
+        ('permanent_failure', 'BOOLEAN DEFAULT 0'),
     ],
     'subscription': [
         ('min_duration', 'INTEGER DEFAULT 0'),
@@ -250,6 +259,7 @@ _SCHEMA_MIGRATIONS = {
         ('opus_bitrate', 'INTEGER DEFAULT 128'),
         ('tidal_client_id', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_client_secret', 'VARCHAR(200) DEFAULT ""'),
+        ('seen_schema_version', 'INTEGER DEFAULT 0'),
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_refresh_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_expires_at', 'INTEGER DEFAULT 0'),

@@ -50,6 +50,24 @@ def about():
     return render_template('about.html', request_path=request.path)
 
 
+@bp.route('/changelog')
+def changelog():
+    from app import APP_VERSION
+    # Mark this version as seen so the "what's new" banner stops appearing.
+    try:
+        with app.app_context():
+            settings = UserSettings.query.first()
+            if settings is None:
+                settings = UserSettings()
+                db.session.add(settings)
+            settings.seen_version = APP_VERSION
+            db.session.commit()
+    except Exception:
+        pass
+    return render_template('changelog.html', request_path=request.path,
+                           app_version=APP_VERSION)
+
+
 @bp.route('/contact')
 def contact():
     return render_template('contact.html', request_path=request.path)

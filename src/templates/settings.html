@@ -45,6 +45,7 @@
 
         <form method="POST" action="/settings">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="updated_at" value="{{ updated_at }}">
 
             <div class="row">
                 <div class="col-md-12">
@@ -464,6 +465,8 @@
             <div class="mt-2 d-flex flex-wrap gap-2 align-items-center">
                 <a href="/api/diagnostics" class="btn btn-sm btn-outline-secondary">Download diagnostics</a>
                 <button type="button" id="viewLogs" class="btn btn-sm btn-outline-secondary">View logs</button>
+                <a id="reportIssue" href="#" target="_blank" rel="noopener"
+                   class="btn btn-sm btn-outline-secondary">Report issue…</a>
             </div>
             <pre id="logViewer" class="d-none mt-2 p-2 border rounded small log-viewer"></pre>
             <div class="mt-2">
@@ -868,6 +871,46 @@
                     logViewer.textContent = 'Could not load logs.';
                 });
         });
+
+        // "Report issue" opens a prefilled GitHub issue. Body carries the
+        // diagnostic snapshot so maintainers don't have to ask for the
+        // basics; the user sees and can edit it before submitting.
+        const reportLink = document.getElementById('reportIssue');
+        if (reportLink) {
+            reportLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                fetch('/api/diagnostics')
+                    .then((r) => r.json())
+                    .then((diag) => {
+                        const body = [
+                            '### What happened',
+                            '',
+                            '_Replace this line with a description._',
+                            '',
+                            '### Environment',
+                            '',
+                            '```json',
+                            JSON.stringify(diag, null, 2),
+                            '```',
+                            '',
+                        ].join('\n');
+                        const params = new URLSearchParams({
+                            template: 'bug_report.md',
+                            title: 'Bug:',
+                            body,
+                        });
+                        reportLink.href =
+                            'https://github.com/EssJay99/audio-converter/issues/new?'
+                            + params.toString();
+                        window.open(reportLink.href, '_blank', 'noopener');
+                    })
+                    .catch(() => {
+                        reportLink.href =
+                            'https://github.com/EssJay99/audio-converter/issues/new';
+                        window.open(reportLink.href, '_blank', 'noopener');
+                    });
+            });
+        }
         document.getElementById('dbClear').addEventListener('click', async () => {
             const d = await postConfirm('/api/db/clear-history', {},
                 'CONFIRM',

@@ -21,7 +21,7 @@ from sqlalchemy import func, or_, text
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
 from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
-from app import _resource_base_dir, is_secret_persisted
+from app import _resource_base_dir, is_secret_persisted, SCHEMA_VERSION
 
 bp = Blueprint('convert', __name__)
 
@@ -647,8 +647,12 @@ def _janitor_tick():
             prune_days = 0
         if prune_days > 0:
             cutoff = utcnow() - timedelta(days=prune_days)
+            # Only transient failures: permanent ones (private video,
+            # removed track, auth error after exhausting retries) should
+            # stick around so the user can inspect them.
             stale = db.session.query(ConversionHistory).filter(
                 ConversionHistory.status == 'failed',
+                ConversionHistory.permanent_failure.is_(False),
                 ConversionHistory.created_at < cutoff).all()
             for row in stale:
                 db.session.delete(row)
@@ -1501,6 +1505,17 @@ def _job_finish(job, **fields):
     same moment wins instead of being overwritten. Returns True when the
     update was applied, False when the job had already moved on.
     """
+    # When the job is failing and we've used our last retry attempt, mark
+    # it permanent so the janitor's prune-old-failures pass leaves it
+    # alone. The user can still inspect or manually retry from history.
+    if fields.get('status') == 'failed':
+        try:
+            max_attempts = int(
+                getattr(UserSettings.query.first(), 'retry_count', 3) or 3)
+        except Exception:
+            max_attempts = 3
+        if (job.retry_attempts or 0) >= max_attempts:
+            fields['permanent_failure'] = True
     count = db.session.query(ConversionHistory).filter(
         ConversionHistory.id == job.id,
         ConversionHistory.status.in_(
@@ -4719,7 +4734,9 @@ def _queue_local_files(paths, format_type):
     """Create pending conversion rows for local source files.
 
     Returns (queued_ids, skipped_names). Sources stay untouched; results
-    land in the output folder under unique names.
+    land in the output folder under unique names. Each candidate is
+    probed with ffmpeg first so a non-audio file masquerading as `.mp3`
+    doesn't land in history as a permanently-failed row.
     """
     try:
         dest_dir = effective_output_path()
@@ -4743,6 +4760,17 @@ def _queue_local_files(paths, format_type):
         except OSError:
             size = 0
         if size <= 0:
+            skipped.append(os.path.basename(real))
+            continue
+        # Probe the file: a real audio/video file decodes in a fraction of
+        # a second and reports a duration; a script wrapper / corrupt
+        # payload returns 0 or fails. Skip those so the user doesn't see
+        # a permanently-failed row pointing at garbage.
+        try:
+            probe = _ffmpeg_file_info(real)
+        except Exception:
+            probe = (0.0, {}, '')
+        if not probe or (probe[0] or 0) <= 0:
             skipped.append(os.path.basename(real))
             continue
         stem = os.path.splitext(os.path.basename(real))[0]
@@ -7396,13 +7424,50 @@ def api_first_run():
 
 @bp.route('/api/first-run/seen', methods=['POST'])
 def api_first_run_seen():
-    """Record the tour as shown so it never appears again."""
+    """Dismiss the welcome tour banner."""
     try:
         settings = UserSettings.query.first()
         if settings is None:
             settings = UserSettings(output_path=effective_output_path())
             db.session.add(settings)
         settings.tour_seen = True
+        settings.seen_schema_version = SCHEMA_VERSION
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False}), 500
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/migration-info')
+def api_migration_info():
+    """Banner for users whose DB was just upgraded by this build."""
+    try:
+        settings = UserSettings.query.first()
+        seen = int(getattr(settings, 'seen_schema_version', 0) or 0)
+    except Exception:
+        seen = 0
+    upgrade = SCHEMA_VERSION > seen
+    return jsonify({
+        'ok': True,
+        'schema_version': SCHEMA_VERSION,
+        'seen_schema_version': seen,
+        'upgrade': upgrade,
+        'message': ('Your database was upgraded to a new schema — '
+                    'nothing to do, your library is unchanged.')
+                    if upgrade else '',
+    })
+
+
+@bp.route('/api/migration-ack', methods=['POST'])
+def api_migration_ack():
+    """Dismiss the migration banner by recording the schema version."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            settings = UserSettings(output_path=effective_output_path())
+            db.session.add(settings)
+        settings.seen_schema_version = SCHEMA_VERSION
         db.session.commit()
     except Exception:
         db.session.rollback()

@@ -21,6 +21,7 @@ Usage:
 import argparse
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -63,6 +64,10 @@ def _setup_logging(data_dir):
             maxBytes=1024 * 1024, backupCount=5, encoding='utf-8')
         handler.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)s [%(name)s] %(message)s'))
+        # Scrub secrets and tracking tokens out of every log line: bearer
+        # tokens, API keys, query-string parameters, and any url-shaped
+        # credential are replaced before the handler writes.
+        handler.addFilter(_LogScrubber())
         root = logging.getLogger()
         root.setLevel(logging.INFO)
         if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
@@ -76,6 +81,61 @@ def _setup_logging(data_dir):
         return os.path.join(log_dir, 'app.log')
     except Exception:
         return None
+
+
+class _LogScrubber(logging.Filter):
+    """Redact tokens, keys, and long URLs from log records.
+
+    Patterns:
+    - `Authorization: Bearer ...` (or similar) → keep the scheme, drop the token.
+    - `api_key=...`, `token=...`, `key=...` → drop the value.
+    - `https://user:pass@host/` → keep the scheme + host, drop the credentials.
+    - Trackers: `?si=`, `?token=`, `?key=` → drop everything past the public part.
+
+    The goal is a diagnostic file the user can paste into a bug report
+    without accidentally leaking credentials; the result still contains
+    the URLs and messages that matter for debugging.
+    """
+
+    _PATTERNS = [
+        # Authorization: Bearer / Token / Basic
+        (re.compile(r'(?i)(authorization:\s*(?:Bearer|Token|Basic)\s+)\S+'),
+                  r'\1[redacted]'),
+        # api_key / token / key / secret as form/query values
+        (re.compile(r'(?i)(api[_-]?key|token|access[_-]?token|refresh[_-]?token|'
+                    r'client[_-]?secret|password|secret)=([^&\s,]+)'),
+                  r'\1=[redacted]'),
+        # user:pass in URLs
+        (re.compile(r'(https?://)[^/\s:@]+:[^/\s:@]+@'),
+                  r'\1[redacted]@'),
+        # ?si=..., &token=... etc. — keep up to the unsafe query
+        (re.compile(r'(\?)([^#\s]*)(?:si=|token=|key=|sig=)([^&\s#]+)'),
+                  r'\1[query-redacted]'),
+    ]
+    _TRACKERS = ('si=', 'token=', 'key=', 'sig=')
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        scrubbed = msg
+        for pattern, replacement in self._PATTERNS:
+            scrubbed = pattern.sub(replacement, scrubbed)
+        # Apply once more for `record.args` (the %-format args).
+        try:
+            if record.args:
+                for i, arg in enumerate(record.args):
+                    if isinstance(arg, str):
+                        for pattern, replacement in self._PATTERNS:
+                            arg = pattern.sub(replacement, arg)
+                        record.args = list(record.args)
+                        record.args[i] = arg
+        except Exception:
+            pass
+        record.msg = scrubbed
+        record.args = ()
+        return True
 
 
 def find_free_port(preferred=None):

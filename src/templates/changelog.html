@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>What's new — Audio Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="app">
+{% include '_player.html' %}
+<div class="container py-4">
+    <h1 class="h3">What's new</h1>
+    <p class="text-muted small">You're running <code>{{ app_version }}</code>. The list below is everything that changed since the previous release, in plain English.</p>
+
+    <div class="card p-4 shadow-sm border-0 rounded mt-3">
+        <h2 class="h5">Hardening round</h2>
+        <p class="small text-muted">No behavior changes for most users — this is the security pass.</p>
+        <ul class="mb-0">
+            <li>The bundled install update is now <strong>signed</strong>: the app refuses a release whose checksum file isn't signed with the maintainer key.</li>
+            <li>Every destructive action (clear history, factory reset, prune, vacuum, update yt-dlp, …) now requires you to type a confirmation phrase. Same-origin XHR from a browser extension can't silently trigger them.</li>
+            <li>The per-IP rate limit on heavy endpoints (playable proxy, uploads, helper installs) keeps a runaway tab from flooding ffmpeg.</li>
+            <li>URLs are re-validated after redirects so a paste that points at <code>https://attacker/redirect</code> → <code>http://10.0.0.5/…</code> is rejected before yt-dlp runs.</li>
+            <li>The output-path setting rejects path-traversal tricks, embedded NUL bytes, and symlinks pointing outside the writable tree.</li>
+            <li>The session secret is persisted to a <code>0o600</code> file in the data directory; if it can't be written you see a warning banner instead of a silently-rotating key.</li>
+            <li>HSTS only appears on HTTPS requests, never on the localhost HTTP used by the desktop launcher.</li>
+            <li>The release-prelude endpoint can no longer silently fall back to an unverified checksum when the bundled pubkey is missing.</li>
+            <li>SECURITY.md is now in the repository with a private disclosure channel.</li>
+        </ul>
+    </div>
+
+    <div class="card p-4 shadow-sm border-0 rounded mt-3">
+        <h2 class="h5">Listening & library</h2>
+        <ul class="mb-0">
+            <li>New <strong>radio mode</strong>: when the queue runs out, the player picks the next similar track (same artist, then same album, then same folder, then least-played).</li>
+            <li>The Preferences page now has a typed-phrase modal for the most dangerous operations.</li>
+            <li>Storage quota and old-failure age are now user-configurable; the hourly janitor trims oldest-played tracks to stay under the cap.</li>
+        </ul>
+    </div>
+
+    <div class="card p-4 shadow-sm border-0 rounded mt-3">
+        <h2 class="h5">Diagnostics</h2>
+        <ul class="mb-0">
+            <li>The Settings › Helpers page now has a one-click <strong>Report issue</strong> button that opens GitHub with a prefilled bug template including your diagnostics JSON.</li>
+            <li>The rotated log file scrubs bearer tokens, API keys, user:pass credentials, and tracker query strings before writing to disk.</li>
+            <li>Settings writes are now optimistically-concurrent: a second tab editing the same form gets a banner asking it to reload instead of clobbering.</li>
+        </ul>
+    </div>
+
+    <p class="text-muted small mt-4">
+        Older changes are in
+        <a href="https://github.com/EssJay99/audio-converter/commits/main">git history</a>.
+        Security issues? Follow
+        <a href="/SECURITY.md">SECURITY.md</a> for the private disclosure channel.
+    </p>
+</div>
+</body>
+</html>

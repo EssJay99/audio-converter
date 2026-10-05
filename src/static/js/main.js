@@ -1126,6 +1126,44 @@ function initHealthBanner() {
             banner.classList.remove('d-none');
         })
         .catch(() => {});
+
+    // Migration banner: shows once after the database is upgraded by this
+    // build. Dismissable; the dismissed state lives in user_settings.
+    fetch('/api/migration-info')
+        .then((r) => r.json())
+        .then((m) => {
+            if (!m || !m.upgrade) return;
+            const banner = document.getElementById('migrationBanner');
+            const text = document.getElementById('migrationBannerText');
+            if (!banner || !text) return;
+            text.textContent = m.message;
+            banner.classList.remove('d-none');
+            document.addEventListener('click', (ev) => {
+                if (ev.target.closest && ev.target.closest('[data-hide-migration]')) {
+                    fetch('/api/migration-ack', {
+                        method: 'POST',
+                        headers: { 'X-CSRFToken': csrfToken() },
+                    }).catch(() => {});
+                    banner.classList.add('d-none');
+                }
+            });
+        })
+        .catch(() => {});
+
+    // "What's new" — surfaces after a packaged upgrade until the user
+    // opens /changelog (which records the running version as seen).
+    fetch('/api/whats-new')
+        .then((r) => r.json())
+        .then((w) => {
+            if (!w || !w.is_new) return;
+            const banner = document.getElementById('whatsNewBanner');
+            if (!banner) return;
+            const text = banner.querySelector('[data-whats-new-text]');
+            if (text) text.textContent =
+                'Audio Converter ' + (w.version || '') + ' is here — see what changed.';
+            banner.classList.remove('d-none');
+        })
+        .catch(() => {});
     document.addEventListener('click', (e) => {
         if (e.target.closest && e.target.closest('[data-hide-health]')) {
             banner.classList.add('d-none');

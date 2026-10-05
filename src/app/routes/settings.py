@@ -119,6 +119,15 @@ def get_settings_dict():
         defaults['tidal_client_secret'] = getattr(user_settings, 'tidal_client_secret', None) or ''
         defaults['tidal_connected'] = bool(getattr(user_settings, 'tidal_access_token', None))
         defaults['close_behavior'] = getattr(user_settings, 'close_behavior', None) or 'ask'
+        # Render the row's updated_at into the form so the next save can
+        # detect a stale tab. Truncated to whole seconds to match the way
+        # we render it back in the hidden field.
+        try:
+            defaults['updated_at'] = (user_settings.updated_at
+                                       .replace(microsecond=0)
+                                       .isoformat(sep=' '))
+        except Exception:
+            defaults['updated_at'] = ''
     return defaults
 
 
@@ -195,6 +204,22 @@ def save_settings():
 
     user_settings = UserSettings.query.first()
     if user_settings:
+        # Optimistic concurrency: the form submits the `updated_at` it was
+        # rendered with, and we refuse to clobber a newer row. Two tabs
+        # editing Settings at once then both save — the second one gets a
+        # banner telling it to reload instead of silently losing changes.
+        form_updated = (request.form.get('updated_at') or '').strip()
+        current_updated = ''
+        if user_settings.updated_at is not None:
+            try:
+                current_updated = user_settings.updated_at.replace(
+                    microsecond=0).isoformat(sep=' ')
+            except Exception:
+                current_updated = str(user_settings.updated_at)
+        if form_updated and current_updated and form_updated != current_updated:
+            flash('Settings were edited elsewhere — reload to see the '
+                  'latest values before saving.', 'warning')
+            return redirect(url_for('settings.settings_page'))
         for field in SETTING_FIELDS:
             setattr(user_settings, field, data[field])
         for field in BOOLEAN_FIELDS:
