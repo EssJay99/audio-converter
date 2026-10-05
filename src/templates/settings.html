@@ -205,6 +205,7 @@
                     <input class="form-check-input" type="checkbox" id="desktop_notifications" name="desktop_notifications" value="on"
                            {% if desktop_notifications %}checked{% endif %}>
                     <label class="form-check-label" for="desktop_notifications">System notifications when downloads finish or fail</label>
+                    <button type="button" id="notifyTest" class="btn btn-sm btn-outline-secondary ms-2">Send test</button>
                 </div>
                 <div class="form-check form-switch mb-3">
                     <input class="form-check-input" type="checkbox" id="tray_icon" name="tray_icon" value="on"
@@ -310,12 +311,37 @@
                                value="{{ proxy }}" placeholder="socks5://127.0.0.1:9050"
                                autocomplete="off" spellcheck="false">
                         <small class="form-text text-muted">Route downloads through a proxy (e.g. Tor at the address above) so streaming sites see the proxy's address instead of yours. Leave blank for a direct connection.</small>
+                        <div class="mt-1 d-flex gap-2 align-items-center">
+                            <button type="button" id="proxyCheck" class="btn btn-sm btn-outline-secondary">Check proxy</button>
+                            <small id="proxyCheckNote" class="text-muted"></small>
+                        </div>
+                        <div class="mt-3 d-flex gap-2 align-items-center">
+                            <button type="button" id="subsBackfill" class="btn btn-sm btn-outline-secondary">Fetch missing subtitles</button>
+                            <small id="subsBackfillNote" class="text-muted">Fills in subtitles for finished videos that don't have any yet (one capped pass per click).</small>
+                        </div>
                     </div>
                     <div class="col-12">
                         <div class="form-check form-switch mb-1">
                             <input class="form-check-input" type="checkbox" id="subtitles" name="subtitles" value="on"
                                    {% if subtitles %}checked{% endif %}>
                             <label class="form-check-label" for="subtitles">Download subtitles for videos</label>
+                            <select class="form-select form-select-sm ms-2" id="pref_sub_lang" name="pref_sub_lang" style="width:auto;" title="Preferred subtitle language">
+                                <option value="en" {% if pref_sub_lang == 'en' %}selected{% endif %}>English</option>
+                                <option value="de" {% if pref_sub_lang == 'de' %}selected{% endif %}>Deutsch</option>
+                                <option value="es" {% if pref_sub_lang == 'es' %}selected{% endif %}>Español</option>
+                                <option value="fr" {% if pref_sub_lang == 'fr' %}selected{% endif %}>Français</option>
+                                <option value="pt" {% if pref_sub_lang == 'pt' %}selected{% endif %}>Português</option>
+                                <option value="it" {% if pref_sub_lang == 'it' %}selected{% endif %}>Italiano</option>
+                                <option value="nl" {% if pref_sub_lang == 'nl' %}selected{% endif %}>Nederlands</option>
+                                <option value="pl" {% if pref_sub_lang == 'pl' %}selected{% endif %}>Polski</option>
+                                <option value="ja" {% if pref_sub_lang == 'ja' %}selected{% endif %}>日本語</option>
+                                <option value="ko" {% if pref_sub_lang == 'ko' %}selected{% endif %}>한국어</option>
+                                <option value="zh-Hans" {% if pref_sub_lang == 'zh-Hans' %}selected{% endif %}>简体中文</option>
+                                <option value="ar" {% if pref_sub_lang == 'ar' %}selected{% endif %}>العربية</option>
+                                <option value="hi" {% if pref_sub_lang == 'hi' %}selected{% endif %}>हिन्दी</option>
+                                <option value="ru" {% if pref_sub_lang == 'ru' %}selected{% endif %}>Русский</option>
+                                <option value="tr" {% if pref_sub_lang == 'tr' %}selected{% endif %}>Türkçe</option>
+                            </select>
                         </div>
                         <div class="form-check form-switch mb-1">
                             <input class="form-check-input" type="checkbox" id="sponsorblock" name="sponsorblock" value="on"
@@ -336,6 +362,42 @@
                             <input class="form-check-input" type="checkbox" id="nfo_files" name="nfo_files" value="on"
                                    {% if nfo_files %}checked{% endif %}>
                             <label class="form-check-label" for="nfo_files">Save .nfo metadata sidecars next to downloads</label>
+                        </div>
+                        <div class="row g-3 mt-1">
+                            <div class="col-md-6" style="max-width: 14rem;">
+                                <label for="prune_failed_days" class="form-label">Forget failed rows after (days)</label>
+                                <input type="number" class="form-control" id="prune_failed_days" name="prune_failed_days"
+                                       min="0" max="365" value="{{ prune_failed_days }}">
+                                <small class="form-text text-muted">0 = keep forever.</small>
+                            </div>
+                            <div class="col-md-6" style="max-width: 14rem;">
+                                <label for="storage_quota_gb" class="form-label">Library size cap (GB)</label>
+                                <input type="number" class="form-control" id="storage_quota_gb" name="storage_quota_gb"
+                                       min="0" max="10000" step="0.5" value="{{ storage_quota_gb }}">
+                                <small class="form-text text-muted">0 = unlimited. Oldest-played tracks go to Trash first.</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                <h3>Imports</h3>
+                <p class="text-muted small">How Spotify/Apple Music links are matched to playable tracks.</p>
+                <div class="row g-3">
+                    <div class="col-md-6" style="max-width: 16rem;">
+                        <label for="import_engine" class="form-label">Search first</label>
+                        <select class="form-select" id="import_engine" name="import_engine">
+                            <option value="auto" {% if import_engine == 'auto' %}selected{% endif %}>Both (YouTube first)</option>
+                            <option value="youtube" {% if import_engine == 'youtube' %}selected{% endif %}>YouTube only</option>
+                            <option value="soundcloud" {% if import_engine == 'soundcloud' %}selected{% endif %}>SoundCloud first</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-check form-switch mt-4">
+                            <input class="form-check-input" type="checkbox" id="import_strict" name="import_strict" value="on"
+                                   {% if import_strict %}checked{% endif %}>
+                            <label class="form-check-label" for="import_strict">Strict matching (fewer wrong songs, more misses)</label>
                         </div>
                     </div>
                 </div>
@@ -624,6 +686,56 @@
             });
         }
         if (window.Theme) window.Theme.sync();
+        const settingsToken = () => {
+            const token = document.querySelector('meta[name="csrf-token"]');
+            return token ? token.getAttribute('content') : '';
+        };
+        document.getElementById('notifyTest').addEventListener('click', (e) => {
+            const btn = e.target;
+            btn.disabled = true;
+            fetch('/api/notify-test', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': settingsToken() },
+            })
+                .then((r) => r.json())
+                .then((d) => toast(d.ok ? (d.message || 'Sent.') : (d.message || 'Failed.'),
+                                   d.ok ? 'success' : 'danger'))
+                .catch(() => toast('Failed.', 'danger'))
+                .finally(() => { btn.disabled = false; });
+        });
+        document.getElementById('proxyCheck').addEventListener('click', (e) => {
+            const btn = e.target;
+            const note = document.getElementById('proxyCheckNote');
+            btn.disabled = true;
+            note.textContent = 'Checking…';
+            fetch('/api/proxy-check', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': settingsToken() },
+            })
+                .then((r) => r.json())
+                .then((d) => { note.textContent = d.message || (d.ok ? 'Works.' : 'Failed.'); })
+                .catch(() => { note.textContent = 'Failed.'; })
+                .finally(() => { btn.disabled = false; });
+        });
+        document.getElementById('subsBackfill').addEventListener('click', (e) => {
+            const btn = e.target;
+            const note = document.getElementById('subsBackfillNote');
+            btn.disabled = true;
+            note.textContent = 'Working…';
+            fetch('/api/subs/backfill', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': settingsToken() },
+            })
+                .then((r) => r.json())
+                .then((d) => {
+                    if (!d.ok) { note.textContent = 'Failed.'; return; }
+                    note.textContent = 'Added: ' + d.filled +
+                        ', skipped: ' + d.skipped +
+                        (d.failed ? ', failed: ' + d.failed : '') + '.';
+                })
+                .catch(() => { note.textContent = 'Failed.'; })
+                .finally(() => { btn.disabled = false; });
+        });
         const dbNote = (msg) => {
             document.getElementById('dbNote').textContent = msg;
         };

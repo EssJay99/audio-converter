@@ -6724,3 +6724,203 @@ def test_upnext_and_chapter_markers(client):
     for marker in ('chapterJump', 'showUpNext', 'Prev chapter',
                    'Next chapter', 'app-chapter-nav'):
         assert marker in js
+
+
+def test_details_endpoint_missing(client):
+    resp = client.get('/api/details/9999')
+    assert resp.status_code == 404
+    assert resp.get_json()['ok'] is False
+
+
+def test_details_endpoint_present(client, tmp_path, monkeypatch):
+    real = tmp_path / 'song.flac'
+    real.write_bytes(b'fLaC' + b'\x00' * 64)
+    row = ConversionHistory(url='https://youtu.be/d', format='FLAC',
+                            output_path=str(real), status='completed',
+                            progress=100)
+    db.session.add(row)
+    db.session.commit()
+    data = client.get(f'/api/details/{row.id}').get_json()
+    assert data['ok'] is True
+    assert data['name'] == 'song.flac' and data['exists'] is True
+    assert data['size'] == 68
+    assert data['format'] == 'FLAC' and data['status'] == 'completed'
+
+
+def test_extract_audio_for_video_creates_flac(client, tmp_path, monkeypatch):
+    video = tmp_path / 'clip.mp4'
+    video.write_bytes(b'\x00' * 128)
+    row = ConversionHistory(url='https://youtu.be/v', format='MP4 Video',
+                            output_path=str(video), status='completed',
+                            progress=100)
+    db.session.add(row)
+    db.session.commit()
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=900):
+        out = cmd[-1]
+        if out.endswith('.flac'):
+            with open(out, 'wb') as fh:
+                fh.write(b'fLaC' + b'\x00' * 32)
+        class _R:
+            returncode = 0
+            stderr = ''
+        return _R()
+
+    import app.routes.convert as cm
+    monkeypatch.setattr(cm.subprocess, 'run', fake_run)
+    resp = client.post(f'/api/extract-audio/{row.id}')
+    data = resp.get_json()
+    assert resp.status_code == 200
+    assert data['ok'] is True
+    assert os.path.isfile(data['path'])
+    assert data['path'].endswith('.flac')
+    new_row = db.session.get(ConversionHistory, data['id'])
+    assert new_row.format == 'FLAC' and new_row.status == 'completed'
+
+
+def test_extract_audio_rejects_audio_source(client, tmp_path):
+    audio = tmp_path / 'song.flac'
+    audio.write_bytes(b'fLaC')
+    row = ConversionHistory(url='https://youtu.be/a', format='FLAC',
+                            output_path=str(audio), status='completed')
+    db.session.add(row)
+    db.session.commit()
+    resp = client.post(f'/api/extract-audio/{row.id}')
+    assert resp.status_code == 400
+    assert resp.get_json()['ok'] is False
+
+
+def test_radio_picks_similar(client, tmp_path):
+    a = tmp_path / 'a.flac'
+    a.write_bytes(b'fLaC' + b'\x00' * 10)
+    b = tmp_path / 'b.flac'
+    b.write_bytes(b'fLaC' + b'\x00' * 10)
+    current = ConversionHistory(url='https://youtu.be/x', format='FLAC',
+                               output_path=str(a), status='completed',
+                               tag_artist='Cool Band', tag_album='X')
+    same_artist = ConversionHistory(url='https://youtu.be/y', format='FLAC',
+                                    output_path=str(b), status='completed',
+                                    tag_artist='Cool Band', tag_album='X')
+    db.session.add_all([current, same_artist])
+    db.session.commit()
+    data = client.get(f'/api/radio?after={current.id}').get_json()
+    assert data['ok'] is True
+    assert data['item']['id'] == same_artist.id
+
+
+def test_radio_empty_returns_404(client, tmp_path):
+    data = client.get('/api/radio').get_json()
+    assert data.get('ok') is False
+
+
+def test_prefs_round_trip(client):
+    resp = client.post('/api/prefs', json={'radio_mode': True})
+    assert resp.status_code == 200
+    assert resp.get_json()['radio_mode'] is True
+    data = client.get('/api/prefs').get_json()
+    assert data['radio_mode'] is True
+    client.post('/api/prefs', json={'radio_mode': False})
+    data = client.get('/api/prefs').get_json()
+    assert data['radio_mode'] is False
+
+
+def test_subs_backfill_reports_counts(client, tmp_path, monkeypatch):
+    video = tmp_path / 'v.mp4'
+    video.write_bytes(b'\x00' * 32)
+    row = ConversionHistory(url='https://youtu.be/v', format='MP4 Video',
+                            output_path=str(video), status='completed',
+                            progress=100)
+    db.session.add(row)
+    db.session.commit()
+
+    calls = []
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, env=None):
+        calls.append(cmd)
+        for i, token in enumerate(cmd):
+            if token == '-o' and i + 1 < len(cmd):
+                with open(cmd[i+1] + '.en.vtt', 'w') as fh:
+                    fh.write('WEBVTT\n')
+                break
+        class _R:
+            returncode = 0
+            stderr = ''
+        return _R()
+
+    import app.routes.convert as cm
+    monkeypatch.setattr(cm.subprocess, 'run', fake_run)
+    data = client.post('/api/subs/backfill').get_json()
+    assert calls, 'fake_run was never invoked'
+    assert data['ok'] is True
+    assert data['filled'] >= 1
+
+
+def test_notify_test_endpoint(client):
+    resp = client.post('/api/notify-test')
+    assert resp.status_code in (200, 500)
+    assert resp.get_json()['ok'] in (True, False)
+
+
+def test_proxy_check_empty(client):
+    resp = client.post('/api/proxy-check')
+    assert resp.status_code == 400
+    assert resp.get_json()['ok'] is False
+
+
+def test_proxy_check_with_bad_proxy(client, monkeypatch):
+    from app.models import UserSettings
+    with client.application.app_context():
+        s = UserSettings.query.first()
+        if s is None:
+            s = UserSettings()
+            db.session.add(s)
+        s.proxy = 'http://127.0.0.1:1'
+        db.session.commit()
+
+    def fake_get(url, proxies=None, timeout=20):
+        raise RuntimeError('unreachable')
+
+    import app.routes.convert as cm
+    monkeypatch.setattr(cm.requests, 'get', fake_get)
+    resp = client.post('/api/proxy-check')
+    assert resp.status_code == 502
+    assert resp.get_json()['ok'] is False
+
+
+def test_janitor_prunes_old_failures(client, tmp_path):
+    audio = tmp_path / 'old.flac'
+    audio.write_bytes(b'fLaC')
+    failed = ConversionHistory(url='https://youtu.be/old', format='FLAC',
+                               output_path=str(audio), status='failed',
+                               error='nope')
+    db.session.add(failed)
+    db.session.commit()
+    from app.models import UserSettings
+    s = UserSettings.query.first()
+    if s is None:
+        s = UserSettings()
+        db.session.add(s)
+    s.prune_failed_days = 1
+    db.session.commit()
+    from datetime import datetime, timedelta
+    failed.created_at = datetime.utcnow() - timedelta(days=30)
+    db.session.commit()
+    import app.routes.convert as cm
+    cm._janitor_tick()
+    assert db.session.get(ConversionHistory, failed.id) is None
+
+
+def test_submit_already_queued_rejects(client):
+    """Re-submitting an in-flight URL should redirect with a notice."""
+    pending = ConversionHistory(url='https://youtu.be/dup', format='FLAC',
+                                output_path='/tmp/dup.flac', status='pending')
+    db.session.add(pending)
+    db.session.commit()
+    resp = client.post('/convert', data={
+        'url': 'https://youtu.be/dup', 'format': 'flac',
+        'output_path': '/tmp', 'csrf_token': '',
+    }, follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    pending2 = db.session.query(ConversionHistory).filter_by(
+        url='https://youtu.be/dup').all()
+    assert len(pending2) == 1

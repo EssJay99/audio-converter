@@ -20,6 +20,7 @@
         lastPosSave: 0,
         contextLabel: '',
         repeat: 'off',
+        radioMode: false,
         ui: {},
     };
 
@@ -77,6 +78,7 @@
         restorePreampBalance();
         restoreFadeSecs();
         restoreAutoLyrics();
+        restoreRadioMode();
         restoreCrossfade();
         restoreSleepMode();
         initMediaSession();
@@ -741,6 +743,57 @@
         if (box) box.checked = !!Player.autoLyrics;
     }
 
+    // Radio mode lives server-side so it survives restarts; the toggle
+    // flips the setting, and queue-end pulls the next similar track.
+    function restoreRadioMode() {
+        const box = $('appRadioMode');
+        fetch('/api/prefs')
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data || !data.ok) return;
+                Player.radioMode = !!data.radio_mode;
+                if (box) box.checked = Player.radioMode;
+            })
+            .catch(() => { /* offline: stay as-is */ });
+        if (box) {
+            box.addEventListener('change', () => {
+                Player.radioMode = box.checked;
+                fetch('/api/prefs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json',
+                               'X-CSRFToken': (typeof csrfToken === 'function'
+                                   ? csrfToken() : '') },
+                    body: JSON.stringify({ radio_mode: Player.radioMode }),
+                }).catch(() => { /* keep local state */ });
+            });
+        }
+    }
+
+    // Queue ran dry: ask the server for a similar track and keep going.
+    function fetchRadio() {
+        const current = Player.queue[Player.index] || 0;
+        fetch('/api/radio?after=' + encodeURIComponent(current))
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+                if (!data || !data.ok || !data.item || !data.item.id) {
+                    Player.audio.pause();
+                    if (typeof toast === 'function') {
+                        toast('Radio mode: nothing similar left to play.', 'info');
+                    }
+                    return;
+                }
+                const id = data.item.id;
+                if (Player.queue.indexOf(id) === -1) Player.queue.push(id);
+                Player.index = Player.queue.indexOf(id);
+                saveQueue();
+                fetchAndLoad(id, true);
+                if (typeof toast === 'function') {
+                    toast('Radio: ' + (data.item.tag_title || data.item.filename || 'next similar track'), 'info');
+                }
+            })
+            .catch(() => { Player.audio.pause(); });
+    }
+
     function restoreFadeSecs() {
         try {
             const secs = Number(localStorage.getItem('appPlayerFadeSecs')) || 8;
@@ -1053,6 +1106,8 @@
             fetchAndLoad(Player.queue[Player.index], !!auto);
         } else if (auto && Player.sleepMode === 'end-queue') {
             sleepStop();
+        } else if (auto && Player.radioMode) {
+            fetchRadio();
         } else {
             Player.audio.pause();
             Player.audio.currentTime = 0;
@@ -1066,7 +1121,10 @@
         if (Player.fading || Player.autoPending) return;
         const target = (Player.index < Player.queue.length - 1) ? Player.index + 1
             : (Player.repeat === 'all' && Player.queue.length > 1 ? 0 : -1);
-        if (target < 0) return;
+        if (target < 0) {
+            if (auto && Player.radioMode) fetchRadio();
+            return;
+        }
         Player.autoPending = true;
         Player.index = target;
         saveQueue();

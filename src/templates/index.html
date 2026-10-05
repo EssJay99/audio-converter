@@ -489,6 +489,13 @@
                                                                         data-rename="{{ item.id }}" data-name="{{ item.output_path|basename }}" title="Rename file">&#9998;</button>
                                                                 <button type="button" class="btn btn-sm btn-outline-secondary tags-btn"
                                                                         data-tags="{{ item.id }}" title="Edit title, artist and album">Tags</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary info-btn"
+                                                                        data-info="{{ item.id }}" title="File details: format, size, tags, play count">&#8505; Info</button>
+                                                                {% set item_ext = (item.output_path.rsplit('.', 1)[-1]|lower if item.output_path and '.' in item.output_path else '') %}
+                                                                {% if item_ext in ['mp4', 'webm', 'mkv', 'mov', 'avi', 'm4v'] %}
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary extract-btn"
+                                                                        data-extract="{{ item.id }}" title="Save just the audio as a lossless FLAC next to this video">Audio</button>
+                                                                {% endif %}
                                                                 <button type="button" class="btn btn-sm btn-outline-danger delete-btn"
                                                                         data-delete="{{ item.id }}" title="Delete file from disk and remove from history">Delete</button>
                                                                 {% endif %}
@@ -685,6 +692,22 @@
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" class="btn btn-primary" id="tagsSave">Save tags</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="modal fade" id="detailsModal" tabindex="-1" aria-labelledby="detailsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="detailsModalLabel">File details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <table class="table table-sm mb-0" id="detailsTable"><tbody></tbody></table>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>

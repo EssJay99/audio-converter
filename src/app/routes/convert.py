@@ -12,6 +12,7 @@ import time
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
@@ -626,9 +627,90 @@ def _scheduler_loop():
             with flask_app.app_context():
                 _check_due_subscriptions()
                 _maybe_finish_action()
+                _janitor_tick()
         except Exception:
             pass
         time.sleep(60)
+
+
+def _janitor_tick():
+    """Hourly housekeeping: prune old failures, enforce storage quota."""
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            return
+        try:
+            prune_days = int(getattr(settings, 'prune_failed_days', 0) or 0)
+        except (TypeError, ValueError):
+            prune_days = 0
+        if prune_days > 0:
+            cutoff = utcnow() - timedelta(days=prune_days)
+            stale = db.session.query(ConversionHistory).filter(
+                ConversionHistory.status == 'failed',
+                ConversionHistory.created_at < cutoff).all()
+            for row in stale:
+                db.session.delete(row)
+            if stale:
+                db.session.commit()
+        try:
+            quota_gb = float(getattr(settings, 'storage_quota_gb', 0) or 0)
+        except (TypeError, ValueError):
+            quota_gb = 0
+        if quota_gb > 0:
+            _enforce_quota(int(quota_gb * 1024 * 1024 * 1024))
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
+def _enforce_quota(max_bytes):
+    """Trash oldest-played finished tracks until under quota.
+
+    Only standalone tracks (never playlist children or parents); files go
+    to the OS Trash and rows drop with them. At most 10 per tick, and a
+    notice records what left.
+    """
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped']),
+        ConversionHistory.is_playlist.is_(False),
+        ConversionHistory.parent_id.is_(None)).all()
+    sized = []
+    total = 0
+    for row in rows:
+        path = row.output_path or ''
+        exists, size = _cached_stat(path, ttl=60.0)
+        if exists and size > 0:
+            total += size
+            try:
+                played = row.last_played_at or row.created_at
+            except Exception:
+                played = None
+            sized.append((played, row, size))
+    if total <= max_bytes:
+        return
+    sized.sort(key=lambda entry: (entry[0] is not None, entry[0]))
+    removed, freed = 0, 0
+    for _played, row, size in sized[:10]:
+        path = row.output_path or ''
+        gone, _trashed = _trash_path(path) if path else (False, False)
+        if gone or not os.path.exists(path):
+            try:
+                db.session.delete(row)
+                db.session.commit()
+                removed += 1
+                freed += size
+            except Exception:
+                db.session.rollback()
+        if total - freed <= max_bytes:
+            break
+    if removed:
+        try:
+            _log_notice('Storage quota',
+                        f'Removed {removed} oldest track(s) to stay under quota.')
+        except Exception:
+            pass
 
 
 _helper_watch_started = False
@@ -1498,6 +1580,16 @@ def convert():
     except Exception as e:
         flash(f'Cannot create output directory: {str(e)}', 'error')
         return redirect(url_for('home.index'))
+
+    if not url.startswith('local:'):
+        # Already in flight? Say so instead of queueing a twin.
+        twin = db.session.query(ConversionHistory).filter(
+            ConversionHistory.url == url,
+            ConversionHistory.status.in_(
+                list(ConversionHistory.ACTIVE_STATUSES) + ['paused'])).first()
+        if twin is not None:
+            flash('That link is already queued or downloading.', 'info')
+            return redirect(url_for('home.index'))
 
     is_import = _is_streaming_playlist_url(url)
     if is_import or _is_collection_url(url):
@@ -2467,8 +2559,13 @@ def download_and_convert(url, format_type, output_path, job=None):
                 if job is not None and job.id in _paused_jobs:
                     return {'success': False, 'error': 'Paused'}
                 alt_meta = extract_metadata(alternate)
+                try:
+                    _engine, _strict = _import_prefs()
+                except Exception:
+                    _strict = False
                 if expected_title and not _titles_match(
-                        expected_title, alt_meta.get('title', '')):
+                        expected_title, alt_meta.get('title', ''),
+                        threshold=0.6 if _strict else 0.4):
                     continue
                 if job is not None:
                     _job_update(job, status='downloading', progress=5)
@@ -3362,9 +3459,20 @@ def download_audio(url, temp_audio, job=None):
             # Manual subs in every language, but auto-generated ones only
             # for a shortlist: 'all' on auto-subs fans out into hundreds of
             # machine translations (xx-en, …) and gets the IP throttled.
+            # The preferred language goes first so players default to it.
+            try:
+                _pref = (getattr(UserSettings.query.first(),
+                                 'pref_sub_lang', 'en') or 'en').strip() or 'en'
+            except Exception:
+                _pref = 'en'
+            _auto = ['en', 'de', 'es', 'fr', 'pt', 'it', 'nl', 'pl', 'ja',
+                     'ko', 'zh-Hans', 'ar', 'hi', 'ru', 'tr']
+            if _pref in _auto:
+                _auto.remove(_pref)
+            _auto.insert(0, _pref)
             base += ['--write-subs', '--sub-langs', 'all,-live_chat',
                      '--write-auto-subs',
-                     '--sub-langs', 'en,de,es,fr,pt,it,nl,pl,ja,ko,zh-Hans,ar,hi,ru,tr',
+                     '--sub-langs', ','.join(_auto),
                      '--convert-subs', 'vtt']
     cmd = _ytdlp_command() + base + [url]
 
@@ -5666,6 +5774,9 @@ def subscribe_playlist(parent_id):
 
     existing = db.session.query(Subscription).filter_by(
         parent_id=parent.id).first()
+    if existing is None:
+        existing = db.session.query(Subscription).filter_by(
+            url=parent.url).first()
     if existing:
         existing.active = True
         existing.interval_hours = interval
@@ -6276,7 +6387,22 @@ def _entry_duration(entry):
         return 0.0
 
 
-def _duration_close(length, expected):
+def _import_prefs():
+    """(engine, strict) import preferences from Settings."""
+    engine, strict = 'auto', False
+    try:
+        settings = UserSettings.query.first()
+        if settings is not None:
+            if getattr(settings, 'import_engine', 'auto') in (
+                    'auto', 'youtube', 'soundcloud'):
+                engine = settings.import_engine
+            strict = bool(getattr(settings, 'import_strict', False))
+    except Exception:
+        pass
+    return engine, strict
+
+
+def _duration_close(length, expected, strict=False):
     """True when a search hit's length matches the expected track length.
 
     Accepts millisecond units too (some extractors report durations in ms).
@@ -6286,7 +6412,7 @@ def _duration_close(length, expected):
     candidates = [length]
     if length > expected * 10:
         candidates.append(length / 1000.0)
-    tolerance = max(20, expected * 0.25)
+    tolerance = max(10, expected * 0.10) if strict else max(20, expected * 0.25)
     return any(abs(candidate - expected) <= tolerance for candidate in candidates)
 
 
@@ -6316,7 +6442,7 @@ def _entry_url(entry, engine):
     return sanitize_url(track_url) if track_url else None
 
 
-def _ranked_hits(entries, engine, expected_duration):
+def _ranked_hits(entries, engine, expected_duration, strict=False):
     """Split search hits into (duration matches, rest), URLs resolved."""
     matched, rest = [], []
     for entry in entries:
@@ -6327,7 +6453,7 @@ def _ranked_hits(entries, engine, expected_duration):
         duration = _entry_duration(entry)
         hit = {'url': url, 'title': title, 'duration': duration,
                'engine': engine}
-        if _duration_close(duration, expected_duration):
+        if _duration_close(duration, expected_duration, strict=strict):
             matched.append(hit)
         else:
             rest.append(hit)
@@ -6335,19 +6461,36 @@ def _ranked_hits(entries, engine, expected_duration):
 
 
 def _search_candidates(query, timeout=60, expected_duration=None, limit=6,
-                       exclude=()):
-    """Ranked download candidates from both YouTube and SoundCloud.
+                       exclude=(), engine=None, strict=None):
+    """Ranked download candidates from YouTube and/or SoundCloud.
 
-    Order: YouTube duration-matches, other YouTube hits, SoundCloud
-    duration-matches, other SoundCloud hits. The original URL (when given)
-    is excluded so a failed source is never suggested back to itself.
+    The engine preference ('auto', 'youtube', 'soundcloud') skips the
+    other service entirely; strict mode tightens duration matching.
+    Default order: YouTube duration-matches, other YouTube hits,
+    SoundCloud duration-matches, other SoundCloud hits. The original URL
+    (when given) is excluded so a failed source is never suggested back
+    to itself.
     """
+    if engine is None or strict is None:
+        prefs_engine, prefs_strict = _import_prefs()
+        if engine is None:
+            engine = prefs_engine
+        if strict is None:
+            strict = prefs_strict
     excluded = {sanitize_url(u) for u in (exclude or ()) if u}
-    youtube = _search_once('ytsearch5', query, timeout)
-    yt_matched, yt_rest = _ranked_hits(youtube, 'ytsearch5', expected_duration)
-    soundcloud = _search_once('scsearch1', query, timeout)
-    sc_matched, sc_rest = _ranked_hits(soundcloud, 'scsearch1', expected_duration)
-    ordered = yt_matched + yt_rest + sc_matched + sc_rest
+    yt_matched, yt_rest, sc_matched, sc_rest = [], [], [], []
+    if engine in ('auto', 'youtube'):
+        youtube = _search_once('ytsearch5', query, timeout)
+        yt_matched, yt_rest = _ranked_hits(youtube, 'ytsearch5',
+                                           expected_duration, strict=strict)
+    if engine in ('auto', 'soundcloud'):
+        soundcloud = _search_once('scsearch1', query, timeout)
+        sc_matched, sc_rest = _ranked_hits(soundcloud, 'scsearch1',
+                                           expected_duration, strict=strict)
+    if engine == 'soundcloud':
+        ordered = sc_matched + sc_rest + yt_matched + yt_rest
+    else:
+        ordered = yt_matched + yt_rest + sc_matched + sc_rest
     return [hit for hit in ordered if hit['url'] not in excluded][:limit]
 
 
@@ -6717,6 +6860,44 @@ def api_album_tracks():
     return jsonify({'ok': True, 'items': [_serialize(r) for r in rows]})
 
 
+@bp.route('/api/notify-test', methods=['POST'])
+def api_notify_test():
+    """Fire a test desktop notification."""
+    try:
+        _notify('Audio Converter test', 'Notifications are working.')
+    except Exception as e:
+        return jsonify({'ok': False, 'message': str(e)}), 500
+    return jsonify({'ok': True, 'message': 'Test notification sent.'})
+
+
+@bp.route('/api/proxy-check', methods=['POST'])
+def api_proxy_check():
+    """Verify the configured proxy by fetching a tiny URL through it."""
+    try:
+        settings = UserSettings.query.first()
+        proxy = (getattr(settings, 'proxy', '') or '').strip()
+    except Exception:
+        proxy = ''
+    if not proxy:
+        return jsonify({'ok': False,
+                        'message': 'No proxy configured.'}), 400
+    import time as _time
+    try:
+        start = _time.monotonic()
+        resp = requests.get('https://www.youtube.com/generate_204',
+                            proxies={'http': proxy, 'https': proxy},
+                            timeout=20)
+        elapsed = _time.monotonic() - start
+    except Exception as e:
+        return jsonify({'ok': False,
+                        'message': f'Proxy failed: {str(e)[:200]}'}), 502
+    if resp.status_code in (200, 204):
+        return jsonify({'ok': True,
+                        'message': f'Proxy works ({elapsed:.1f}s).'})
+    return jsonify({'ok': False,
+                    'message': f'Proxy answered {resp.status_code}.'}), 502
+
+
 @bp.route('/api/notices')
 def api_notices():
     """In-app notification center: recent notices, newest first."""
@@ -6837,6 +7018,292 @@ def api_inspect():
                     'artist': meta.get('artist') or '',
                     'duration': meta.get('duration') or 0,
                     'thumbnail': meta.get('thumbnail') or ''})
+
+
+@bp.route('/api/subs/backfill', methods=['POST'])
+def api_subs_backfill():
+    """Fetch subtitles for videos that have none.
+
+    Uses the original page (no re-download): one capped pass per click,
+    reporting filled/skipped/failed. Sidecars land next to each video.
+    """
+    try:
+        settings = UserSettings.query.first()
+        auto = ','.join(['en', 'de', 'es', 'fr', 'pt', 'it', 'nl', 'pl',
+                         'ja', 'ko', 'zh-Hans', 'ar', 'hi', 'ru', 'tr'])
+        pref = (getattr(settings, 'pref_sub_lang', 'en') or 'en').strip() or 'en'
+    except Exception:
+        auto, pref = '', 'en'
+    auto_list = [a for a in auto.split(',') if a]
+    if pref in auto_list:
+        auto_list.remove(pref)
+    auto_list.insert(0, pref)
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).limit(50).all()
+    filled, skipped, failed = 0, 0, 0
+    for row in rows:
+        if row.is_playlist:
+            continue
+        path = row.output_path or ''
+        if not path or not os.path.isfile(path):
+            continue
+        if os.path.splitext(path)[1].lower() not in (
+                '.mp4', '.webm', '.mkv', '.mov', '.avi'):
+            skipped += 1
+            continue
+        stem = os.path.splitext(path)[0]
+        try:
+            existing = [p for p in os.listdir(os.path.dirname(path) or '.')
+                        if re.fullmatch(re.escape(os.path.basename(stem)) +
+                                         r'\.[A-Za-z-]{2,12}\.(vtt|srt)',
+                                         p)]
+        except OSError:
+            existing = []
+        if existing:
+            skipped += 1
+            continue
+        if not _is_supported_video_url(row.url or ''):
+            skipped += 1
+            continue
+        try:
+            res = subprocess.run(
+                _ytdlp_command() + _active_privacy_flags() + _ytdlp_net_args()
+                + list(_YTDLP_POLITENESS_FLAGS)
+                + ['--skip-download', '--write-subs', '--write-auto-subs',
+                   '--sub-langs', 'all,-live_chat',
+                   '--sub-langs', ','.join(auto_list),
+                   '--convert-subs', 'vtt', '--no-playlist',
+                   '-o', stem, row.url],
+                capture_output=True, text=True, timeout=300,
+                env=_ytdlp_env())
+            subs = _collect_subtitles_for(stem)
+            if res.returncode == 0 and subs:
+                filled += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return jsonify({'ok': True, 'filled': filled, 'skipped': skipped,
+                    'failed': failed})
+
+
+def _collect_subtitles_for(stem):
+    """Sidecar subtitle files already sitting next to a stem."""
+    found = []
+    try:
+        directory = os.path.dirname(stem) or '.'
+        base = os.path.basename(stem)
+        for name in sorted(os.listdir(directory)):
+            match = re.fullmatch(re.escape(base) + r'\.([A-Za-z-]{2,12})\.(vtt|srt)',
+                                 name)
+            if match:
+                found.append((match.group(1),
+                              os.path.join(directory, name)))
+    except OSError:
+        pass
+    return found
+
+
+@bp.route('/api/prefs', methods=['POST'])
+def api_prefs_set():
+    """Flip player preferences (currently: radio mode)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            settings = UserSettings(output_path=effective_output_path())
+            db.session.add(settings)
+        if 'radio_mode' in payload:
+            settings.radio_mode = bool(payload.get('radio_mode'))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False}), 500
+    return jsonify({'ok': True, 'radio_mode': bool(settings.radio_mode)})
+
+
+@bp.route('/api/prefs')
+def api_prefs():
+    """Player-relevant preferences (subtitle language, radio mode)."""
+    try:
+        settings = UserSettings.query.first()
+        pref = (getattr(settings, 'pref_sub_lang', 'en') or 'en').strip() or 'en'
+        radio = bool(getattr(settings, 'radio_mode', False))
+    except Exception:
+        pref, radio = 'en', False
+    return jsonify({'ok': True, 'pref_sub_lang': pref, 'radio_mode': radio})
+
+
+@bp.route('/api/details/<int:conversion_id>')
+def api_details(conversion_id):
+    """Tech sheet for a stored file: container, streams, size, tags."""
+    row = db.session.get(ConversionHistory, conversion_id)
+    if row is None:
+        return jsonify({'ok': False, 'message': 'Not found'}), 404
+    path = row.output_path or ''
+    exists = bool(path) and os.path.isfile(path)
+    try:
+        size = os.path.getsize(path) if exists else 0
+    except OSError:
+        size = 0
+    duration, tags, quality = (0.0, {}, '')
+    if exists:
+        try:
+            duration, tags, quality = _ffmpeg_file_info(path)
+        except Exception:
+            pass
+    try:
+        played = int(row.play_count or 0)
+    except (TypeError, ValueError):
+        played = 0
+    return jsonify({
+        'ok': True,
+        'file': path if path else None,
+        'name': os.path.basename(path) if path else None,
+        'exists': exists,
+        'size': size,
+        'duration': duration or row.duration or 0,
+        'quality': quality,
+        'format': row.format,
+        'status': row.status,
+        'url': row.url,
+        'playlist': bool(row.is_playlist),
+        'folder': os.path.dirname(path) if path else None,
+        'created': row.created_at.isoformat(sep=' ') if row.created_at else None,
+        'tags': {'title': tags.get('title', row.tag_title or ''),
+                 'artist': tags.get('artist', row.tag_artist or ''),
+                 'album': tags.get('album', row.tag_album or '')},
+        'played': played,
+        'rating': row.rating or 0,
+        'speed': row.dl_speed,
+        'eta': row.dl_eta,
+    })
+
+
+@bp.route('/api/extract-audio/<int:conversion_id>', methods=['POST'])
+def api_extract_audio(conversion_id):
+    """Pull the audio stream out of a finished video, next to it.
+
+    Lossless rewrap into FLAC when the codec allows (aac/opus/vorbis/
+    pcm all do), re-encode only if the copy fails. The new file lands in
+    history as its own completed row so it shows up like any download.
+    """
+    row = db.session.get(ConversionHistory, conversion_id)
+    if row is None:
+        return jsonify({'ok': False, 'message': 'Not found'}), 404
+    src = row.output_path or ''
+    if not src or not os.path.isfile(src):
+        return jsonify({'ok': False, 'message': 'Source file missing.'}), 404
+    ext = os.path.splitext(src)[1].lower()
+    if ext in ('.flac', '.mp3', '.m4a', '.opus', '.wav', '.ogg', '.aac', '.wma'):
+        return jsonify({'ok': False,
+                        'message': 'Already an audio file.'}), 400
+    out = os.path.splitext(src)[0] + '.flac'
+    counter = 1
+    while os.path.exists(out):
+        out = os.path.splitext(src)[0] + f' ({counter}).flac'
+        counter += 1
+    attempts = [
+        ['ffmpeg', '-y', '-v', 'error', '-i', src,
+         '-map', '0:a:0', '-c:a', 'copy', '-f', 'flac', out],
+        ['ffmpeg', '-y', '-v', 'error', '-i', src,
+         '-map', '0:a:0', '-c:a', 'flac', out],
+    ]
+    last_err = ''
+    for cmd in attempts:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=900)
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if res.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            break
+        last_err = (res.stderr or '').strip()[-400:]
+        try:
+            if os.path.isfile(out):
+                os.remove(out)
+        except OSError:
+            pass
+    else:
+        return jsonify({'ok': False,
+                        'message': 'Extraction failed: ' + last_err}), 500
+
+    extracted = ConversionHistory(
+        url=row.url,
+        format='FLAC',
+        output_path=out,
+        status='completed',
+        progress=100,
+        is_playlist=False,
+        parent_id=row.parent_id,
+        import_source=row.import_source,
+        tag_title=row.tag_title,
+        tag_artist=row.tag_artist,
+        tag_album=row.tag_album,
+        cover_url=row.cover_url,
+    )
+    extracted.quality = 'lossless'
+    db.session.add(extracted)
+    db.session.commit()
+    try:
+        _store_file_facts(extracted, out)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return jsonify({'ok': True, 'id': extracted.id, 'path': out})
+
+
+@bp.route('/api/radio')
+def api_radio():
+    """A similar track to keep playing: same artist, then album, then
+    folder, then least-played overall. Never the track just heard."""
+    try:
+        after = int(request.args.get('after', 0) or 0)
+    except (TypeError, ValueError):
+        after = 0
+    current = db.session.get(ConversionHistory, after) if after else None
+    try:
+        rows = db.session.query(ConversionHistory).filter(
+            ConversionHistory.status.in_(['completed', 'skipped']),
+            ConversionHistory.is_playlist.is_(False),
+            ConversionHistory.id != after).all()
+    except Exception:
+        return jsonify({'ok': False}), 500
+    playable = [r for r in rows
+                if r.output_path and os.path.isfile(r.output_path)]
+    if not playable:
+        return jsonify({'ok': False, 'message': 'Nothing to play.'}), 404
+
+    def rank(row):
+        score = 3
+        if current is not None:
+            artist = (getattr(row, 'tag_artist', '') or '').strip().lower()
+            current_artist = (getattr(current, 'tag_artist', '') or '').strip().lower()
+            if artist and artist == current_artist:
+                score = 0
+            else:
+                album = (getattr(row, 'tag_album', '') or '').strip().lower()
+                current_album = (getattr(current, 'tag_album', '') or '').strip().lower()
+                if album and album == current_album:
+                    score = 1
+                else:
+                    try:
+                        same_folder = (os.path.dirname(os.path.abspath(row.output_path or ''))
+                                       == os.path.dirname(os.path.abspath(
+                                           current.output_path or '')))
+                    except Exception:
+                        same_folder = False
+                    if same_folder:
+                        score = 2
+        try:
+            plays = int(row.play_count or 0)
+        except (TypeError, ValueError):
+            plays = 0
+        return (score, plays, row.id)
+
+    choice = sorted(playable, key=rank)[0]
+    return jsonify({'ok': True, 'item': _serialize(choice)})
 
 
 @bp.route('/api/chapters/<int:conversion_id>')

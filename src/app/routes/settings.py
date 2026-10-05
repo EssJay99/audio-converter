@@ -11,7 +11,8 @@ SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_qualit
                   'finish_action', 'audio_quality')
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
-                  'auto_update_ytdlp', 'numbered_filenames', 'nfo_files',)
+                  'auto_update_ytdlp', 'numbered_filenames', 'nfo_files',
+                  'import_strict', 'radio_mode',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -70,6 +71,12 @@ def get_settings_dict():
         'mp3_bitrate': 192,
         'm4a_bitrate': 192,
         'opus_bitrate': 128,
+        'import_engine': 'auto',
+        'import_strict': False,
+        'pref_sub_lang': 'en',
+        'radio_mode': False,
+        'prune_failed_days': 0,
+        'storage_quota_gb': 0,
         'finish_action': 'nothing',
     }
     user_settings = UserSettings.query.first()
@@ -91,6 +98,10 @@ def get_settings_dict():
         if getattr(user_settings, 'offpeak_limit', None) is not None:
             defaults['offpeak_limit'] = user_settings.offpeak_limit
         for _field in ('mp3_bitrate', 'm4a_bitrate', 'opus_bitrate'):
+            if getattr(user_settings, _field, None) is not None:
+                defaults[_field] = getattr(user_settings, _field)
+        for _field in ('import_engine', 'pref_sub_lang', 'prune_failed_days',
+                       'storage_quota_gb'):
             if getattr(user_settings, _field, None) is not None:
                 defaults[_field] = getattr(user_settings, _field)
         if getattr(user_settings, 'offpeak_start', None) is not None:
@@ -146,6 +157,17 @@ def save_settings():
     data['mp3_bitrate'] = _int_from_form(request, 'mp3_bitrate', 192, 96, 320)
     data['m4a_bitrate'] = _int_from_form(request, 'm4a_bitrate', 192, 96, 320)
     data['opus_bitrate'] = _int_from_form(request, 'opus_bitrate', 128, 64, 256)
+    data['import_engine'] = request.form.get('import_engine', 'auto').strip()
+    if data['import_engine'] not in ('auto', 'youtube', 'soundcloud'):
+        data['import_engine'] = 'auto'
+    data['pref_sub_lang'] = request.form.get('pref_sub_lang', 'en').strip()[:10]
+    if not data['pref_sub_lang']:
+        data['pref_sub_lang'] = 'en'
+    data['prune_failed_days'] = _int_from_form(request, 'prune_failed_days', 0, 0, 365)
+    try:
+        data['storage_quota_gb'] = max(0.0, float(request.form.get('storage_quota_gb', 0) or 0))
+    except (TypeError, ValueError):
+        data['storage_quota_gb'] = 0
     data['video_preset'] = request.form.get('video_preset', 'veryfast').strip()
     if data['video_preset'] not in ('ultrafast', 'superfast', 'veryfast',
                                     'faster', 'fast', 'medium', 'slow'):
@@ -174,6 +196,10 @@ def save_settings():
         user_settings.mp3_bitrate = data['mp3_bitrate']
         user_settings.m4a_bitrate = data['m4a_bitrate']
         user_settings.opus_bitrate = data['opus_bitrate']
+        user_settings.import_engine = data['import_engine']
+        user_settings.pref_sub_lang = data['pref_sub_lang']
+        user_settings.prune_failed_days = data['prune_failed_days']
+        user_settings.storage_quota_gb = data['storage_quota_gb']
         user_settings.offpeak_start = data['offpeak_start']
         user_settings.offpeak_end = data['offpeak_end']
         user_settings.video_crf = data['video_crf']

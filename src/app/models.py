@@ -60,6 +60,17 @@ class UserSettings(db.Model):
     video_preset = db.Column(db.String(20), nullable=False, default='veryfast')
     # Preselected format on the video convert form.
     default_video_format = db.Column(db.String(20), nullable=False, default='video_mp4')
+    # Import tuning: preferred engine and strict matching.
+    import_engine = db.Column(db.String(20), nullable=False, default='auto')
+    import_strict = db.Column(db.Boolean, nullable=False, default=False)
+    # Preferred subtitle language for theater auto-select + download order.
+    pref_sub_lang = db.Column(db.String(10), nullable=False, default='en')
+    # Auto-queue similar tracks when the play queue runs dry.
+    radio_mode = db.Column(db.Boolean, nullable=False, default=False)
+    # Delete failed rows older than N days (0 = keep).
+    prune_failed_days = db.Column(db.Integer, nullable=False, default=0)
+    # Keep the library under N GB, oldest-played first (0 = unlimited).
+    storage_quota_gb = db.Column(db.Float, nullable=False, default=0)
     # What to do when the queue drains: 'nothing', 'sleep', or 'shutdown'.
     finish_action = db.Column(db.String(10), nullable=False, default='nothing')
     # App version last acknowledged in the What's-new dialog.

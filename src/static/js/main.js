@@ -485,6 +485,94 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return;
     }
+    const infoBtn = e.target.closest('[data-info]');
+    if (infoBtn) {
+        if (typeof bootstrap === 'undefined') {
+            toast('Details unavailable.', 'danger');
+            e.preventDefault();
+            return;
+        }
+        const modalEl = document.getElementById('detailsModal');
+        fetch('/api/details/' + infoBtn.dataset.info)
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.ok) {
+                    toast(data.message || 'Could not read this file.', 'danger');
+                    return;
+                }
+                const bytes = (n) => {
+                    if (!n) return '0 B';
+                    const units = ['B', 'KB', 'MB', 'GB'];
+                    let i = 0;
+                    let v = n;
+                    while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+                    return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + ' ' + units[i];
+                };
+                const secs = (n) => {
+                    if (!n) return '—';
+                    const s = Math.round(n);
+                    const h = Math.floor(s / 3600);
+                    const m = Math.floor((s % 3600) / 60);
+                    const r = s % 60;
+                    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(r).padStart(2, '0');
+                };
+                const rows = [
+                    ['Title', data.tags.title || '—'],
+                    ['Artist', data.tags.artist || '—'],
+                    ['Album', data.tags.album || '—'],
+                    ['Format', (data.format || '—') + (data.playlist ? ' (playlist)' : '')],
+                    ['Quality', data.quality || '—'],
+                    ['Duration', secs(data.duration)],
+                    ['Size', bytes(data.size)],
+                    ['Plays', String(data.played)],
+                    ['Rating', (data.rating || 0) ? '★'.repeat(Math.min(5, data.rating)) : '—'],
+                    ['Status', data.status],
+                    ['Added', data.created || '—'],
+                    ['Folder', data.folder || '—'],
+                    ['File', data.file || '(not on disk)'],
+                    ['Source', data.url || '—'],
+                ];
+                const tbody = modalEl ? modalEl.querySelector('#detailsTable tbody') : null;
+                if (tbody) {
+                    tbody.innerHTML = rows
+                        .map(([k, v]) => '<tr><th class="text-muted" style="width:9rem">' + k +
+                            '</th><td class="text-break">' + String(v).replace(/</g, '&lt;') + '</td></tr>')
+                        .join('');
+                }
+                if (!modalEl) return;
+                bootstrap.Modal.getOrCreateInstance(modalEl).show();
+            })
+            .catch(() => toast('Could not load details.', 'danger'));
+        e.preventDefault();
+        return;
+    }
+    const extractBtn = e.target.closest('[data-extract]');
+    if (extractBtn) {
+        extractBtn.disabled = true;
+        const original = extractBtn.textContent;
+        extractBtn.textContent = '…';
+        fetch('/api/extract-audio/' + extractBtn.dataset.extract, {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken() },
+        })
+            .then((r) => r.json())
+            .then((data) => {
+                if (!data.ok) {
+                    toast(data.message || 'Could not extract audio.', 'danger');
+                } else {
+                    toast('Audio saved as FLAC.', 'success');
+                    if (typeof refreshTable === 'function') refreshTable();
+                    else window.location.reload();
+                }
+            })
+            .catch(() => toast('Could not extract audio.', 'danger'))
+            .finally(() => {
+                extractBtn.disabled = false;
+                extractBtn.textContent = original;
+            });
+        e.preventDefault();
+        return;
+    }
     const missesBtn = e.target.closest('[data-retry-misses]');
     if (missesBtn) {
         missesBtn.disabled = true;
