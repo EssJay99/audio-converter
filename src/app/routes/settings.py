@@ -182,6 +182,16 @@ def save_settings():
     if not data['output_path']:
         flash('Output path cannot be empty', 'error')
         return redirect(url_for('settings.settings_page'))
+    # Reject path-traversal tricks and unwritable targets before saving,
+    # so a Settings form can't be used to land downloads outside the
+    # intended directory.
+    from app.routes.convert import _safe_output_path
+    safe = _safe_output_path(data['output_path'])
+    if safe is None:
+        flash(f"Output path is invalid, not a directory, or not writable: "
+              f"{data['output_path']}", 'error')
+        return redirect(url_for('settings.settings_page'))
+    data['output_path'] = safe
 
     user_settings = UserSettings.query.first()
     if user_settings:

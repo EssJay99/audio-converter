@@ -50,7 +50,17 @@ def fresh_db():
 def client(fresh_db):
     app.config['TESTING'] = True
     app.config['WTF_CSRF_ENABLED'] = False
-    yield app.test_client()
+    # Tests use placeholder paths like '/tmp/x' that don't exist; let the
+    # settings route accept them so the round-trip tests stay focused on
+    # the fields they care about. Path-traversal defence is covered by
+    # the dedicated _safe_output_path unit tests.
+    import app.routes.convert as cm
+    orig = cm._safe_output_path
+    cm._safe_output_path = lambda raw: raw
+    try:
+        yield app.test_client()
+    finally:
+        cm._safe_output_path = orig
 
 
 @pytest.fixture()

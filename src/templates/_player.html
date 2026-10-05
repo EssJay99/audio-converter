@@ -190,3 +190,61 @@
         <div id="appLyricsBody" class="app-lyrics-body"><span class="text-muted small">Loading…</span></div>
     </div>
 </div>
+<div class="modal fade" id="phraseConfirm" tabindex="-1" aria-labelledby="phraseConfirmLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm destructive action</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cancel"></button>
+            </div>
+            <div class="modal-body">
+                <p id="phraseConfirmLabel" class="mb-2">Type the confirmation phrase to continue.</p>
+                <input type="text" id="phraseConfirmInput" class="form-control" autocomplete="off" spellcheck="false">
+                <small id="phraseConfirmError" class="text-danger"></small>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="phraseConfirmSubmit">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        if (window.confirmWithPhrase) return;
+        let _phraseResolve = null;
+        const modalEl = document.getElementById('phraseConfirm');
+        const input = document.getElementById('phraseConfirmInput');
+        const label = document.getElementById('phraseConfirmLabel');
+        const error = document.getElementById('phraseConfirmError');
+        if (!modalEl || !input || typeof bootstrap === 'undefined') return;
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        document.getElementById('phraseConfirmSubmit').addEventListener('click', () => {
+            const typed = input.value || '';
+            if (typed.trim() !== (input.dataset.expected || '').trim()) {
+                error.textContent = 'Phrase does not match — try again.';
+                return;
+            }
+            error.textContent = '';
+            modal.hide();
+            if (_phraseResolve) _phraseResolve(typed.trim());
+            _phraseResolve = null;
+        });
+        modalEl.addEventListener('hidden.bs.modal', () => {
+            input.value = '';
+            if (_phraseResolve) {
+                _phraseResolve(null);
+                _phraseResolve = null;
+            }
+        });
+        window.confirmWithPhrase = (phrase, description) => new Promise((resolve) => {
+            input.dataset.expected = phrase;
+            label.textContent = description + ' Type ' + phrase + ' to confirm.';
+            error.textContent = '';
+            _phraseResolve = resolve;
+            modal.show();
+            setTimeout(() => input.focus(), 250);
+        });
+    })();
+</script>

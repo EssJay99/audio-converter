@@ -7,7 +7,7 @@ from datetime import timedelta
 from flask import Blueprint, render_template, request, jsonify, abort, Response
 from sqlalchemy import or_
 from app.models import ConversionHistory, UserSettings, effective_output_path, utcnow
-from app.routes.convert import _serialize, sanitize_filename
+from app.routes.convert import _serialize, _requires_phrase, sanitize_filename
 from app import db, APP_VERSION
 
 bp = Blueprint('home', __name__)
@@ -271,6 +271,7 @@ def api_duplicates():
 
 
 @bp.route('/api/recently-played/clear', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_clear_recently_played():
     """Forget when tracks were played (play counts are kept)."""
     try:

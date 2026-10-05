@@ -589,9 +589,19 @@
         }
         var tidyBtn = document.getElementById('libTidyBtn');
         if (tidyBtn) {
-            tidyBtn.addEventListener('click', function () {
-                if (!confirm('Move library files into Artist / Album folders from their tags?')) return;
-                postJSON('/api/tidy', {})
+            tidyBtn.addEventListener('click', async function () {
+                if (typeof confirmWithPhrase !== 'function') {
+                    if (!confirm('Move library files into Artist / Album folders from their tags?')) return;
+                }
+                let conf = 'CONFIRM';
+                if (typeof confirmWithPhrase === 'function') {
+                    const typed = await confirmWithPhrase(
+                        'CONFIRM',
+                        'Move library files into Artist / Album folders from their tags.');
+                    if (typed === null) return;
+                    conf = typed;
+                }
+                postJSON('/api/tidy', { confirm: conf })
                     .then(function (res) {
                         if (typeof toast === 'function') {
                             toast(res.ok
@@ -1071,9 +1081,19 @@
         });
         var recentClear = document.getElementById('tabRecentClear');
         if (recentClear) {
-            recentClear.addEventListener('click', function () {
-                if (!confirm('Forget when tracks were played? Play counts stay.')) return;
-                postJSON('/api/recently-played/clear', {})
+            recentClear.addEventListener('click', async function () {
+                if (typeof confirmWithPhrase !== 'function') {
+                    if (!confirm('Forget when tracks were played? Play counts stay.')) return;
+                    postJSON('/api/recently-played/clear', {})
+                        .then(function () { loadRecent(); })
+                        .catch(function () {});
+                    return;
+                }
+                const typed = await confirmWithPhrase(
+                    'CONFIRM',
+                    'Forget when tracks were played (play counts stay).');
+                if (typed === null) return;
+                postJSON('/api/recently-played/clear', { confirm: typed })
                     .then(function () { loadRecent(); })
                     .catch(function () {});
             });

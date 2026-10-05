@@ -1111,6 +1111,15 @@ function initHealthBanner() {
             if (data.output_writable === false) {
                 problems.push('the output folder is not writable');
             }
+            if (data.secret_persisted === false) {
+                problems.push('session secret is not persisted — logins and CSRF tokens reset on every relaunch (set AUDIO_CONVERTER_SECRET_KEY or check write access to the data directory)');
+            }
+            if (data.signature && data.signature.signed === false) {
+                problems.push('this install is NOT code-signed — Gatekeeper will warn on first launch (open with right-click › Open once). Build with a Developer ID to silence this.');
+            }
+            if (data.signature && data.signature.signed === true && data.signature.notarized === false) {
+                problems.push('this install is signed but not notarized — first launch requires right-click › Open.');
+            }
             if (!problems.length) return;
             const text = document.getElementById('healthBannerText');
             if (text) text.textContent = problems.join(' Also: ') + '.';
@@ -1690,7 +1699,31 @@ function initHistoryToolbar() {
     refreshStorageInfo();
     const pruneBtn = document.getElementById('pruneMissing');
     if (pruneBtn) {
-        pruneBtn.addEventListener('click', () => {
+        pruneBtn.addEventListener('click', async () => {
+            if (typeof confirmWithPhrase === 'function') {
+                const typed = await confirmWithPhrase(
+                    'CONFIRM',
+                    'Remove history entries whose files are gone from disk.');
+                if (typed === null) return;
+                pruneBtn.disabled = true;
+                fetch('/api/prune-missing', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json',
+                               'X-CSRFToken': csrfToken() },
+                    body: JSON.stringify({ confirm: typed }),
+                })
+                    .then((r) => r.json())
+                    .then((data) => {
+                        toast(data.ok ? ('Removed ' + data.removed + ' missing entr' + (data.removed === 1 ? 'y.' : 'ies.')) : (data.message || 'Cleanup failed.'),
+                              data.ok ? 'success' : 'danger');
+                        refreshStorageInfo();
+                        if (typeof refreshTable === 'function') refreshTable();
+                        else window.location.reload();
+                    })
+                    .catch(() => toast('Cleanup failed.', 'danger'))
+                    .finally(() => { pruneBtn.disabled = false; });
+                return;
+            }
             if (!confirm('Remove history entries whose files are gone from disk? Active downloads are never touched.')) return;
             pruneBtn.disabled = true;
             fetch('/api/prune-missing', {

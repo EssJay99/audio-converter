@@ -47,22 +47,73 @@ app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 # The worker thread writes to SQLite on a separate connection; raise the lock timeout
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'connect_args': {'timeout': 15}}
 
-# Stable secret key (env var wins; else a file next to the app; else random for dev)
-secret_key = os.environ.get('AUDIO_CONVERTER_SECRET_KEY')
-if not secret_key:
-    secret_file = os.path.join(basedir, '..', '.secret_key')
-    if os.path.exists(secret_file):
-        with open(secret_file, 'r') as f:
-            secret_key = f.read().strip()
-if not secret_key:
-    secret_key = os.urandom(24).hex()
-    try:
-        with open(secret_file, 'w') as f:
-            f.write(secret_key)
-        os.chmod(secret_file, 0o600)
-    except Exception:
-        pass
-app.secret_key = secret_key
+# Stable secret key (env var wins; else on-disk secret; else in-memory random).
+# The on-disk path is the per-user Application Support dir that the desktop
+# launcher wires up; running from a source checkout falls back to in-process
+# random (so dev restarts invalidate sessions, no cross-install leakage).
+_WEAK_KEYS = frozenset({'', 'changeme', 'change-me', 'secret', 'password',
+                        'test-secret-key', 'default'})
+_SECRET_PERSISTED = False
+
+
+def _resolve_secret_key():
+    global _SECRET_PERSISTED
+    env_value = os.environ.get('AUDIO_CONVERTER_SECRET_KEY')
+    if env_value and env_value.strip() and env_value not in _WEAK_KEYS:
+        _SECRET_PERSISTED = True
+        return env_value.strip()
+    # The desktop launcher exports this env var pointing at the data dir.
+    # Source-tree runs and CI land here. Project root = basedir/../.. since
+    # basedir is src/app; the data dir lives outside the source tree.
+    data_dir = os.environ.get('AUDIO_CONVERTER_DATA_DIR')
+    candidates = []
+    if data_dir:
+        candidates.append(os.path.join(data_dir, '.secret_key'))
+    candidates.append(os.path.join(basedir, '..', '..', '.secret_key'))
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    existing = f.read().strip()
+                if existing and existing not in _WEAK_KEYS and len(existing) >= 16:
+                    _SECRET_PERSISTED = True
+                    return existing
+                # Discard weak or short values on disk — never trust a value
+                # that looks like a default or placeholder.
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        except OSError:
+            continue
+    generated = os.urandom(32).hex()
+    for path in candidates:
+        try:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(generated)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _SECRET_PERSISTED = True
+            break
+        except OSError:
+            continue
+    else:
+        # No on-disk write succeeded: ephemeral secret. Logged once at startup
+        # so users see the warning before they wonder why sessions vanish.
+        logging.getLogger('audio-converter.security').warning(
+            'Secret key not persisted: sessions will invalidate on every restart.')
+    return generated
+
+
+app.secret_key = _resolve_secret_key()
+
+
+def is_secret_persisted():
+    """True when the secret is on disk or stable in env. False = ephemeral."""
+    return _SECRET_PERSISTED
 # The session cookie only carries the CSRF token and flash messages, but
 # lock it down anyway: unreadable to JS, never sent cross-site.
 app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -75,6 +126,19 @@ def _security_headers(response):
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
     response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    # HSTS only when the request was actually HTTPS. Behind the desktop
+    # launcher's loopback HTTP this never fires; if a future deploy
+    # front-ends the app with TLS (reverse proxy + forwarded-proto), the
+    # header pins browsers to HTTPS for a year.
+    try:
+        from flask import request as _r
+        if _r.is_secure or (_r.headers.get('X-Forwarded-Proto', '').lower()
+                            == 'https'):
+            response.headers.setdefault(
+                'Strict-Transport-Security',
+                'max-age=31536000; includeSubDomains')
+    except Exception:
+        pass
     return response
 
 

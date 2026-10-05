@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import queue
 import re
@@ -20,6 +21,7 @@ from sqlalchemy import func, or_, text
 from flask import (Blueprint, render_template, request, flash, redirect,
                    url_for, jsonify, send_file, abort)
 from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
+from app import _resource_base_dir, is_secret_persisted
 
 bp = Blueprint('convert', __name__)
 
@@ -1388,6 +1390,105 @@ def _same_origin_required(view):
     return wrapper
 
 
+def _rate_limited(limiter, label):
+    """Per-IP request budget for an endpoint. 429 when exceeded.
+
+    Cheap to apply; the limiter is in-process and self-evicts old buckets,
+    so a busy app doesn't leak memory. Sets `Retry-After` so well-behaved
+    clients back off cleanly.
+    """
+    from functools import wraps
+
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            identity = (label, _client_identity())
+            if not limiter.allow(identity):
+                resp = jsonify({'ok': False,
+                                'message': 'Too many requests, please slow down.'})
+                resp.status_code = 429
+                resp.headers['Retry-After'] = '60'
+                return resp
+            return view(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _requires_phrase(phrase):
+    """Gate a destructive endpoint behind a typed-phrase confirmation.
+
+    The phrase is required in the JSON body (`confirm` field) or in a form
+    field of the same name. This protects against accidental clicks AND
+    same-origin XHR / browser-extension abuse: a successful POST needs the
+    user to have actually typed something the UI surfaced.
+
+    A 412 (Precondition Failed) tells the UI to pop the confirmation
+    modal — a regular 400 looks like a form error.
+    """
+    from functools import wraps
+
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            payload = {}
+            try:
+                payload = request.get_json(silent=True) or {}
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            form_value = request.form.get('confirm', '')
+            body_value = str(payload.get('confirm', '') or '')
+            supplied = (body_value or form_value).strip()
+            if supplied != phrase:
+                return jsonify({
+                    'ok': False,
+                    'requires_confirm': True,
+                    'phrase': phrase,
+                    'message': 'Type the confirmation phrase to continue.',
+                }), 412
+            return view(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _bundle_signature():
+    """Whether the running bundle is code-signed, and by whom.
+
+    Source-tree runs return `None` (not applicable). Frozen builds return
+    a dict with `signed: bool`, `authority: String|None`, and `notarized:
+    bool`. macOS only — Windows signing is best-effort and not exposed.
+    """
+    if not getattr(sys, 'frozen', False) or sys.platform != 'darwin':
+        return None
+    bundle = _running_bundle_dir()
+    if bundle is None:
+        return None
+    out = {'signed': False, 'authority': None, 'notarized': False}
+    try:
+        res = subprocess.run(
+            ['codesign', '-dv', '--verbose=2', bundle],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return out
+    text = (res.stdout or '') + '\n' + (res.stderr or '')
+    if 'Authority=' in text:
+        out['signed'] = True
+        match = re.search(r'Authority=([^/\r\n]+)', text)
+        if match:
+            out['authority'] = match.group(1).strip()
+    # A staple ticket tells Gatekeeper Apple already notarized it.
+    try:
+        res2 = subprocess.run(
+            ['xcrun', 'stapler', 'validate', bundle],
+            capture_output=True, text=True, timeout=10)
+        if res2.returncode == 0:
+            out['notarized'] = True
+    except Exception:
+        pass
+    return out
+
+
 _finish_armed = False
 # Interrupted jobs requeued by the latest launch (for the resume notice).
 _resumed_count = 0
@@ -2274,6 +2375,7 @@ def cover_art(conversion_id):
 
 
 @bp.route('/api/maintenance/clear-covers', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_clear_covers():
     """Wipe the entire cover-thumbnail cache (it rebuilds on demand)."""
     cleared = 0
@@ -2419,6 +2521,7 @@ def api_set_autostart():
 
 
 @bp.route('/api/maintenance/vacuum', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_vacuum():
     """Compact the library database (VACUUM) plus prune the cover cache.
 
@@ -2802,6 +2905,51 @@ def _is_public_http_url(url, timeout=5):
     return True
 
 
+def _resolved_after_redirects(url, timeout=10):
+    """Follow redirects manually and return the final URL.
+
+    Uses `requests` (which honors HTTP/HTTPS proxies the user set up) and
+    refuses to follow more than 5 hops. Useful for SSRF defence: a URL
+    that *looks* public but redirects to `http://10.0.0.5/...` should be
+    caught *before* we hand it to yt-dlp.
+    Returns None on transport errors so the caller can fall back.
+    """
+    current = url
+    for _ in range(5):
+        try:
+            resp = requests.get(current, timeout=timeout, stream=True,
+                                allow_redirects=False,
+                                headers={'User-Agent': 'AudioConverter/1.0'})
+        except Exception:
+            return current
+        try:
+            resp.close()
+        except Exception:
+            pass
+        if resp.status_code not in (301, 302, 303, 307, 308):
+            return current
+        next_url = resp.headers.get('Location') or ''
+        if not next_url:
+            return current
+        # Resolve relative redirects.
+        from urllib.parse import urljoin
+        current = urljoin(current, next_url)
+    return current
+
+
+def _safe_after_redirects(url):
+    """Return the URL after following redirects if the destination is safe.
+
+    If the destination fails the public-http check (private IP, non-http
+    scheme, malformed URL) the URL is rejected outright — returning None
+    tells the caller "do not download from this".
+    """
+    final = _resolved_after_redirects(url)
+    if final is None or not _is_public_http_url(final):
+        return None
+    return final
+
+
 def sanitize_url(url):
     """Strip tracking/ad identifiers from a pasted URL, keeping content address.
 
@@ -3134,6 +3282,39 @@ def sanitize_filename(name):
     name = re.sub(r'\s+', ' ', name).strip()
     name = name.rstrip('.')
     return name or 'audio'
+
+
+def _safe_output_path(raw):
+    """Coerce a user-supplied output path into one that's writable, absolute,
+    and free of path-traversal tricks.
+
+    - Strips embedded NULs and control bytes.
+    - Expands ``~`` and normalizes ``..`` so the resulting path matches what
+      the user *thinks* they typed.
+    - Resolves symlinks so a path like ``/safe/dir -> /elsewhere/wherever``
+      cannot be exploited by planting the symlink from another tab.
+    - Returns None when the path is missing, not a directory, or unwritable;
+      callers fall back to the default output path.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    cleaned = re.sub(r'[\x00-\x1f\x7f]', '', raw).strip()
+    if not cleaned:
+        return None
+    try:
+        expanded = os.path.expanduser(cleaned)
+        absolute = os.path.abspath(expanded)
+    except (TypeError, ValueError):
+        return None
+    try:
+        resolved = os.path.realpath(absolute)
+    except OSError:
+        return None
+    if not os.path.isdir(resolved):
+        return None
+    if not os.access(resolved, os.W_OK):
+        return None
+    return resolved
 
 
 # ------------------------------------------------------------- yt-dlp run --
@@ -3604,8 +3785,74 @@ def _stream_types(ffmpeg_stderr):
 _PLAYABLE_DIRNAME = 'audio-converter-playables'
 _PLAYABLE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 _PLAYABLE_CAP_FILES = 20
+_PLAYABLE_MAX_CONCURRENT = 3
 _playable_jobs = {}
 _playable_lock = threading.Lock()
+
+
+class _RateLimiter:
+    """In-process token-bucket per (route, identity) pair.
+
+    The window resets every `window_seconds`. `max_calls` requests per
+    identity per window; the 1 + max_calls'th returns False. Old buckets
+    are evicted opportunistically on each call so the dict stays bounded.
+    The limiter is local to one process — fine for a localhost server. A
+    future-proof network deploy would swap this for a Redis bucket.
+    """
+
+    def __init__(self, max_calls, window_seconds):
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self._buckets = {}
+        self._lock = threading.Lock()
+
+    def allow(self, identity):
+        """True when this call fits in the window, False otherwise."""
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            bucket = self._buckets.get(identity)
+            if bucket is None or bucket['reset'] <= cutoff:
+                self._buckets[identity] = {'reset': now + self.window_seconds,
+                                            'count': 1}
+                # Evict old buckets whenever we create one.
+                stale = [k for k, v in self._buckets.items()
+                                  if v['reset'] <= cutoff and k != identity]
+                for k in stale:
+                    self._buckets.pop(k, None)
+                return True
+            if bucket['count'] >= self.max_calls:
+                return False
+            bucket['count'] += 1
+            return True
+
+    def remaining(self, identity):
+        """Calls left in the current window for `identity`."""
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._buckets.get(identity)
+            if bucket is None or bucket['reset'] <= now - self.window_seconds:
+                return self.max_calls
+            return max(0, self.max_calls - bucket['count'])
+
+
+# Per-IP request budgets. The first caps anything that spins up ffmpeg
+# (a misbehaving tab should never reach this rate); the second is a
+# defense-in-depth ceiling on state-changing POSTs.
+_PLAYABLE_LIMIT = _RateLimiter(max_calls=12, window_seconds=60)
+_API_POST_LIMIT = _RateLimiter(max_calls=60, window_seconds=60)
+
+
+def _client_identity():
+    """Stable per-caller key for rate-limiting.
+
+    Behind 127.0.0.1 every browser tab shares the same loopback IP, so
+    the second hop (the loopback port the launcher wired) gives us a
+    distinguishing per-session key. Falls back to remote_addr when the
+    second hop is missing (LAN deploy).
+    """
+    remote = (request.remote_addr or '0.0.0.0').split(',')[0].strip()
+    return remote
 
 _DIRECT_VIDEO = frozenset(['h264'])
 _DIRECT_IMAGE = frozenset(['mjpeg', 'png'])
@@ -3729,6 +3976,7 @@ def _transcode_proxy(row_id, src, dest, duration):
 
 
 @bp.route('/api/playable/<int:conversion_id>')
+@_rate_limited(_PLAYABLE_LIMIT, '/api/playable')
 def api_playable(conversion_id):
     """A browser-playable URL for any video file.
 
@@ -3785,6 +4033,12 @@ def api_playable(conversion_id):
     except Exception:
         duration = 0
     with _playable_lock:
+        active = sum(1 for v in _playable_jobs.values()
+                      if v.get('state') == 'working')
+        if active >= _PLAYABLE_MAX_CONCURRENT:
+            return jsonify({'ok': False, 'state': 'busy',
+                            'message': 'Server is busy transcoding other '
+                                        'videos — try again in a moment.'}), 503
         _playable_jobs[history.id] = {'state': 'working', 'progress': 0}
     thread = threading.Thread(target=_transcode_proxy,
                               args=(history.id, src, dest, duration),
@@ -3933,30 +4187,67 @@ def _ytdlp_version():
 
 
 def _latest_ytdlp_release():
-    """Latest upstream yt-dlp release: {'version', 'assets': {name: url}}."""
+    """Latest upstream yt-dlp release: {'version', 'assets': {name: url}}.
+
+    Primary source is the GitHub Releases JSON API. When that fails (rate
+    limit, network blip, regional outage) we fall back to PyPI's JSON
+    API, which serves the same upstream and is generally more available.
+    PyPI doesn't ship platform binaries — only sdist — but its version
+    string + tag lets us synthesize the GitHub direct-download URL.
+    The SHA-256 verification that `_perform_ytdlp_update` runs catches
+    any mismatch, regardless of which source advertised the version.
+    """
+    if sys.platform == 'darwin':
+        asset = 'yt-dlp_macos'
+    elif sys.platform.startswith('win'):
+        asset = 'yt-dlp.exe'
+    else:
+        asset = 'yt-dlp_linux'
+
+    # Primary: GitHub Releases JSON.
     try:
         resp = requests.get(
             'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest',
             timeout=15, headers={'Accept': 'application/vnd.github+json',
                                  'User-Agent': 'AudioConverter/1.0'})
     except Exception:
-        return None
-    if resp.status_code != 200:
-        return None
+        resp = None
+    if resp is not None and resp.status_code == 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            assets = {}
+            for entry in data.get('assets') or []:
+                name = entry.get('name')
+                url = entry.get('browser_download_url')
+                if name and url:
+                    assets[name] = url
+            version = str(data.get('tag_name') or '').strip()
+            if version and asset in assets:
+                return {'version': version, 'assets': assets,
+                        'source': 'github'}
+
+    # Fallback: PyPI JSON. Synthesize the GitHub direct-download URL so
+    # _stream_download has the same URL surface as the primary path.
     try:
-        data = resp.json()
-    except ValueError:
-        return None
-    assets = {}
-    for asset in data.get('assets') or []:
-        name = asset.get('name')
-        url = asset.get('browser_download_url')
-        if name and url:
-            assets[name] = url
-    version = str(data.get('tag_name') or '').strip()
-    if not version:
-        return None
-    return {'version': version, 'assets': assets}
+        resp = requests.get('https://pypi.org/pypi/yt-dlp/json',
+                            timeout=15,
+                            headers={'User-Agent': 'AudioConverter/1.0'})
+        if resp.status_code == 200:
+            data = resp.json()
+            version = str(data.get('info', {}).get('version') or '').strip()
+            if version:
+                tag = 'latest' if not version.startswith('v') else version
+                url = (f'https://github.com/yt-dlp/yt-dlp/releases/download/'
+                       f'{tag}/{asset}')
+                return {'version': version,
+                        'assets': {asset: url},
+                        'source': 'pypi-fallback'}
+    except Exception:
+        pass
+    return None
 
 
 
@@ -4044,6 +4335,8 @@ def _perform_ytdlp_update():
 
 
 @bp.route('/api/helpers/update-ytdlp', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'update-ytdlp')
+@_requires_phrase('CONFIRM')
 def api_update_ytdlp():
     """Replace the yt-dlp helper binary with the latest release build."""
     if not _claim_update():
@@ -4072,7 +4365,7 @@ def _asset_sha256(assets, name, sums_asset='SHA2-256SUMS', timeout=60):
         session = requests.Session()
         session.cookies.clear()
         resp = session.get(sums_url, timeout=timeout,
-                           headers={'User-Agent': 'AudioConverter/1.0'})
+                            headers={'User-Agent': 'AudioConverter/1.0'})
         if resp.status_code != 200 or not resp.text:
             return None
     except Exception:
@@ -4084,6 +4377,79 @@ def _asset_sha256(assets, name, sums_asset='SHA2-256SUMS', timeout=60):
             if len(digest) == 64 and all(c in '0123456789abcdef' for c in digest):
                 return digest
     return None
+
+
+_RELEASE_PUBKEY_PATH = os.path.join(_resource_base_dir, 'release-signing-pubkey.txt')
+
+
+def _bundled_release_pubkey():
+    """Raw 32-byte Ed25519 public key bundled with the app, or None.
+
+    The bundled file is in minisign's key-blob format:
+    ```
+    untrusted comment: minisign sign public key <KEYNUM>
+    <base64(32-byte Ed25519 pubkey)>
+    ```
+    We refuse to fall back to an unverified checksum if the bundled key
+    is missing or unparseable — silent downgrade would defeat the point.
+    """
+    try:
+        text = open(_RELEASE_PUBKEY_PATH, 'r', encoding='utf-8').read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    blob = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('untrusted comment'):
+            continue
+        blob = line
+        break
+    if not blob:
+        return None
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except Exception:
+        return None
+    if len(raw) != 32:
+        return None
+    return raw
+
+
+def _verify_release_signature(sums_text, sig_text, pubkey_raw):
+    """Verify minisign's detached signature of a checksums file.
+
+    Returns True when the signature matches; False otherwise. The caller
+    decides whether a missing signature is a hard error.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+    if isinstance(sig_text, str):
+        sig_text = sig_text.encode('utf-8')
+    if isinstance(sums_text, str):
+        sums_text = sums_text.encode('utf-8')
+    sig_line = None
+    for line in sig_text.splitlines():
+        if not line or line.startswith(b'untrusted comment') \
+                or line.startswith(b'trusted comment'):
+            continue
+        sig_line = line
+        break
+    if sig_line is None:
+        return False
+    try:
+        decoded = base64.b64decode(sig_line, validate=True)
+    except Exception:
+        return False
+    if len(decoded) < 8 + 64:
+        return False
+    keynum = decoded[:8]
+    signature = decoded[8:8 + 64]
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(pubkey_raw)
+        pub.verify(signature, keynum + b'trust' + sums_text)
+        return True
+    except (InvalidSignature, Exception):
+        return False
 
 
 def _stream_download(url, dest, timeout=600):
@@ -4119,15 +4485,48 @@ def _verify_installer_bytes(release, name, digest):
 
     Refuses when the checksums file is absent: releases published by the
     updated build workflow always carry one, so a missing file means the
-    payload can't be trusted, not that verification is optional.
+    payload can't be trusted, not that verification is optional. When a
+    detached minisign signature ships alongside the sums file, verify
+    that too — anyone with write access to the release can swap the
+    SHA256SUMS.txt, so the signature is the actual trust anchor.
     """
     assets = release.get('assets') if isinstance(release, dict) else None
     asset_map = {str(a.get('name') or ''): a.get('browser_download_url') or ''
                  for a in (assets or [])}
-    expected = _asset_sha256(asset_map, name, sums_asset='SHA256SUMS.txt')
-    if not expected:
+    sums_url = asset_map.get('SHA256SUMS.txt')
+    if not sums_url:
         raise ValueError('no published checksum for this installer — '
                          'download it from the release page instead')
+    pubkey = _bundled_release_pubkey()
+    if pubkey is None:
+        raise ValueError('release-signing pubkey missing from this build — '
+                         'refusing to install until it is restored')
+    sig_url = asset_map.get('SHA256SUMS.txt.minisig')
+    if not sig_url:
+        raise ValueError('release not signed — refusing to install. '
+                         'Update the app or download the installer manually '
+                         'and verify it yourself before opening it.')
+    try:
+        session = requests.Session()
+        session.cookies.clear()
+        sums_resp = session.get(sums_url, timeout=60,
+                                 headers={'User-Agent': 'AudioConverter/1.0'})
+        sig_resp = session.get(sig_url, timeout=60,
+                                headers={'User-Agent': 'AudioConverter/1.0'})
+    except Exception as e:
+        raise ValueError('could not download signed checksums: '
+                         + str(e)[:160])
+    if sums_resp.status_code != 200 or sig_resp.status_code != 200:
+        raise ValueError('checksums file or signature returned '
+                         + f'{sums_resp.status_code}/{sig_resp.status_code} '
+                         + '— refusing to install')
+    if not _verify_release_signature(sums_resp.content, sig_resp.content, pubkey):
+        raise ValueError('signature did not verify — the checksum file may '
+                         'have been tampered with. Refusing to install.')
+    expected = _asset_sha256(asset_map, name, sums_asset='SHA256SUMS.txt')
+    if not expected:
+        raise ValueError('checksum missing for this installer — '
+                         'the release may be incomplete')
     if digest != expected:
         raise ValueError('checksum mismatch — the installer may be corrupt '
                          'or tampered with')
@@ -4149,6 +4548,7 @@ def _running_bundle_dir():
 
 
 @bp.route('/api/update-install', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'update-install')
 def api_update_install():
     """Install the latest release with the least possible friction.
 
@@ -4367,6 +4767,7 @@ def _queue_local_files(paths, format_type):
 
 
 @bp.route('/api/convert-local', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'convert-local')
 def api_convert_local():
     """Queue conversion of local files picked in the built-in browser.
 
@@ -4392,6 +4793,7 @@ def api_convert_local():
 
 
 @bp.route('/api/upload-convert', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'upload-convert')
 def api_upload_convert():
     """Convert dropped files: bytes come up multipart, convert as local jobs.
 
@@ -4461,6 +4863,7 @@ def _adopt_row(path, existing):
 
 
 @bp.route('/api/adopt', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'adopt')
 def api_adopt():
     """Adopt a folder of existing audio/video files into the library.
 
@@ -4513,6 +4916,7 @@ def api_adopt():
 
 
 @bp.route('/api/upload', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'upload')
 def api_upload():
     """Import dropped audio files: save into the output folder + adopt.
 
@@ -4567,6 +4971,7 @@ def api_upload():
 
 
 @bp.route('/api/tidy', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_tidy():
     """Move library files into Artist/Album folders from their tags.
 
@@ -4690,6 +5095,7 @@ def api_backfill_covers():
 
 
 @bp.route('/api/transcode', methods=['POST'])
+@_rate_limited(_API_POST_LIMIT, 'transcode')
 def api_transcode():
     """Convert finished tracks to another audio format without re-downloading.
 
@@ -4913,10 +5319,13 @@ def api_health():
                     'output_writable': output_ok,
                     'disk_free_bytes': disk_free,
                     'app_update': app_update,
-                    'resumed': resumed})
+                    'resumed': resumed,
+                    'secret_persisted': is_secret_persisted(),
+                    'signature': _bundle_signature()})
 
 
 @bp.route('/api/prune-missing', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_prune_missing():
     """Drop history rows whose files are gone from disk.
 
@@ -5504,6 +5913,7 @@ def api_db_restore():
 
 
 @bp.route('/api/db/clear-history', methods=['POST'])
+@_requires_phrase('CONFIRM')
 def api_db_clear_history():
     """Delete library data (conversions, follows, notices) but keep
     settings and user playlists. Files on disk are never touched."""
@@ -5524,6 +5934,7 @@ def api_db_clear_history():
 
 
 @bp.route('/api/db/factory-reset', methods=['POST'])
+@_requires_phrase('FACTORY')
 def api_db_factory_reset():
     """Back up, then wipe every table and compact the file."""
     from app import _backup_database
@@ -6048,8 +6459,13 @@ def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
     entries = info.get('entries')
     if not entries:
         # A single video page: just this URL.
+        safe = _safe_after_redirects(url)
+        if safe is None:
+            return {'success': False,
+                    'error': 'That link redirects to an unreachable or '
+                             'private address and was rejected.'}
         return {'success': True, 'title': str(info.get('title') or '').strip(),
-                'urls': [url]}
+                'urls': [safe]}
     try:
         host = (urlparse(url).hostname or '').lower()
     except Exception:
@@ -6066,7 +6482,14 @@ def _resolve_generic_collection(url, max_items=PLAYLIST_MAX_ITEMS):
         track_url = str(track_url).strip()
         if not track_url.startswith(('http://', 'https://')):
             continue
+        # Defence against SSRF via the playlist index: follow redirects and
+        # refuse anything that lands on a non-public address. Same check
+        # runs for the single-URL branch above.
         track_url = sanitize_url(track_url)
+        safe = _safe_after_redirects(track_url)
+        if safe is None:
+            continue
+        track_url = sanitize_url(safe)
         if track_url in seen:
             continue
         seen.add(track_url)

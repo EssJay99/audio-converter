@@ -632,16 +632,37 @@
             maintNote('Verifying…');
             maintPost('/api/verify-files', {}, () => 'Verification running in the background.');
         });
-        document.getElementById('maintPrune').addEventListener('click', () => {
+        document.getElementById('maintPrune').addEventListener('click', async () => {
             maintNote('Pruning…');
-            maintPost('/api/prune-missing', {}, (d) => 'Removed ' + d.removed + ' missing-file row(s).');
+            try {
+                const d = await postConfirm('/api/prune-missing', {},
+                    'CONFIRM', 'Drop history rows whose files are gone.');
+                maintNote(d && d.ok ? ('Removed ' + d.removed + ' missing-file row(s).')
+                                    : ((d && d.message) || 'Failed.'));
+            } catch (e) {
+                maintNote('Failed.');
+            }
         });
-        document.getElementById('maintVacuum').addEventListener('click', () => {
+        document.getElementById('maintVacuum').addEventListener('click', async () => {
             maintNote('Vacuuming…');
-            maintPost('/api/maintenance/vacuum', {}, (d) => 'Database compacted.');
+            try {
+                const d = await postConfirm('/api/maintenance/vacuum', {},
+                    'CONFIRM', 'Compact the database and prune the cover cache.');
+                maintNote(d && d.ok ? 'Database compacted.'
+                                    : ((d && d.message) || 'Failed.'));
+            } catch (e) {
+                maintNote('Failed.');
+            }
         });
-        document.getElementById('maintCovers').addEventListener('click', () => {
-            maintPost('/api/maintenance/clear-covers', {}, (d) => 'Cleared ' + d.cleared + ' cached cover(s).');
+        document.getElementById('maintCovers').addEventListener('click', async () => {
+            try {
+                const d = await postConfirm('/api/maintenance/clear-covers', {},
+                    'CONFIRM', 'Wipe the entire cover-thumbnail cache.');
+                maintNote(d && d.ok ? ('Cleared ' + d.cleared + ' cached cover(s).')
+                                    : ((d && d.message) || 'Failed.'));
+            } catch (e) {
+                maintNote('Failed.');
+            }
         });
         const autostartBtn = document.getElementById('maintAutostart');
         const refreshAutostart = () => {
@@ -847,26 +868,22 @@
                     logViewer.textContent = 'Could not load logs.';
                 });
         });
-        document.getElementById('dbClear').addEventListener('click', () => {
-            if (!confirm('Delete all conversion history, follows, and notices? Settings and playlists are kept. Files on disk stay.')) return;
-            dbPost('/api/db/clear-history')
-                .then((d) => {
-                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
-                    refreshDb();
-                })
-                .catch(() => dbNote('Failed.'));
+        document.getElementById('dbClear').addEventListener('click', async () => {
+            const d = await postConfirm('/api/db/clear-history', {},
+                'CONFIRM',
+                'Delete all conversion history, follows, and notices. Files on disk are kept.');
+            dbNote(d ? (d.ok ? d.message : (d.message || 'Failed.')) : 'Cancelled.');
+            if (d && d.ok) refreshDb();
         });
-        document.getElementById('dbReset').addEventListener('click', () => {
-            if (!confirm('Factory reset: back up, then erase EVERYTHING (history, settings, playlists)? Files on disk stay.')) return;
-            if (!confirm('Really reset? This cannot be undone except from the backup.')) return;
-            dbNote('Resetting…');
-            dbPost('/api/db/factory-reset')
-                .then((d) => {
-                    dbNote(d.ok ? d.message : (d.message || 'Failed.'));
-                    refreshDb();
-                    setTimeout(() => window.location.reload(), 1500);
-                })
-                .catch(() => dbNote('Failed.'));
+        document.getElementById('dbReset').addEventListener('click', async () => {
+            const d = await postConfirm('/api/db/factory-reset', {},
+                'FACTORY',
+                'Factory reset: back up, then erase EVERYTHING (history, settings, playlists). Files on disk stay.');
+            dbNote(d ? (d.ok ? d.message : (d.message || 'Failed.')) : 'Cancelled.');
+            if (d && d.ok) {
+                refreshDb();
+                setTimeout(() => window.location.reload(), 1500);
+            }
         });
         document.getElementById('dbRestoreFile').addEventListener('change', (e) => {
             const file = e.target.files && e.target.files[0];
@@ -883,22 +900,21 @@
                 .catch(() => dbNote('Failed.'));
         });
         refreshDb();
-        document.getElementById('helpersUpdate').addEventListener('click', function () {
+        document.getElementById('helpersUpdate').addEventListener('click', async function () {
             const btn = this;
             btn.disabled = true;
-            const token = document.querySelector('meta[name="csrf-token"]');
-            fetch('/api/helpers/update-ytdlp', {
-                method: 'POST',
-                headers: { 'X-CSRFToken': token ? token.getAttribute('content') : '' },
-            })
-                .then((r) => r.json())
-                .then((data) => {
-                    toast(data.message || 'yt-dlp update finished.',
-                          data.ok ? 'success' : 'danger');
-                    refreshHelpers();
-                })
-                .catch(() => toast('yt-dlp update failed.', 'danger'))
-                .finally(() => { btn.disabled = false; });
+            try {
+                const d = await postConfirm('/api/helpers/update-ytdlp', {},
+                    'CONFIRM', 'Replace the bundled yt-dlp binary with the latest release.');
+                toast(d ? (d.message || 'yt-dlp update finished.')
+                        : 'yt-dlp update cancelled.',
+                      d && d.ok ? 'success' : 'danger');
+                refreshHelpers();
+            } catch (e) {
+                toast('yt-dlp update failed.', 'danger');
+            } finally {
+                btn.disabled = false;
+            }
         });
         refreshHelpers();
     </script>

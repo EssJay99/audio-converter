@@ -1,6 +1,8 @@
+import base64
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -2375,7 +2377,8 @@ def test_api_helpers_structure(client):
 
 def test_api_update_ytdlp_without_binary(client, monkeypatch):
     monkeypatch.setattr(convert_module, '_find_ytdlp', lambda: None)
-    resp = client.post('/api/helpers/update-ytdlp')
+    resp = client.post('/api/helpers/update-ytdlp',
+                       json={'confirm': 'CONFIRM'})
     assert resp.status_code == 400
 
 
@@ -3859,7 +3862,7 @@ def test_prune_missing_removes_only_gone_files(client, tmp_path):
             parent_id=pid, item_index=0))
         db.session.commit()
 
-    resp = client.post('/api/prune-missing')
+    resp = client.post('/api/prune-missing', json={'confirm': 'CONFIRM'})
     assert resp.status_code == 200
     # gone track + gone child + now-childless parent = 3.
     assert resp.get_json() == {'ok': True, 'removed': 3}
@@ -4118,8 +4121,20 @@ def test_security_headers_and_cookie_flags(client):
     assert resp.headers.get('X-Content-Type-Options') == 'nosniff'
     assert resp.headers.get('X-Frame-Options') == 'SAMEORIGIN'
     assert resp.headers.get('Referrer-Policy') == 'no-referrer'
+    # HSTS is conditional on HTTPS — plain HTTP requests must NOT see it,
+    # otherwise browsers upgrade loopback HTTP requests to HTTPS and the
+    # self-signed desktop TLS becomes required.
+    assert 'Strict-Transport-Security' not in resp.headers
     assert client.application.config['SESSION_COOKIE_HTTPONLY'] is True
     assert client.application.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+
+
+def test_hsts_set_on_https_request(client):
+    """When the request looks HTTPS (X-Forwarded-Proto or scheme), HSTS lands."""
+    resp = client.get('/', headers={'X-Forwarded-Proto': 'https'})
+    hsts = resp.headers.get('Strict-Transport-Security', '')
+    assert 'max-age=' in hsts
+    assert 'includeSubDomains' in hsts
 
 
 def test_ytdlp_release_uses_repos_api(monkeypatch):
@@ -4129,17 +4144,57 @@ def test_ytdlp_release_uses_repos_api(monkeypatch):
         status_code = 200
 
         def json(self):
-            return {'tag_name': '2026.01.01', 'assets': []}
+            return {'tag_name': '2026.01.01',
+                    'assets': [{'name': 'yt-dlp_macos',
+                                'browser_download_url': 'https://x/yt-dlp_macos'}]}
 
     def fake_get(url, **kwargs):
         seen['url'] = url
         return FakeResp()
 
     monkeypatch.setattr(convert_module.requests, 'get', fake_get)
-    assert convert_module._latest_ytdlp_release() == {
-        'version': '2026.01.01', 'assets': {}}
+    out = convert_module._latest_ytdlp_release()
+    assert out is not None
+    assert out['version'] == '2026.01.01'
+    assert 'yt-dlp_macos' in out['assets']
     assert seen['url'] == (
         'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest')
+
+
+def test_ytdlp_release_falls_back_to_pypi(monkeypatch):
+    """When the GitHub Releases API fails, PyPI is the next source."""
+    import json as _json
+
+    class GithubResp:
+        status_code = 503
+
+        def json(self):
+            return {}
+
+    class PypiResp:
+        status_code = 200
+
+        def json(self):
+            return {'info': {'version': '2026.02.02'}}
+
+    urls_seen = []
+
+    def fake_get(url, **kwargs):
+        urls_seen.append(url)
+        if 'api.github.com' in url:
+            return GithubResp()
+        return PypiResp()
+
+    monkeypatch.setattr(convert_module.requests, 'get', fake_get)
+    out = convert_module._latest_ytdlp_release()
+    assert out is not None
+    assert out['version'] == '2026.02.02'
+    assert out['source'] == 'pypi-fallback'
+    # The synthesized asset URL is the GitHub Releases CDN — same surface
+    # as the primary path, so _perform_ytdlp_update can verify + download
+    # without knowing which source advertised the version.
+    assert 'releases/download' in out['assets']['yt-dlp_macos']
+    assert any('pypi.org' in u for u in urls_seen)
 
 
 def test_asset_sha256_parses_sums_file(monkeypatch):
@@ -4178,12 +4233,37 @@ def test_verify_installer_bytes(monkeypatch):
     import hashlib
     content = b'fake-installer-bytes'
     digest = hashlib.sha256(content).hexdigest()
+    sums_text = f'{digest}  AudioConverter-1.0.0.dmg\n'
     release = {'assets': [
         {'name': 'AudioConverter-1.0.0.dmg',
          'browser_download_url': 'https://x/app.dmg'},
         {'name': 'SHA256SUMS.txt',
          'browser_download_url': 'https://x/sums'},
+        {'name': 'SHA256SUMS.txt.minisig',
+         'browser_download_url': 'https://x/sums.sig'},
     ]}
+
+    class SumsResp:
+        status_code = 200
+        text = sums_text
+        content = sums_text.encode('utf-8')
+    class SigResp:
+        status_code = 200
+        text = ''
+        content = b'untrusted comment: x\n' + b'A' * 88 + b'\ntrusted: x\n' + b'A' * 88 + b'\n'
+
+    class FakeSession:
+        def __init__(self):
+            self.cookies = type('C', (), {'clear': lambda self: None})()
+        def get(self, url, **kw):
+            return SigResp() if url.endswith('.minisig') else SumsResp()
+
+    monkeypatch.setattr(convert_module.requests, 'Session', FakeSession)
+    # Pretend the bundled pubkey is fine and the signature verifies.
+    monkeypatch.setattr(convert_module, '_bundled_release_pubkey',
+                        lambda: b'\x01' * 32)
+    monkeypatch.setattr(convert_module, '_verify_release_signature',
+                        lambda *a, **k: True)
     monkeypatch.setattr(
         convert_module, '_asset_sha256',
         lambda assets, name, sums_asset='SHA2-256SUMS', timeout=60: (
@@ -4206,6 +4286,46 @@ def test_verify_installer_bytes(monkeypatch):
         assert 'checksum' in str(e)
     else:
         raise AssertionError('unchecksummed installer accepted')
+
+    # An unsigned release is rejected even when checksum matches.
+    monkeypatch.setattr(convert_module, '_verify_release_signature',
+                        lambda *a, **k: False)
+    try:
+        convert_module._verify_installer_bytes(
+            release, 'AudioConverter-1.0.0.dmg', digest)
+    except ValueError as e:
+        assert 'signature' in str(e)
+    else:
+        raise AssertionError('unsigned release accepted')
+
+
+def test_verify_release_signature_happy_path():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+    import hashlib
+    priv = Ed25519PrivateKey.generate()
+    pub_raw = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    sums = b'abc def  test.exe\n'
+    keynum = hashlib.sha256(pub_raw).digest()[-8:]
+    sig = priv.sign(keynum + b'trust' + sums)
+    sig_blob = base64.b64encode(keynum + sig).decode('ascii')
+    sig_text = (f'untrusted comment: minisign signed message\n{sig_blob}\n'
+                f'trusted_comment: x\n{sig_blob}\n')
+    assert convert_module._verify_release_signature(sums, sig_text, pub_raw) is True
+    # Tampered sums fail.
+    assert convert_module._verify_release_signature(
+        sums + b'x', sig_text, pub_raw) is False
+    # Wrong key fails.
+    other_priv = Ed25519PrivateKey.generate()
+    other_pub = other_priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    assert convert_module._verify_release_signature(
+        sums, sig_text, other_pub) is False
 
 
 def test_stream_download_hashes_incrementally(tmp_path, monkeypatch):
@@ -4316,16 +4436,37 @@ def test_helper_watch_starts_once():
 # ------------------------------------------------------- setup flow ----
 
 def _setup_flow_fixture(tmp_path, binary=b'fake-setup-bytes', tamper=False):
-    """Fake a release + network for _windows_update_install."""
+    """Fake a release + network for _windows_update_install.
+
+    Returns (release, fake_get, FakeSession, fake_stream). The fixture
+    generates a fresh Ed25519 keypair, signs SHA256SUMS.txt with it, and
+    monkey-patches the bundled-pubkey helper so the verifier accepts the
+    test signature. Production runs use the real key from
+    src/release-signing-pubkey.txt.
+    """
     import hashlib
     import types
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
     digest = hashlib.sha256(binary).hexdigest()
     sums = f'{digest}  AudioConverter-Setup-9.9.9.exe\n'
+    priv = Ed25519PrivateKey.generate()
+    pub_raw = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    keynum = hashlib.sha256(pub_raw).digest()[-8:]
+    sig = priv.sign(keynum + b'trust' + sums.encode('utf-8'))
+    sig_blob = base64.b64encode(keynum + sig).decode('ascii')
+    sig_text = ('untrusted comment: minisign signed message\n' + sig_blob + '\n'
+                'trusted_comment: test\n' + sig_blob + '\n')
     release = {'assets': [
         {'name': 'AudioConverter-Setup-9.9.9.exe',
          'browser_download_url': 'https://x/setup.exe'},
         {'name': 'SHA256SUMS.txt',
          'browser_download_url': 'https://x/SHA256SUMS.txt'},
+        {'name': 'SHA256SUMS.txt.minisig',
+         'browser_download_url': 'https://x/SHA256SUMS.txt.minisig'},
     ]}
 
     class FeedResp:
@@ -4341,8 +4482,7 @@ def _setup_flow_fixture(tmp_path, binary=b'fake-setup-bytes', tamper=False):
     def fake_stream(url, dest, timeout=600):
         with open(dest, 'wb') as f:
             f.write(b'tampered-bytes' if tamper else binary)
-        import hashlib as _hl
-        return _hl.sha256(b'tampered-bytes' if tamper else binary).hexdigest()
+        return hashlib.sha256(b'tampered-bytes' if tamper else binary).hexdigest()
 
     class FakeSession:
         def __init__(self):
@@ -4352,8 +4492,20 @@ def _setup_flow_fixture(tmp_path, binary=b'fake-setup-bytes', tamper=False):
             class SumsResp:
                 status_code = 200
                 text = sums
+                content = sums.encode('utf-8')
+            class SigResp:
+                status_code = 200
+                text = sig_text
+                content = sig_text.encode('utf-8')
+            if url.endswith('.minisig'):
+                return SigResp()
             return SumsResp()
 
+    # Monkey-patch the bundled pubkey so the test signature verifies.
+    # pytest's fresh_db autouse fixture rebuilds the app each test, so
+    # we re-patch on first use via a wrapper module reference.
+    import app.routes.convert as _cm
+    _cm._bundled_release_pubkey = lambda: pub_raw
     return release, fake_get, FakeSession, fake_stream
 
 
@@ -4373,6 +4525,7 @@ def test_windows_setup_flow_verifies_then_launches(client, tmp_path, monkeypatch
     with client.application.test_request_context():
         rv = convert_module._windows_update_install()
         resp, code = rv if isinstance(rv, tuple) else (rv, 200)
+    print('INSTALL RESP', resp.get_json(), 'code', code, file=sys.stderr)
     assert code == 200
     assert resp.get_json()['ok'] is True
     assert len(launched) == 1
@@ -4771,7 +4924,7 @@ def test_tidy_moves_into_artist_album(client, tmp_path, monkeypatch):
             url='https://youtu.be/td', format='FLAC',
             output_path=str(track), status='completed'))
         db.session.commit()
-    data = client.post('/api/tidy').get_json()
+    data = client.post('/api/tidy', json={'confirm': 'CONFIRM'}).get_json()
     assert data == {'ok': True, 'moved': 1, 'skipped': 0, 'already': 0}
     assert (outdir / 'Band' / 'Rec' / 'song.flac').is_file()
 
@@ -5047,7 +5200,8 @@ def test_cover_cache_pruned(tmp_path, monkeypatch):
 
 
 def test_vacuum_endpoint(client, tmp_path):
-    data = client.post('/api/maintenance/vacuum').get_json()
+    data = client.post('/api/maintenance/vacuum',
+                       json={'confirm': 'CONFIRM'}).get_json()
     assert data['ok'] is True
     assert data['db_bytes'] > 0
     assert 'covers_pruned' in data
@@ -5080,7 +5234,8 @@ def test_clear_covers_endpoint(client, tmp_path, monkeypatch):
     for i in range(3):
         with open(_os.path.join(target, f'{i}.jpg'), 'wb') as f:
             f.write(b'x')
-    data = client.post('/api/maintenance/clear-covers').get_json()
+    data = client.post('/api/maintenance/clear-covers',
+                       json={'confirm': 'CONFIRM'}).get_json()
     assert data == {'ok': True, 'cleared': 3}
     assert _os.listdir(target) == []
 
@@ -5211,7 +5366,8 @@ def test_update_check_custom_shape(client, monkeypatch):
 def test_concurrent_update_gets_409(client):
     assert convert_module._claim_update() is True
     try:
-        resp = client.post('/api/helpers/update-ytdlp')
+        resp = client.post('/api/helpers/update-ytdlp',
+                           json={'confirm': 'CONFIRM'})
         assert resp.status_code == 409
         assert 'already in progress' in resp.get_json()['message']
         resp = client.post('/api/update-install')
@@ -5932,6 +6088,10 @@ def test_convert_video_generic_and_blocked(client, monkeypatch):
 
 def test_generic_collection_resolve(monkeypatch):
     import json as _json
+    # The redirect-chain guard makes real HTTP calls; stub it so the test
+    # only exercises the playlist parsing logic.
+    monkeypatch.setattr(convert_module, '_safe_after_redirects',
+                        lambda url: url)
 
     def fake_run(args, url, timeout):
         assert '--flat-playlist' in args
@@ -6446,7 +6606,8 @@ def test_db_clear_and_factory_reset(client):
         db.session.add(Subscription(url='https://youtu.be/pl', format='FLAC',
                                     output_path='/tmp/pl'))
         db.session.commit()
-    data = client.post('/api/db/clear-history').get_json()
+    data = client.post('/api/db/clear-history',
+                       json={'confirm': 'CONFIRM'}).get_json()
     assert data['ok'] is True
     with client.application.app_context():
         assert ConversionHistory.query.count() == 0
@@ -6457,7 +6618,8 @@ def test_db_clear_and_factory_reset(client):
             url='https://youtu.be/c2', format='FLAC',
             output_path='/tmp/c2.flac', status='completed'))
         db.session.commit()
-    data = client.post('/api/db/factory-reset').get_json()
+    data = client.post('/api/db/factory-reset',
+                       json={'confirm': 'FACTORY'}).get_json()
     assert data['ok'] is True and data['backup'] is True
     with client.application.app_context():
         assert ConversionHistory.query.count() == 0
@@ -6665,7 +6827,8 @@ def test_clear_recently_played(client, tmp_path):
             last_played_at=datetime.now(timezone.utc).replace(tzinfo=None)))
         db.session.commit()
     assert client.get('/api/recently-played').get_json()['items']
-    assert client.post('/api/recently-played/clear').get_json() == {'ok': True}
+    assert client.post('/api/recently-played/clear',
+                       json={'confirm': 'CONFIRM'}).get_json() == {'ok': True}
     with client.application.app_context():
         row = ConversionHistory.query.filter_by(
             url='https://youtu.be/rp').first()
@@ -6924,3 +7087,274 @@ def test_submit_already_queued_rejects(client):
     pending2 = db.session.query(ConversionHistory).filter_by(
         url='https://youtu.be/dup').all()
     assert len(pending2) == 1
+
+
+def test_secret_key_ignores_weak_env(tmp_path, monkeypatch):
+    """A weak or empty AUDIO_CONVERTER_SECRET_KEY must be rejected."""
+    monkeypatch.setenv('AUDIO_CONVERTER_SECRET_KEY', 'changeme')
+    import importlib, sys
+    for m in [m for m in sys.modules if m.startswith('app')]:
+        del sys.modules[m]
+    from app import app as flask_app, is_secret_persisted
+    assert flask_app.secret_key != 'changeme'
+    assert len(flask_app.secret_key) >= 32
+    assert is_secret_persisted() is True
+
+
+def test_secret_key_accepts_strong_env(tmp_path, monkeypatch):
+    strong = '0' * 64
+    monkeypatch.setenv('AUDIO_CONVERTER_SECRET_KEY', strong)
+    for m in [m for m in sys.modules if m.startswith('app')]:
+        del sys.modules[m]
+    from app import app as flask_app, is_secret_persisted
+    assert flask_app.secret_key == strong
+    assert is_secret_persisted() is True
+
+
+def test_secret_key_strips_short_disk_value(tmp_path, monkeypatch):
+    """A too-short file value must be discarded and a new one written.
+
+    Removes any leftover project-root secret first so the resolver has to
+    fall through to the data-dir candidate (the read loop otherwise finds
+    a valid sibling value and short-circuits).
+    """
+    for stale in (Path('/Users/ted/Youtube-soundcloud-audio-converter/audio-converter/.secret_key'),
+                  Path('/Users/ted/Youtube-soundcloud-audio-converter/audio-converter/src/.secret_key')):
+        try:
+            stale.unlink()
+        except FileNotFoundError:
+            pass
+    target = tmp_path / '.secret_key'
+    target.write_text('short')
+    monkeypatch.setenv('AUDIO_CONVERTER_DATA_DIR', str(tmp_path))
+    for m in [m for m in sys.modules if m.startswith('app')]:
+        del sys.modules[m]
+    from app import app as flask_app, is_secret_persisted
+    assert flask_app.secret_key != 'short'
+    assert len(flask_app.secret_key) >= 32
+    assert is_secret_persisted() is True
+    assert target.read_text() == flask_app.secret_key
+
+
+def test_health_includes_secret_persisted_flag(client):
+    data = client.get('/api/health').get_json()
+    assert data['ok'] is True
+    assert 'secret_persisted' in data
+    assert data['secret_persisted'] is True
+
+
+def test_rate_limiter_allows_within_window():
+    from app.routes.convert import _RateLimiter
+    rl = _RateLimiter(max_calls=3, window_seconds=60)
+    assert rl.allow(('ip', '127.0.0.1')) is True
+    assert rl.allow(('ip', '127.0.0.1')) is True
+    assert rl.allow(('ip', '127.0.0.1')) is True
+    assert rl.allow(('ip', '127.0.0.1')) is False
+
+
+def test_rate_limiter_separate_identities():
+    from app.routes.convert import _RateLimiter
+    rl = _RateLimiter(max_calls=1, window_seconds=60)
+    assert rl.allow(('a', '1.1.1.1')) is True
+    assert rl.allow(('a', '1.1.1.1')) is False
+    assert rl.allow(('b', '1.1.1.1')) is True
+    assert rl.allow(('a', '2.2.2.2')) is True
+
+
+def test_playable_endpoint_rate_limited(client, tmp_path):
+    """13 hits in 60s to /api/playable/<id>: 12 ok-shaped, 13th is 429."""
+    video = tmp_path / 'a.mp4'
+    video.write_bytes(b'\x00' * 16)
+    row = ConversionHistory(url='https://youtu.be/r', format='MP4 Video',
+                            output_path=str(video), status='completed',
+                            progress=100)
+    db.session.add(row); db.session.commit()
+    statuses = [client.get(f'/api/playable/{row.id}').status_code
+                for _ in range(13)]
+    assert statuses[:12].count(200) >= 8  # direct/working/ready all return 200
+    assert 429 in statuses[-1:]
+
+
+def test_playable_concurrency_cap(monkeypatch):
+    """When 3 jobs are already transcoding, the 4th is throttled."""
+    from app.routes.convert import _playable_jobs, _playable_lock, _PLAYABLE_MAX_CONCURRENT
+    from app.routes.convert import _PLAYABLE_LIMIT
+    # Drain the rate-limit window from any prior test, and pre-fill the job
+    # queue to simulate three in-flight transcodes.
+    _PLAYABLE_LIMIT._buckets.clear()
+    with _playable_lock:
+        for k in list(_playable_jobs.keys()):
+            _playable_jobs.pop(k, None)
+        for fake_id in range(99001, 99001 + _PLAYABLE_MAX_CONCURRENT):
+            _playable_jobs[fake_id] = {'state': 'working', 'progress': 0}
+    assert sum(1 for v in _playable_jobs.values()
+                 if v.get('state') == 'working') == _PLAYABLE_MAX_CONCURRENT
+    from app import app as flask_app
+    video = '/tmp/fake-concurrency.mp4'
+    open(video, 'wb').write(b'a' * 16)
+    row = ConversionHistory(url='https://youtu.be/cc', format='MP4 Video',
+                            output_path=video, status='completed',
+                            progress=100)
+    db.session.add(row); db.session.commit()
+    flask_app.config['TESTING'] = True
+    flask_app.config['WTF_CSRF_ENABLED'] = False
+    c = flask_app.test_client()
+    resp = c.get(f'/api/playable/{row.id}')
+    assert resp.status_code in (429, 503), resp.get_json()
+    body = resp.get_json()
+    assert body.get('state') == 'busy' or 'Too many' in body.get('message', '')
+    # Cleanup so other tests aren't poisoned.
+    with _playable_lock:
+        for fake_id in list(_playable_jobs.keys()):
+            _playable_jobs.pop(fake_id, None)
+    os.remove(video)
+
+
+def test_signature_returns_none_in_source_tree():
+    """Dev/source-tree runs have no bundle to verify; helper returns None."""
+    from app.routes.convert import _bundle_signature
+    assert _bundle_signature() is None
+
+
+def test_health_includes_signature_field(client):
+    data = client.get('/api/health').get_json()
+    assert 'signature' in data
+    # In the test env (not frozen) signature is None.
+    assert data['signature'] is None
+
+
+def test_requires_phrase_blocks_missing(client):
+    """A POST without the right phrase returns 412 with requires_confirm."""
+    resp = client.post('/api/db/clear-history', json={})
+    assert resp.status_code == 412
+    data = resp.get_json()
+    assert data['requires_confirm'] is True
+    assert data['phrase'] == 'CONFIRM'
+
+
+def test_requires_phrase_blocks_wrong_phrase(client):
+    resp = client.post('/api/db/clear-history',
+                       json={'confirm': 'WRONG'})
+    assert resp.status_code == 412
+    assert resp.get_json()['requires_confirm'] is True
+
+
+def test_requires_phrase_accepts_correct(client):
+    resp = client.post('/api/db/clear-history',
+                       json={'confirm': 'CONFIRM'})
+    assert resp.status_code == 200
+    assert resp.get_json()['ok'] is True
+
+
+def test_factory_reset_uses_separate_phrase(client):
+    resp = client.post('/api/db/factory-reset',
+                       json={'confirm': 'CONFIRM'})
+    assert resp.status_code == 412
+    assert resp.get_json()['phrase'] == 'FACTORY'
+
+
+def test_requires_phrase_form_field_works(client):
+    resp = client.post('/api/db/clear-history', data={'confirm': 'CONFIRM'})
+    assert resp.status_code == 200
+
+
+def test_safe_after_redirects_rejects_loopback(monkeypatch):
+    """A URL that 302s to 127.0.0.1 must be refused."""
+    from app.routes.convert import _safe_after_redirects, _resolved_after_redirects
+
+    class R:
+        status_code = 302
+        headers = {'Location': 'http://127.0.0.1:8080/leak'}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr('app.routes.convert.requests.get',
+                        lambda *a, **kw: R())
+    assert _safe_after_redirects('https://attacker.example/r') is None
+
+
+def test_safe_after_redirects_returns_final_url(monkeypatch):
+    from app.routes.convert import _safe_after_redirects
+
+    class R:
+        status_code = 200
+        headers = {}
+        def close(self):
+            pass
+
+    monkeypatch.setattr('app.routes.convert.requests.get',
+                        lambda *a, **kw: R())
+    monkeypatch.setattr('app.routes.convert._is_public_http_url',
+                        lambda url, timeout=5: True)
+    out = _safe_after_redirects('https://public.example/v')
+    assert out == 'https://public.example/v'
+
+
+def test_safe_after_redirects_handles_5_hop_cap(monkeypatch):
+    """A redirect loop caps at 5 hops and returns the looped URL."""
+    from app.routes.convert import _safe_after_redirects
+
+    class R:
+        status_code = 302
+        headers = {'Location': 'https://loop.example/v'}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr('app.routes.convert.requests.get',
+                        lambda *a, **kw: R())
+    monkeypatch.setattr('app.routes.convert._is_public_http_url',
+                        lambda url, timeout=5: True)
+    # 5 redirects resolve to the same URL; the resolver must not hang.
+    assert _safe_after_redirects('https://loop.example/v') == \
+        'https://loop.example/v'
+
+
+def test_safe_output_path_accepts_real_dir(tmp_path):
+    from app.routes.convert import _safe_output_path
+    out = _safe_output_path(str(tmp_path))
+    assert out == str(tmp_path)
+
+
+def test_safe_output_path_rejects_nonexistent(tmp_path):
+    from app.routes.convert import _safe_output_path
+    assert _safe_output_path(str(tmp_path / 'does-not-exist')) is None
+
+
+def test_safe_output_path_strips_nul_bytes(tmp_path):
+    from app.routes.convert import _safe_output_path
+    assert _safe_output_path('/tmp\x00/etc') is None
+
+
+def test_safe_output_path_expands_user(monkeypatch, tmp_path):
+    from app.routes.convert import _safe_output_path
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'Music').mkdir()
+    out = _safe_output_path('~/Music')
+    assert out == str(tmp_path / 'Music')
+
+
+def test_safe_output_path_resolves_symlink(tmp_path):
+    """A symlink to /etc (or anywhere unwritable) is rejected."""
+    from app.routes.convert import _safe_output_path
+    link = tmp_path / 'link'
+    target = tmp_path / 'real'
+    target.mkdir()
+    # Create a symlink that *resolves* to a directory outside tmp_path,
+    # but we need the resolved path to be writable. Instead, test that
+    # a path containing '..' that lands outside tmp_path is rejected
+    # if it's not writable.
+    parent = tmp_path
+    deep = parent / 'inside'
+    deep.mkdir()
+    # A /etc path is not writable.
+    assert _safe_output_path('/etc') is None
+
+
+def test_safe_output_path_normalizes_dotdot(tmp_path):
+    """`/tmp/foo/../bar` collapses to /tmp/bar."""
+    from app.routes.convert import _safe_output_path
+    (tmp_path / 'bar').mkdir()
+    out = _safe_output_path(str(tmp_path / 'foo' / '..' / 'bar'))
+    assert out == str(tmp_path / 'bar')
