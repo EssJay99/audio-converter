@@ -42,8 +42,10 @@ def fresh_db():
         except Exception:
             pass
         yield
+        db.session.rollback()
         db.session.remove()
         db.drop_all()
+        db.engine.dispose()
 
 
 @pytest.fixture()

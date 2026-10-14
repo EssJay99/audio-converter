@@ -316,6 +316,17 @@
                             <button type="button" id="proxyCheck" class="btn btn-sm btn-outline-secondary">Check proxy</button>
                             <small id="proxyCheckNote" class="text-muted"></small>
                         </div>
+                        <details class="mt-2">
+                            <summary class="small text-muted">Per-service overrides</summary>
+                            <div class="mt-1">
+                                <label for="proxiesJson" class="form-label small">Override the proxy per service</label>
+                                <textarea class="form-control form-control-sm font-monospace" id="proxiesJson"
+                                          name="proxies_json" rows="4"
+                                          placeholder='{"youtube.com": "socks5://tor:9050", "spotify.com": "http://proxy:8080"}'
+                                          autocomplete="off" spellcheck="false">{{ proxies_json }}</textarea>
+                                <small class="form-text text-muted">JSON map of hostnames → proxy URLs. Hosts without an entry fall back to the field above. Subdomains match (<code>youtube.com</code> covers <code>music.youtube.com</code>).</small>
+                            </div>
+                        </details>
                         <div class="mt-3 d-flex gap-2 align-items-center">
                             <button type="button" id="subsBackfill" class="btn btn-sm btn-outline-secondary">Fetch missing subtitles</button>
                             <small id="subsBackfillNote" class="text-muted">Fills in subtitles for finished videos that don't have any yet (one capped pass per click).</small>

@@ -48,6 +48,7 @@ def get_settings_dict():
         'job_timeout': 300,
         'bandwidth_limit': 0,
         'proxy': '',
+        'proxies_json': '{}',
         'worker_count': 3,
         'subtitles': True,
         'sponsorblock': True,
@@ -113,6 +114,7 @@ def get_settings_dict():
         if getattr(user_settings, 'video_preset', None) is not None:
             defaults['video_preset'] = user_settings.video_preset
         defaults['proxy'] = getattr(user_settings, 'proxy', None) or ''
+        defaults['proxies_json'] = getattr(user_settings, 'proxies_json', None) or '{}'
         if getattr(user_settings, 'worker_count', None) is not None:
             defaults['worker_count'] = user_settings.worker_count
         defaults['tidal_client_id'] = getattr(user_settings, 'tidal_client_id', None) or ''
@@ -148,6 +150,24 @@ def save_settings():
     data['offpeak_start'] = _int_from_form(request, 'offpeak_start', 22, 0, 23)
     data['offpeak_end'] = _int_from_form(request, 'offpeak_end', 7, 0, 23)
     data['proxy'] = request.form.get('proxy', '').strip()
+    data['proxies_json'] = request.form.get('proxies_json', '').strip() or '{}'
+    # Validate the JSON early so a typo surfaces as an error message
+    # instead of a silently-ignored override.
+    try:
+        import json as _json
+        parsed = _json.loads(data['proxies_json'])
+        if not isinstance(parsed, dict):
+            data['proxies_json'] = '{}'
+            flash('Per-service proxies must be a JSON object; cleared.', 'warning')
+        else:
+            # Normalize keys to lowercase so lookups are case-insensitive.
+            normalized = {str(k).strip().lower(): str(v).strip()
+                          for k, v in parsed.items()
+                          if isinstance(k, str) and isinstance(v, str)}
+            data['proxies_json'] = _json.dumps(normalized, sort_keys=True)
+    except (TypeError, ValueError) as e:
+        data['proxies_json'] = '{}'
+        flash(f'Per-service proxies JSON is malformed, so it was cleared: {e}', 'error')
     data['worker_count'] = _int_from_form(request, 'worker_count', 3, 1, 8)
     data['tidal_client_id'] = request.form.get('tidal_client_id', '').strip()
     data['tidal_client_secret'] = request.form.get('tidal_client_secret', '').strip()
@@ -240,6 +260,8 @@ def save_settings():
         user_settings.video_crf = data['video_crf']
         user_settings.video_preset = data['video_preset']
         user_settings.proxy = data['proxy']
+        user_settings.proxies_json = data['proxies_json']
+        user_settings.proxies_json = data['proxies_json']
         user_settings.worker_count = data['worker_count']
         # New Tidal credentials wipe stored tokens (they belong to the old app).
         if (user_settings.tidal_client_id != data['tidal_client_id']

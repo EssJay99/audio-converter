@@ -73,6 +73,10 @@ class UserSettings(db.Model):
     storage_quota_gb = db.Column(db.Float, nullable=False, default=0)
     # What to do when the queue drains: 'nothing', 'sleep', or 'shutdown'.
     finish_action = db.Column(db.String(10), nullable=False, default='nothing')
+    # JSON: per-service proxy overrides. Keys are hostnames; values
+    # are proxy URLs. The flat `proxy` column wins if no per-service
+    # override matches.
+    proxies_json = db.Column(db.Text, nullable=False, default='{}')
     # App version last acknowledged in the What's-new dialog.
     seen_version = db.Column(db.String(20), nullable=False, default='')
     # The welcome tour has been shown (first launch only, never again).

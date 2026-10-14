@@ -260,6 +260,7 @@ _SCHEMA_MIGRATIONS = {
         ('tidal_client_id', 'VARCHAR(200) DEFAULT ""'),
         ('tidal_client_secret', 'VARCHAR(200) DEFAULT ""'),
         ('seen_schema_version', 'INTEGER DEFAULT 0'),
+        ('proxies_json', 'TEXT DEFAULT "{}"'),
         ('tidal_access_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_refresh_token', 'VARCHAR(2000) DEFAULT ""'),
         ('tidal_expires_at', 'INTEGER DEFAULT 0'),

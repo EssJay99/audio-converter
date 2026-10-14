@@ -476,6 +476,85 @@ def api_playlist_m3u(parent_id):
                     headers={'Content-Disposition': f'attachment; filename="{name}"'})
 
 
+def _write_artist_export(artist, scope='all', include_nfo=False):
+    """Build a relative-path .m3u (and optional .nfo sidecars) for an artist.
+
+    `scope` is 'all' or 'album':<name>. Returns (filename, body, mimetype).
+    """
+    from app.routes.convert import _stored_duration, _cached_metadata
+    safe_artist = sanitize_filename(artist) or 'Unknown'
+    query = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(('completed', 'skipped')),
+        ConversionHistory.tag_artist == artist)
+    if scope.startswith('album:'):
+        album_name = scope.split(':', 1)[1]
+        query = query.filter(ConversionHistory.tag_album == album_name)
+    rows = query.order_by(
+        ConversionHistory.tag_album.asc(),
+        ConversionHistory.tag_title.asc(),
+        ConversionHistory.id.asc(),
+    ).all()
+    if not rows:
+        abort(404)
+    if scope.startswith('album:'):
+        fname = f'{safe_artist} - {sanitize_filename(album_name)}.m3u'
+    else:
+        fname = f'{safe_artist}.m3u'
+    lines = ['#EXTM3U']
+    for row in rows:
+        path = row.output_path or ''
+        if not path or not os.path.isfile(path):
+            continue
+        duration = _stored_duration(row)
+        meta = _cached_metadata(path)
+        title = meta.get('title') or os.path.splitext(os.path.basename(path))[0]
+        artist = meta.get('artist') or row.tag_artist or ''
+        title = str(title).replace('\r', ' ').replace('\n', ' ')
+        artist = str(artist).replace('\r', ' ').replace('\n', ' ')
+        lines.append(f'#EXTINF:{int(duration) if duration > 0 else -1},'
+                     f'{artist + " - " if artist else ""}{title}')
+        # Use a relative path so the playlist works when the user moves it
+        # alongside the audio files.
+        rel = os.path.relpath(path,
+                              start=os.path.dirname(os.path.dirname(path)) or '.')
+        lines.append(rel)
+        if include_nfo:
+            # Drop a sidecar next to each audio file describing the source.
+            nfo_path = os.path.splitext(path)[0] + '.nfo'
+            nfo = '\n'.join([
+                artist,
+                meta.get('album') or row.tag_album or '',
+                title,
+                meta.get('date') or row.created_at.strftime('%Y-%m-%d')
+                if row.created_at else '',
+                row.url or '',
+            ]).rstrip() + '\n'
+            try:
+                if not os.path.exists(nfo_path):
+                    with open(nfo_path, 'w', encoding='utf-8') as f:
+                        f.write(nfo)
+            except OSError:
+                pass
+    if len(lines) == 1:
+        abort(404)
+    return fname, '\n'.join(lines) + '\n', 'audio/x-mpegurl'
+
+
+@bp.route('/api/export/artist')
+def api_export_artist():
+    """M3U (and optional .nfo sidecars) for an artist — optionally one album."""
+    from urllib.parse import unquote_plus
+    artist = unquote_plus(request.args.get('name') or '').strip()
+    if not artist:
+        abort(400)
+    scope = (request.args.get('scope') or 'all').strip()
+    include_nfo = request.args.get('nfo') == '1'
+    fname, body, mime = _write_artist_export(artist, scope=scope,
+                                              include_nfo=include_nfo)
+    return Response(body, mimetype=mime,
+                    headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+
+
 @bp.route('/api/playlist/<int:parent_id>')
 def api_playlist(parent_id):
     """Return the per-track rows that make up a playlist conversion."""

@@ -1,4 +1,5 @@
 import json
+import logging
 import base64
 import os
 import queue
@@ -23,6 +24,7 @@ from flask import (Blueprint, render_template, request, flash, redirect,
 from app.models import db, ConversionHistory, UserSettings, effective_output_path, utcnow
 from app import _resource_base_dir, is_secret_persisted, SCHEMA_VERSION
 
+logger = logging.getLogger(__name__)
 bp = Blueprint('convert', __name__)
 
 VALID_FORMATS = {
@@ -3594,18 +3596,63 @@ def _want_subtitles(job=None):
         return True
 
 
-def _get_proxy():
-    """Configured proxy URL, or '' for a direct connection. Context-safe."""
+def _strip_www(host):
+    """Lowercase hostname with a literal leading 'www.' removed.
+
+    Note: str.lstrip('www.') strips a *character set*, so it would turn
+    'wordpress.com' into 'ordpress.com'. Use an explicit prefix check.
+    """
+    host = (host or '').lower()
+    return host[4:] if host.startswith('www.') else host
+
+
+def _get_proxy(hostname=''):
+    """Configured proxy URL for ``hostname``, or '' for direct connection.
+
+    The per-service ``proxies_json`` mapping wins when it has a key
+    matching ``hostname`` (case-insensitive, with optional leading
+    ``www.`` strip). Falls back to the flat ``proxy`` field when no
+    override matches.
+    """
     try:
         settings = UserSettings.query.first()
+        if hostname and settings is not None:
+            try:
+                overrides = json.loads(getattr(settings, 'proxies_json', '{}') or '{}')
+            except (TypeError, ValueError):
+                overrides = {}
+            host_lc = _strip_www(hostname)
+            for key, value in overrides.items():
+                if not isinstance(value, str):
+                    continue
+                k = _strip_www(key)
+                if k == host_lc or host_lc.endswith('.' + k):
+                    v = value.strip()
+                    if v:
+                        return v
         return (getattr(settings, 'proxy', '') or '').strip()
     except Exception:
-        return ''
+        # Fail closed: if the proxy setting can't be read, do NOT quietly
+        # fall back to a direct connection that would bypass the user's
+        # proxy. Let the caller's network call fail instead.
+        logger.exception('Could not read proxy settings; refusing direct connection')
+        raise
 
 
-def _http_proxies():
-    """Proxy mapping for requests, or None for a direct connection."""
-    proxy = _get_proxy()
+def _http_proxies(url=''):
+    """Proxy mapping for requests, or None for a direct connection.
+
+    The ``url`` is parsed for its hostname so per-service overrides kick
+    in for the right host (e.g. youtube.com vs spotify.com).
+    """
+    from urllib.parse import urlparse
+    host = ''
+    if url:
+        try:
+            host = urlparse(url).hostname or ''
+        except Exception:
+            host = ''
+    proxy = _get_proxy(host)
     return {'http': proxy, 'https': proxy} if proxy else None
 
 
@@ -3656,14 +3703,17 @@ def _ytdlp_net_args():
     return args
 
 
-def _ytdlp_env():
+def _ytdlp_env(url=''):
     """Subprocess environment for yt-dlp, or None for plain inheritance.
 
     A configured proxy is injected as *proxy environment variables (which
     yt-dlp honors) instead of a --proxy flag, keeping credentials out of
-    the process table.
+    the process table. The proxy is chosen per host when ``url`` is
+    provided so per-service overrides land on the right connection.
     """
-    proxy = _get_proxy()
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname if url else ''
+    proxy = _get_proxy(host)
     if not proxy:
         return None
     env = dict(os.environ)
@@ -7858,6 +7908,79 @@ def _collect_subtitles_for(stem):
     except OSError:
         pass
     return found
+
+
+@bp.route('/api/video/<int:conversion_id>/resub', methods=['POST'])
+def api_video_resub(conversion_id):
+    """Re-fetch subtitles for a single video, optionally with a custom
+    language. Existing sidecars are removed first so the new fetch
+    doesn't leave a mix of old + new languages on disk.
+    """
+    payload = request.get_json(silent=True) or {}
+    lang = str(payload.get('lang') or '').strip()
+    row = db.session.get(ConversionHistory, conversion_id)
+    if not row or row.status not in ('completed', 'skipped'):
+        return jsonify({'ok': False, 'message': 'Not a finished track.'}), 404
+    src = row.output_path or ''
+    if not src or not os.path.isfile(src):
+        return jsonify({'ok': False, 'message': 'Source file missing.'}), 404
+    if os.path.splitext(src)[1].lower() not in (
+            '.mp4', '.webm', '.mkv', '.mov', '.avi'):
+        return jsonify({'ok': False,
+                        'message': 'Not a video file.'}), 400
+    if not _is_supported_video_url(row.url or ''):
+        return jsonify({'ok': False, 'message': 'URL is not from a supported site.'}), 400
+
+    stem = os.path.splitext(src)[0]
+    directory = os.path.dirname(src) or '.'
+    # Wipe existing sidecars so the new fetch is the only one on disk.
+    removed = 0
+    try:
+        for name in os.listdir(directory):
+            if re.fullmatch(
+                    re.escape(os.path.basename(stem))
+                    + r'\.[A-Za-z-]{2,12}\.(vtt|srt)', name):
+                try:
+                    os.remove(os.path.join(directory, name))
+                    removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    if not lang:
+        try:
+            settings = UserSettings.query.first()
+            pref = (getattr(settings, 'pref_sub_lang', 'en') or 'en').strip()
+        except Exception:
+            pref = 'en'
+        lang = pref or 'en'
+    langs = [l.strip() for l in lang.split(',') if l.strip()]
+    if not langs:
+        langs = ['en']
+
+    try:
+        res = subprocess.run(
+            _ytdlp_command() + _active_privacy_flags() + _ytdlp_net_args()
+            + list(_YTDLP_POLITENESS_FLAGS)
+            + ['--skip-download', '--write-subs', '--write-auto-subs',
+               '--sub-langs', 'all,-live_chat',
+               '--sub-langs', ','.join(langs),
+               '--convert-subs', 'vtt', '--no-playlist',
+               '-o', stem, row.url],
+            capture_output=True, text=True, timeout=300,
+            env=_ytdlp_env())
+        ok = res.returncode == 0
+        subs = _collect_subtitles_for(stem)
+        return jsonify({'ok': ok and bool(subs),
+                        'message': 'Subs updated.' if subs
+                        else f'yt-dlp returned {res.returncode}.',
+                        'subtitles': [{'lang': l, 'name': os.path.basename(p)}
+                                       for l, p in subs],
+                        'cleared': removed})
+    except Exception as e:
+        return jsonify({'ok': False,
+                        'message': f'Subtitle fetch failed: {str(e)[:200]}'}), 500
 
 
 @bp.route('/api/prefs', methods=['POST'])
