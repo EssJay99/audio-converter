@@ -8176,3 +8176,41 @@ def test_prune_cover_cache_keeps_linked_hashes(tmp_path, monkeypatch):
     # The linked hash must survive even though the cache is over cap.
     assert canonical.is_file()
     assert removed >= 0
+
+
+def test_history_page_has_only_history(client):
+    from app.models import ConversionHistory
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://example.com/h1', format='FLAC',
+            output_path='/tmp/h1.flac', status='completed'))
+        db.session.commit()
+    page = client.get('/history').data.decode('utf-8')
+    assert 'Conversion History' in page
+    assert 'history-table' in page
+    for absent in ('Convert Audio', 'fileDropzone', 'Followed Playlists',
+                   'Library Stats', 'Formats Supported', 'System Requirements',
+                   'subsRow', 'statsRow', 'How It Works'):
+        assert absent not in page
+
+
+def test_history_page_empty_state(client):
+    page = client.get('/history').data.decode('utf-8')
+    assert 'Conversion History' in page
+    assert 'Nothing here yet' in page
+    assert 'history-table' not in page
+
+
+def test_home_page_keeps_convert_and_recent(client):
+    from app.models import ConversionHistory
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://example.com/h2', format='FLAC',
+            output_path='/tmp/h2.flac', status='completed'))
+        db.session.commit()
+    page = client.get('/').data.decode('utf-8')
+    for marker in ('Convert Audio', 'fileDropzone', 'Followed Playlists',
+                   'Library Stats', 'Recent Conversions', 'View full history',
+                   'history-table'):
+        assert marker in page
+    assert 'Conversion History' not in page

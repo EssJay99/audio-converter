@@ -41,6 +41,7 @@
             {% endif %}
         {% endwith %}
 
+        {% if not show_history %}
         <div class="row">
             <div class="col-lg-5">
                 <div id="firstRunTour" class="tour-overlay d-none" role="dialog" aria-label="Welcome tour">
@@ -280,6 +281,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
 
         <div class="row mt-3">
             <div class="col-12">
@@ -302,7 +304,7 @@
                 </div>
                 {% if history %}
                         <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                            <h5>{% if show_history %}Full History{% else %}Recent Conversions{% endif %}</h5>
+                            <h5>{% if show_history %}Conversion History{% else %}Recent Conversions <a href="/history" class="btn btn-sm btn-outline-secondary ms-2">View full history</a>{% endif %}</h5>
 
                             {% if show_history %}
                                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
@@ -597,10 +599,16 @@
                                 </table>
                             </div>
                         </div>
+                {% elif show_history %}
+                        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+                            <h5>Conversion History</h5>
+                            <p class="text-muted mb-0">Nothing here yet. <a href="/">Convert your first link</a> and it will show up here with its status, file, and date.</p>
+                        </div>
                 {% endif %}
             </div>
         </div>
 
+        {% if not show_history %}
         <div class="row mt-3" id="subsRow">
             <div class="col-12">
                 <div class="card p-4 shadow-sm border-0 rounded">
@@ -619,6 +627,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
 
         <hr class="mt-4">
         <footer class="text-center text-muted small mb-3">
