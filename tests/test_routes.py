@@ -8214,3 +8214,226 @@ def test_home_page_keeps_convert_and_recent(client):
                    'history-table'):
         assert marker in page
     assert 'Conversion History' not in page
+
+
+def test_tidal_login_button_always_visible(client):
+    """The Connect button renders with no client ID saved (it explains
+    itself via the backend flash if clicked early)."""
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'id="tidalLogin"' in page
+    assert '/api/tidal/login' in page
+
+
+def test_tidal_login_button_with_client_id(client):
+    _tidal_settings(client, tidal_client_id='abc123')
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'id="tidalLogin"' in page
+
+
+def test_tidal_login_button_hidden_when_connected(client):
+    _tidal_settings(client, tidal_client_id='abc123',
+                    tidal_access_token='AT')
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'id="tidalLogin"' not in page
+    assert 'Tidal connected' in page
+
+
+def test_sign_and_verify_release_round_trip(tmp_path, monkeypatch):
+    """sign_release output verifies under verify_release (throwaway key)."""
+    import importlib.util
+    import sys as _sys
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+
+    def _load(name, path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        _sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    sign_mod = _load('sign_release_under_test', 'scripts/sign_release.py')
+    verify_mod = _load('verify_release_under_test', 'scripts/verify_release.py')
+    priv = Ed25519PrivateKey.generate()
+    raw = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption())
+    keyfile = tmp_path / 'k'
+    keyfile.write_bytes(bytes(raw))
+    sums = tmp_path / 'SHA256SUMS.txt'
+    sums.write_text('ab' * 32 + '  foo.dmg\n')
+    monkeypatch.setenv('AUDIO_CONVERTER_SIGNING_KEY', str(keyfile))
+    sign_mod.sign_sums(str(sums), 'v9.9.9')
+    pub = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)
+    assert verify_mod._verify_minisig(
+        sums.read_bytes(), (tmp_path / 'SHA256SUMS.txt.minisig').read_bytes(),
+        bytes(pub)) is True
+    assert verify_mod._verify_minisig(
+        b'tampered', (tmp_path / 'SHA256SUMS.txt.minisig').read_bytes(),
+        bytes(pub)) is False
+
+
+def test_convert_form_rate_limited(client):
+    """31 rapid /convert posts: the 31st bounces back with a flash."""
+    from app.routes import convert as cm
+    cm._CONVERT_LIMIT._buckets.clear()
+    statuses = []
+    for _ in range(31):
+        resp = client.post('/convert', data={
+            'url': 'https://youtu.be/x', 'format': 'flac',
+            'output_path': '/tmp', 'csrf_token': '',
+        }, follow_redirects=False)
+        statuses.append(resp.status_code)
+    assert 302 in statuses
+    assert statuses[-1] == 302
+    with client.session_transaction() as session:
+        flashes = [m for _c, m in session.get('_flashes', [])]
+    assert any('slow down' in m for m in flashes)
+
+
+def test_heavy_endpoints_rate_limited(client):
+    """7 rapid backfill posts: the 7th is a JSON 429."""
+    from app.routes import convert as cm
+    cm._HEAVY_LIMIT._buckets.clear()
+    statuses = []
+    for _ in range(7):
+        statuses.append(client.post(
+            '/api/subs/backfill', json={}).status_code)
+    assert statuses[-1] == 429
+
+
+def test_heavy_limit_applies_per_endpoint(client):
+    """Each heavy endpoint gets its own 6/min budget."""
+    from app.routes import convert as cm
+    cm._HEAVY_LIMIT._buckets.clear()
+    for _ in range(6):
+        assert client.post('/api/verify-files').status_code == 200
+    assert client.post('/api/verify-files').status_code == 429
+
+
+def test_csp_header_with_matching_nonce(client):
+    import re
+    for path in ('/', '/history', '/player', '/settings', '/video'):
+        resp = client.get(path)
+        csp = resp.headers.get('Content-Security-Policy', '')
+        assert "default-src 'self'" in csp, path
+        assert "'unsafe-inline'" not in csp.split('script-src')[1].split(';')[0], path
+        m = re.search(r"'nonce-([A-Za-z0-9_-]+)'", csp)
+        assert m, path
+        html = resp.data.decode('utf-8')
+        nonced = re.findall(r'<script nonce="([^"]+)">', html)
+        assert nonced, path
+        assert set(nonced) == {m.group(1)}, path
+
+
+def test_no_inline_event_handlers(client):
+    import re
+    for path in ('/', '/history', '/player', '/settings', '/video'):
+        html = client.get(path).data.decode('utf-8')
+        for bad in re.findall(r'\s(onclick|onsubmit|onchange|onload|onerror|oninput|onkeydown|onkeyup|onfocus|onblur|onmouseover)="[^"]*"', html):
+            raise AssertionError(f'{path}: inline {bad} handler')
+
+
+def test_due_subscriptions_back_off_after_failures(client):
+    from app.models import Subscription
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    with client.application.app_context():
+        db.session.add(Subscription(
+            url='https://a', format='FLAC', output_path='/tmp/a',
+            active=True, fail_count=2,
+            last_checked=now - timedelta(hours=30)))
+        db.session.commit()
+        # 24h base doubled twice = 96h effective: 30h ago is not due.
+        assert convert_module._due_subscriptions() == []
+        sub = Subscription.query.filter_by(url='https://a').first()
+        sub.last_checked = now - timedelta(hours=100)
+        db.session.commit()
+        assert [s.url for s in convert_module._due_subscriptions()] == ['https://a']
+
+
+def test_due_subscriptions_backoff_caps_at_a_week(client):
+    from app.models import Subscription
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    with client.application.app_context():
+        db.session.add(Subscription(
+            url='https://a', format='FLAC', output_path='/tmp/a',
+            active=True, fail_count=99,
+            last_checked=now - timedelta(hours=167)))
+        db.session.commit()
+        assert convert_module._due_subscriptions() == []
+        sub = Subscription.query.filter_by(url='https://a').first()
+        sub.last_checked = now - timedelta(hours=169)
+        db.session.commit()
+        assert [s.url for s in convert_module._due_subscriptions()] == ['https://a']
+
+
+def test_check_due_subscriptions_counts_failures(client, monkeypatch):
+    from app.models import Subscription
+    with client.application.app_context():
+        db.session.add(Subscription(
+            url='https://a', format='FLAC', output_path='/tmp/a',
+            active=True))
+        db.session.commit()
+    monkeypatch.setattr(convert_module, 'check_subscription',
+                        lambda sid: {'ok': False, 'error': 'boom'})
+    convert_module._check_due_subscriptions()
+    with client.application.app_context():
+        sub = Subscription.query.filter_by(url='https://a').first()
+        assert sub.fail_count == 1
+        assert sub.last_checked is not None
+    monkeypatch.setattr(convert_module, 'check_subscription',
+                        lambda sid: {'ok': True, 'added': 0})
+    from datetime import datetime, timedelta
+    with client.application.app_context():
+        sub = Subscription.query.filter_by(url='https://a').first()
+        sub.last_checked = datetime.utcnow() - timedelta(days=9)
+        db.session.commit()
+    convert_module._check_due_subscriptions()
+    with client.application.app_context():
+        assert Subscription.query.filter_by(url='https://a').first().fail_count == 0
+
+
+def test_health_reports_background_error(client):
+    from app.routes import convert as cm
+    cm._record_background_error('scheduler', 'boom')
+    try:
+        data = client.get('/api/health').get_json()
+        assert data['background_error']['source'] == 'scheduler'
+        assert 'boom' in data['background_error']['message']
+    finally:
+        cm._clear_background_error('scheduler')
+    assert client.get('/api/health').get_json()['background_error'] is None
+
+
+def test_db_restore_rejects_corrupt_file(client):
+    import io
+    resp = client.post('/api/db/restore',
+                       data={'file': (io.BytesIO(b'not a database at all'),
+                                      'evil.db'),
+                             'confirm': 'FACTORY'},
+                       content_type='multipart/form-data')
+    assert resp.status_code == 400
+    assert 'not a database' in resp.get_json()['message'].lower()
+
+
+def test_db_restore_rejects_wrong_tables(client, tmp_path):
+    import io
+    import sqlite3
+    other = tmp_path / 'other.db'
+    conn = sqlite3.connect(str(other))
+    conn.execute('CREATE TABLE totally_unrelated (id INTEGER)')
+    conn.commit()
+    conn.close()
+    with open(other, 'rb') as f:
+        payload = f.read()
+    resp = client.post('/api/db/restore',
+                       data={'file': (io.BytesIO(payload), 'other.db'),
+                             'confirm': 'FACTORY'},
+                       content_type='multipart/form-data')
+    assert resp.status_code == 400
+    assert 'missing' in resp.get_json()['message'].lower()

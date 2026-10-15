@@ -206,10 +206,10 @@
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     <script src="{{ url_for('static', filename='js/player.js') }}"></script>
     <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         window.pathBrowserHome = {{ default_output_path|tojson }};
     </script>
-        <script>
+        <script nonce="{{ csp_nonce }}">
             document.addEventListener('DOMContentLoaded', function () {
                 const form = document.querySelector('form[action="/convert"]');
                 const submit = form ? form.querySelector('button[type="submit"]') : null;

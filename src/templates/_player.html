@@ -27,6 +27,7 @@
             <option value="end-track">Sleep: end of track</option>
             <option value="end-queue">Sleep: end of queue</option>
         </select>
+        <span id="appSleepCount" class="text-muted small d-none" title="Time until playback stops"></span>
     </div>
 
     <img id="appPlayerCover" class="app-player-cover d-none" alt="" aria-hidden="true">
@@ -98,6 +99,13 @@
         <div class="app-theater-head">
             <strong id="appTheaterTitle">Video</strong>
             <span>
+                <select id="appTheaterSpeed" class="app-player-select" title="Playback speed" aria-label="Playback speed">
+                    <option value="0.5">0.5&times;</option>
+                    <option value="1" selected>1&times;</option>
+                    <option value="1.25">1.25&times;</option>
+                    <option value="1.5">1.5&times;</option>
+                    <option value="2">2&times;</option>
+                </select>
                 <button type="button" id="appTheaterPip" class="app-player-btn" title="Picture in picture" aria-label="Picture in picture">&#10697;</button>
                 <button type="button" id="appTheaterClose" class="app-player-btn app-player-close" aria-label="Close video">&times;</button>
             </span>
@@ -218,7 +226,7 @@
     </div>
 </div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
     (function () {
         if (window.confirmWithPhrase) return;
         let _phraseResolve = null;

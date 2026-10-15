@@ -21,6 +21,7 @@ import tempfile
 import urllib.request
 
 SUMS_NAME = 'SHA256SUMS.txt'
+SIG_NAME = 'SHA256SUMS.txt.minisig'
 INSTALLER_SUFFIXES = ('.dmg', '.exe', '.tar.gz')
 
 
@@ -62,6 +63,56 @@ def _sha256(path):
     return h.hexdigest()
 
 
+def _bundled_pubkey():
+    """Raw Ed25519 public key from src/release-signing-pubkey.txt."""
+    import base64
+    here = os.path.dirname(os.path.abspath(__file__))
+    key_path = os.path.join(here, '..', 'src', 'release-signing-pubkey.txt')
+    with open(key_path, encoding='utf-8') as f:
+        text = f.read()
+    blob = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('untrusted comment'):
+            continue
+        blob = line
+        break
+    if not blob:
+        raise ValueError('bundled pubkey file has no key blob')
+    raw = base64.b64decode(blob, validate=True)
+    if len(raw) != 32:
+        raise ValueError('bundled pubkey is not 32 bytes')
+    return raw
+
+
+def _verify_minisig(sums_bytes, sig_bytes, pubkey_raw):
+    """Check a minisign detached signature the way the app does."""
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+    sig_line = None
+    for line in sig_bytes.splitlines():
+        if not line or line.startswith(b'untrusted comment') \
+                or line.startswith(b'trusted comment'):
+            continue
+        sig_line = line
+        break
+    if sig_line is None:
+        return False
+    try:
+        decoded = base64.b64decode(sig_line, validate=True)
+    except Exception:
+        return False
+    if len(decoded) < 8 + 64:
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(pubkey_raw).verify(
+            decoded[8:8 + 64], decoded[:8] + b'trust' + sums_bytes)
+        return True
+    except InvalidSignature:
+        return False
+
+
 def verify_local(directory):
     """Check installer files already on disk against a sibling sums file."""
     names = sorted(os.listdir(directory))
@@ -71,6 +122,23 @@ def verify_local(directory):
     with open(sums_path, encoding='utf-8') as f:
         sums = _parse_sums(f.read())
     errors = []
+    sig_path = os.path.join(directory, SIG_NAME)
+    if not os.path.isfile(sig_path):
+        errors.append(f'missing {SIG_NAME} in {directory} '
+                      '(self-updater refuses unsigned releases)')
+    else:
+        try:
+            pubkey = _bundled_pubkey()
+            with open(sums_path, 'rb') as f:
+                sums_bytes = f.read()
+            with open(sig_path, 'rb') as f:
+                sig_bytes = f.read()
+            if _verify_minisig(sums_bytes, sig_bytes, pubkey):
+                print(f'  ok  {SIG_NAME} signature verifies')
+            else:
+                errors.append(f'{SIG_NAME}: SIGNATURE DOES NOT VERIFY')
+        except Exception as e:
+            errors.append(f'{SIG_NAME}: could not verify ({e})')
     installers = [n for n in names if n.endswith(INSTALLER_SUFFIXES)]
     for suffix in ('.dmg', '.exe'):
         matches = [n for n in installers if n.endswith(suffix)]
@@ -103,6 +171,24 @@ def verify_tag(repo, tag):
         _download(assets[SUMS_NAME], sums_path)
         with open(sums_path, encoding='utf-8') as f:
             sums = _parse_sums(f.read())
+        if SIG_NAME not in assets:
+            errors.append(f'release has no {SIG_NAME} asset '
+                          '(self-updater refuses unsigned releases)')
+        else:
+            sig_path = os.path.join(tmp, SIG_NAME)
+            _download(assets[SIG_NAME], sig_path)
+            try:
+                pubkey = _bundled_pubkey()
+                with open(sums_path, 'rb') as f:
+                    sums_bytes = f.read()
+                with open(sig_path, 'rb') as f:
+                    sig_bytes = f.read()
+                if _verify_minisig(sums_bytes, sig_bytes, pubkey):
+                    print(f'  ok  {SIG_NAME} signature verifies')
+                else:
+                    errors.append(f'{SIG_NAME}: SIGNATURE DOES NOT VERIFY')
+            except Exception as e:
+                errors.append(f'{SIG_NAME}: could not verify ({e})')
         for suffix in ('.dmg', '.exe'):
             matches = [n for n in assets if n.endswith(suffix)]
             if len(matches) != 1:

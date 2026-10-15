@@ -205,6 +205,15 @@ function toast(message, kind) {
     }, 4500);
 }
 
+// Cover thumbnails that 404 (no extractable art) remove themselves.
+// Capture phase because image error events don't bubble. Replaces the
+// old inline onerror= handlers so the page stays CSP-clean.
+document.addEventListener('error', (e) => {
+    const img = e.target && e.target.closest
+        ? e.target.closest('[data-cover-thumb]') : null;
+    if (img) img.remove();
+}, true);
+
 document.addEventListener('click', (e) => {
     const subBtn = e.target.closest('[data-subscribe]');
     if (subBtn) {
@@ -948,7 +957,10 @@ function loadSubscriptions() {
                 meta.className = 'text-muted small';
                 meta.textContent = (sub.active ? 'Active' : 'Paused') +
                     ' · every ' + sub.interval_hours + 'h' +
-                    (sub.last_checked ? ' · checked ' + sub.last_checked.slice(0, 16) : '');
+                    (sub.last_checked ? ' · checked ' + sub.last_checked.slice(0, 16) : '') +
+                    (sub.fail_count > 0 ? ' · backing off after ' + sub.fail_count +
+                        ' failed check' + (sub.fail_count === 1 ? '' : 's') : '');
+                if (sub.fail_count > 0) meta.title = 'Checks slow down automatically while the feed keeps failing; the next success resets the schedule.';
                 row.appendChild(meta);
                 const freq = document.createElement('select');
                 freq.className = 'form-select form-select-sm';
@@ -1113,6 +1125,13 @@ function initHealthBanner() {
             }
             if (data.secret_persisted === false) {
                 problems.push('session secret is not persisted — logins and CSRF tokens reset on every relaunch (set AUDIO_CONVERTER_SECRET_KEY or check write access to the data directory)');
+            }
+            if (data.background_error && data.background_error.message) {
+                problems.push('a background task failed (' + data.background_error.source + '): ' +
+                    data.background_error.message + ' (Settings › View logs)');
+            }
+            if (data.downloader_broken) {
+                problems.push('the downloader failed its daily health check — YouTube may have changed something (Settings › Helpers › Update yt-dlp)');
             }
             if (data.signature && data.signature.signed === false) {
                 problems.push('this install is NOT code-signed — Gatekeeper will warn on first launch (open with right-click › Open once). Build with a Developer ID to silence this.');

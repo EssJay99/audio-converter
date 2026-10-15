@@ -56,6 +56,15 @@ def fresh_db():
             convert_module._paused_jobs.clear()
         except Exception:
             pass
+        # Rate-limiter buckets are keyed per-IP and the test client always
+        # comes from 127.0.0.1, so without this every rate-limit test would
+        # poison the allowance of unrelated later tests.
+        for _limiter_name in ('_PLAYABLE_LIMIT', '_API_POST_LIMIT',
+                              '_CONVERT_LIMIT', '_HEAVY_LIMIT'):
+            try:
+                getattr(convert_module, _limiter_name)._buckets.clear()
+            except Exception:
+                pass
         yield
         db.session.rollback()
         db.session.remove()

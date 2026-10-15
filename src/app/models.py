@@ -233,6 +233,10 @@ class Subscription(db.Model):
     title_exclude = db.Column(db.String(500), nullable=False, default='')
     last_checked = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=utcnow)
+    # Consecutive failed checks. Each failure doubles the effective
+    # interval (capped at a week) so a 429ing feed backs off instead of
+    # hammering on the fixed schedule. Reset on the next success.
+    fail_count = db.Column(db.Integer, nullable=False, default=0)
 
     def __repr__(self):
         return f'<Subscription {self.id}>'

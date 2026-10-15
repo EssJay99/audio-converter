@@ -120,6 +120,16 @@
         if (theaterClose) {
             theaterClose.addEventListener('click', () => closeTheater(false));
         }
+        const theaterSpeed = $('appTheaterSpeed');
+        if (theaterSpeed) {
+            theaterSpeed.addEventListener('change', () => {
+                const rate = Number(theaterSpeed.value) || 1;
+                const video = $('appTheaterVideo');
+                if (video) video.playbackRate = rate;
+                const main = $('appPlayerSpeed');
+                if (main) main.value = String(rate);
+            });
+        }
         Player.audio.addEventListener('error', () => {
             Player.ui.title.textContent = 'Cannot play this format in the browser';
             Player.ui.artist.textContent = '';
@@ -605,6 +615,7 @@
         ready
             .then(function (data) {
                 Player.autoPending = false;
+                Player.loadSkips = 0;
                 // A newer navigation (natural end during a crossfade
                 // fetch, double-tap on next) already moved on: drop this
                 // stale response instead of double-advancing.
@@ -649,6 +660,30 @@
                 play();
             })
             .catch(function () {
+                // Unloadable entry (file moved, row deleted, corrupt
+                // localStorage): drop it so one dead id can't stall the
+                // player, then carry on from the track now at this slot.
+                // Bounded: a queue of nothing-but-dead entries ends
+                // paused instead of looping forever.
+                Player.loadSkips = (Player.loadSkips || 0) + 1;
+                if (Player.index === wantIndex && Player.loadSkips <= Player.queue.length + 1) {
+                    Player.queue.splice(Player.index, 1);
+                    if (!Player.queue.length) {
+                        Player.index = -1;
+                        Player.loadSkips = 0;
+                        saveQueue();
+                        hide();
+                        Player.ui.title.textContent = 'Could not load track';
+                        return;
+                    }
+                    Player.index = Math.min(Player.index, Player.queue.length - 1);
+                    saveQueue();
+                    renderQueue();
+                    if (typeof toast === 'function') toast('Skipped an unavailable track.', 'info');
+                    fetchAndLoad(Player.queue[Player.index], auto);
+                    return;
+                }
+                Player.loadSkips = 0;
                 Player.ui.title.textContent = 'Could not load track';
             });
     }
@@ -738,6 +773,7 @@
     }
 
     let sleepTimer = null;
+    let sleepCountTimer = null;
 
     function restoreAutoLyrics() {
         try {
@@ -1004,6 +1040,8 @@
         resolvePlayable(item);
         try {
             video.playbackRate = Player.audio.playbackRate || 1;
+            const theaterSpeed = $('appTheaterSpeed');
+            if (theaterSpeed) theaterSpeed.value = String(video.playbackRate);
         } catch (err) { /* ignore */ }
         overlay.classList.remove('d-none');
         document.body.classList.add('theater-open');
@@ -1531,19 +1569,52 @@
             clearTimeout(sleepTimer);
             sleepTimer = null;
         }
+        if (sleepCountTimer) {
+            clearInterval(sleepCountTimer);
+            sleepCountTimer = null;
+        }
         if (value === 'end-track' || value === 'end-queue') {
             Player.sleepMode = value;
             persistSleepMode();
+            renderSleepCount(null);
             return;
         }
         Player.sleepMode = null;
         persistSleepMode();
         const minutes = Number(value) || 0;
         if (minutes > 0) {
+            const deadline = Date.now() + minutes * 60 * 1000;
+            renderSleepCount(deadline);
+            sleepCountTimer = setInterval(() => renderSleepCount(deadline), 15000);
             sleepTimer = setTimeout(() => {
                 sleepStop();
             }, minutes * 60 * 1000);
+        } else {
+            renderSleepCount(null);
         }
+    }
+
+    // Countdown readout next to the sleep select ("in 23m"). Cleared for
+    // end-of-track/queue modes, which have no clock time.
+    function renderSleepCount(deadline) {
+        const el = $('appSleepCount');
+        if (!el) return;
+        if (!deadline) {
+            el.classList.add('d-none');
+            el.textContent = '';
+            return;
+        }
+        const remain = Math.max(0, deadline - Date.now());
+        if (remain <= 0) {
+            el.classList.add('d-none');
+            el.textContent = '';
+            return;
+        }
+        const mins = Math.ceil(remain / 60000);
+        el.textContent = 'in ' + (mins >= 60
+            ? Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm'
+            : mins + 'm');
+        el.classList.remove('d-none');
     }
 
     function sleepStop() {
@@ -1551,6 +1622,11 @@
             clearTimeout(sleepTimer);
             sleepTimer = null;
         }
+        if (sleepCountTimer) {
+            clearInterval(sleepCountTimer);
+            sleepCountTimer = null;
+        }
+        renderSleepCount(null);
         Player.sleepMode = null;
         persistSleepMode();
         if (Player.ui.sleep) Player.ui.sleep.value = '0';

@@ -8,6 +8,12 @@ Usage:
     AUDIO_CONVERTER_SIGNING_KEY=./release-signing.key \
         python scripts/sign_release.py path/to/SHA256SUMS.txt
 
+    python scripts/sign_release.py --generate
+        Create a fresh keypair. Prints the public-key file contents to
+        commit and the base64 private key to store as the
+        AUDIO_CONVERTER_SIGNING_KEY_B64 secret. The private key is
+        printed once — store it immediately and never commit it.
+
 The key file is the 32-byte raw Ed25519 secret key (the same on-disk
 format used by `minisign -G -p` before `cat ~/.minisign/minisign.key`
 is un-base64'd). Set the env var to the file path; the script refuses
@@ -46,7 +52,12 @@ def sign_sums(path, version):
             '32-byte Ed25519 secret key.\n')
         sys.exit(2)
     with open(key_path, 'rb') as f:
-        raw = f.read().strip()
+        raw = f.read()
+    # Tolerate one trailing newline (e.g. key file written with echo),
+    # but never strip the key material itself: bytes.strip() would eat a
+    # legitimate trailing 0x0a byte and corrupt the key.
+    if raw.endswith(b'\n'):
+        raw = raw[:-1]
     if len(raw) != 32:
         sys.stderr.write(
             f'Key file must be exactly 32 bytes; got {len(raw)}.\n')
@@ -71,6 +82,25 @@ def sign_sums(path, version):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        sys.stderr.write('usage: sign_release.py <SHA256SUMS.txt> [version]\n')
+        sys.stderr.write('usage: sign_release.py <SHA256SUMS.txt> [version]\n'
+                         '       sign_release.py --generate\n')
         sys.exit(1)
+    if sys.argv[1] == '--generate':
+        priv = Ed25519PrivateKey.generate()
+        raw = priv.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption())
+        pub = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw)
+        keynum = _keynum_for(pub).hex().upper()
+        sys.stdout.write(
+            '1. Commit this as src/release-signing-pubkey.txt:\n\n'
+            f'untrusted comment: minisign public key {keynum}\n'
+            f'{base64.b64encode(pub).decode("ascii")}\n\n'
+            '2. Store this base64 line as the AUDIO_CONVERTER_SIGNING_KEY_B64\n'
+            '   GitHub Actions secret (one line, no spaces):\n\n'
+            f'{base64.b64encode(raw).decode("ascii")}\n')
+        sys.exit(0)
     sign_sums(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 'unknown')

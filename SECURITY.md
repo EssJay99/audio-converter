@@ -95,6 +95,12 @@ check are the primary defenses.
   helper installs, uploads).
 - SHA-256 verification on every downloaded helper binary (yt-dlp,
   ffmpeg) and on every self-update payload.
+- Self-update payloads additionally require a minisign detached
+  signature (`SHA256SUMS.txt.minisig`) verified against the public key
+  bundled at `src/release-signing-pubkey.txt`. Releases published
+  without the signature are refused by the updater (and by CI's
+  `verify-release` job), so a compromised GitHub token alone cannot
+  ship a backdoored installer.
 - URL allowlist + SSRF guard (`_is_public_http_url`) for user-submitted
   URLs.
 - Path-traversal guard (`_safe_output_path`) on user-supplied output
@@ -104,6 +110,33 @@ check are the primary defenses.
   expect.
 - Database writes are SQL-parameterized via SQLAlchemy; no string
   concatenation.
+
+## Release-signing key setup (maintainer, one time, free)
+
+The self-updater trusts only releases signed with the project's Ed25519
+release key. No purchased certificate is involved — this is a plain
+signing key you generate yourself, and GitHub Actions secrets are free.
+
+1. Generate a keypair (either tool works; they use the same format):
+   - `minisign -G -p release-signing.pub -s release-signing.key`, or
+   - `python scripts/sign_release.py --generate` (prints next steps).
+2. Put the **public** half in `src/release-signing-pubkey.txt`, replacing
+   the placeholder, and commit it. The app and `verify-release` check
+   signatures against exactly this file.
+3. Store the **private** half as a GitHub Actions secret named
+   `AUDIO_CONVERTER_SIGNING_KEY_B64`, containing the base64 encoding of
+   the raw 32-byte secret key:
+   `base64 -i release-signing.key | pbcopy` (macOS) and paste the
+   single line into the secret. Never commit the private key.
+4. The `release` CI job decodes the secret to a temp file, signs
+   `SHA256SUMS.txt` into `SHA256SUMS.txt.minisig`, publishes both, and
+   shreds the temp file. If the secret is missing the job **fails**
+   instead of publishing an unsigned release the updater would refuse.
+
+Rotate by generating a new keypair, updating the bundled public key in
+the same release that starts signing with the new private key, and
+replacing the secret. Old releases stay verifiable against the key
+that was bundled at the time.
 
 ## Acknowledgements
 

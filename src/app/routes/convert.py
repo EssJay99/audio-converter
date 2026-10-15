@@ -612,6 +612,48 @@ SUBSCRIPTION_INTERVALS = (6, 12, 24, 168)
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 
+# Last background failure per source, surfaced through /api/health so a
+# broken scheduler/verify loop shows in the banner instead of living only
+# in the log file. Each source clears itself on its next success.
+_background_error = {}
+_background_error_lock = threading.Lock()
+
+
+def _record_background_error(source, message):
+    """Remember a background failure for the health banner."""
+    try:
+        with _background_error_lock:
+            _background_error[source] = {
+                'message': str(message or '')[:300],
+                'at': time.time(),
+            }
+    except Exception:
+        pass
+
+
+def _clear_background_error(source):
+    try:
+        with _background_error_lock:
+            _background_error.pop(source, None)
+    except Exception:
+        pass
+
+
+def _background_error_snapshot(max_age_seconds=24 * 3600):
+    """The freshest recorded background failure, or None."""
+    try:
+        with _background_error_lock:
+            items = sorted(_background_error.items(),
+                           key=lambda kv: kv[1].get('at', 0), reverse=True)
+    except Exception:
+        return None
+    now = time.time()
+    for source, entry in items:
+        if now - entry.get('at', 0) <= max_age_seconds and entry.get('message'):
+            return {'source': source, 'message': entry['message'],
+                    'at': entry['at']}
+    return None
+
 
 def _ensure_scheduler():
     global _scheduler_started
@@ -632,8 +674,14 @@ def _scheduler_loop():
                 _check_due_subscriptions()
                 _maybe_finish_action()
                 _janitor_tick()
-        except Exception:
-            pass
+            _clear_background_error('scheduler')
+        except Exception as e:
+            # The loop must never die silently: a perpetually-failing
+            # tick (DB locked, migration half-applied) would otherwise
+            # leave subscriptions, finish actions, and quota pruning
+            # broken with zero surface. The log viewer shows this.
+            logger.exception('Scheduler tick failed')
+            _record_background_error('scheduler', e)
         time.sleep(60)
 
 
@@ -729,6 +777,14 @@ _tag_backfill_lock = threading.Lock()
 # /api/health so the banner can nudge even when Settings is never opened.
 _latest_app = {'version': '', 'url': ''}
 _latest_app_lock = threading.Lock()
+# Downloader self-test: last run timestamp + whether extraction worked.
+# A stable public video (Blender's Big Buck Bunny, up for 15+ years) is
+# resolved with --skip-download; failure means YouTube changed something
+# and yt-dlp likely needs an update. Checked at most once per day.
+_DOWNLOADER_PROBE_URL = 'https://www.youtube.com/watch?v=aqz-KE-bpKQ'
+_downloader_probe = {'at': 0.0, 'ok': True}
+_downloader_probe_lock = threading.Lock()
+_downloader_broken = threading.Event()
 
 
 def _ensure_helper_watch():
@@ -776,9 +832,41 @@ def _tag_backfill_loop():
                     except Exception:
                         pass
                     time.sleep(0.2)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception('Tag backfill loop failed')
+            _record_background_error('tag-backfill', e)
         time.sleep(30)
+
+
+def _maybe_probe_downloader():
+    """Resolve one stable video per day; flag extraction breakage early.
+
+    Runs `--skip-download --print title` (no media bytes fetched) so the
+    probe is cheap and polite. A failure usually means YouTube changed
+    markup and the bundled yt-dlp needs updating — the banner then says
+    so before the user's next real download fails.
+    """
+    now = time.monotonic()
+    with _downloader_probe_lock:
+        if now - _downloader_probe['at'] < 24 * 3600:
+            return
+        _downloader_probe['at'] = now
+    try:
+        res = subprocess.run(
+            _ytdlp_command() + _active_privacy_flags()
+            + ['--skip-download', '--no-playlist', '--print', 'title',
+               _DOWNLOADER_PROBE_URL],
+            capture_output=True, text=True, timeout=120,
+            env=_ytdlp_env(_DOWNLOADER_PROBE_URL))
+        ok = res.returncode == 0 and bool((res.stdout or '').strip())
+    except Exception:
+        ok = False
+    with _downloader_probe_lock:
+        _downloader_probe['ok'] = ok
+    if ok:
+        _downloader_broken.clear()
+    else:
+        _downloader_broken.set()
 
 
 def _check_app_release(feed, current_version):
@@ -827,6 +915,10 @@ def _helper_watch_loop():
         except Exception:
             pass
         try:
+            _maybe_probe_downloader()
+        except Exception:
+            pass
+        try:
             current = _ytdlp_version()
             latest = _latest_ytdlp_release()
             if (latest and current and
@@ -869,7 +961,12 @@ def _due_subscriptions():
     due = []
     for sub in Subscription.query.filter_by(active=True).all():
         interval = sub.interval_hours if sub.interval_hours in SUBSCRIPTION_INTERVALS else 24
-        if not sub.last_checked or now - sub.last_checked >= timedelta(hours=interval):
+        try:
+            fails = max(0, int(getattr(sub, 'fail_count', 0) or 0))
+        except (TypeError, ValueError):
+            fails = 0
+        effective = min(24 * 7, interval * (2 ** min(fails, 6)))
+        if not sub.last_checked or now - sub.last_checked >= timedelta(hours=effective):
             due.append(sub)
     return due
 
@@ -929,14 +1026,24 @@ def _check_due_subscriptions():
     for sub in _due_subscriptions():
         try:
             result = check_subscription(sub.id)
+            ok = isinstance(result, dict) and bool(result.get('ok'))
             added = result.get('added', 0) if isinstance(result, dict) else 0
             if added:
                 title = (getattr(sub, 'playlist_title', '') or
                          getattr(sub, 'url', '') or 'Subscription')
                 _notify('New tracks available',
                         f'{title}: {added} new track(s) queued.')
-        except Exception:
-            pass
+            try:
+                sub.fail_count = 0 if ok else (int(sub.fail_count or 0) + 1)
+            except (TypeError, ValueError):
+                sub.fail_count = 0 if ok else 1
+        except Exception as e:
+            try:
+                sub.fail_count = int(sub.fail_count or 0) + 1
+            except (TypeError, ValueError):
+                sub.fail_count = 1
+            logger.exception('Subscription check failed')
+            _record_background_error('subscriptions', e)
         try:
             sub.last_checked = utcnow()
             db.session.commit()
@@ -1396,12 +1503,14 @@ def _same_origin_required(view):
     return wrapper
 
 
-def _rate_limited(limiter, label):
+def _rate_limited(limiter, label, form_redirect=None):
     """Per-IP request budget for an endpoint. 429 when exceeded.
 
     Cheap to apply; the limiter is in-process and self-evicts old buckets,
     so a busy app doesn't leak memory. Sets `Retry-After` so well-behaved
-    clients back off cleanly.
+    clients back off cleanly. When `form_redirect` names an endpoint, HTML
+    form posts (which can't render a JSON 429) are flashed a message and
+    sent back instead.
     """
     from functools import wraps
 
@@ -1410,6 +1519,9 @@ def _rate_limited(limiter, label):
         def wrapper(*args, **kwargs):
             identity = (label, _client_identity())
             if not limiter.allow(identity):
+                if form_redirect and not request.is_json:
+                    flash('Too many requests, please slow down.', 'warning')
+                    return redirect(url_for(form_redirect))
                 resp = jsonify({'ok': False,
                                 'message': 'Too many requests, please slow down.'})
                 resp.status_code = 429
@@ -1418,6 +1530,66 @@ def _rate_limited(limiter, label):
             return view(*args, **kwargs)
         return wrapper
     return decorator
+
+
+class _RateLimiter:
+    """In-process token-bucket per (route, identity) pair.
+
+    The window resets every `window_seconds`. `max_calls` requests per
+    identity per window; the 1 + max_calls'th returns False. Old buckets
+    are evicted opportunistically on each call so the dict stays bounded.
+    The limiter is local to one process — fine for a localhost server. A
+    future-proof network deploy would swap this for a Redis bucket.
+    """
+
+    def __init__(self, max_calls, window_seconds):
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self._buckets = {}
+        self._lock = threading.Lock()
+
+    def allow(self, identity):
+        """True when this call fits in the window, False otherwise."""
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        with self._lock:
+            bucket = self._buckets.get(identity)
+            if bucket is None or bucket['reset'] <= cutoff:
+                self._buckets[identity] = {'reset': now + self.window_seconds,
+                                            'count': 1}
+                # Evict old buckets whenever we create one.
+                stale = [k for k, v in self._buckets.items()
+                                  if v['reset'] <= cutoff and k != identity]
+                for k in stale:
+                    self._buckets.pop(k, None)
+                return True
+            if bucket['count'] >= self.max_calls:
+                return False
+            bucket['count'] += 1
+            return True
+
+    def remaining(self, identity):
+        """Calls left in the current window for `identity`."""
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._buckets.get(identity)
+            if bucket is None or bucket['reset'] <= now - self.window_seconds:
+                return self.max_calls
+            return max(0, self.max_calls - bucket['count'])
+
+
+# Per-IP request budgets. The first caps anything that spins up ffmpeg
+# (a misbehaving tab should never reach this rate); the second is a
+# defense-in-depth ceiling on state-changing POSTs; the third covers the
+# convert form (generous enough for batch-paste, tight enough to stop a
+# submit loop); the fourth covers endpoints that each do minutes of
+# server work per call (library scans, 50-track subtitle backfills).
+# Defined up here (not near use) because route decorators below execute
+# at import time, top to bottom.
+_PLAYABLE_LIMIT = _RateLimiter(max_calls=12, window_seconds=60)
+_API_POST_LIMIT = _RateLimiter(max_calls=60, window_seconds=60)
+_CONVERT_LIMIT = _RateLimiter(max_calls=30, window_seconds=60)
+_HEAVY_LIMIT = _RateLimiter(max_calls=6, window_seconds=60)
 
 
 def _requires_phrase(phrase):
@@ -1634,6 +1806,7 @@ def video_page():
 
 
 @bp.route('/convert', methods=['POST'])
+@_rate_limited(_CONVERT_LIMIT, 'convert', form_redirect='home.index')
 def convert():
     """Queue a conversion job."""
     raw_url = request.form.get('url', '').strip()
@@ -3855,9 +4028,12 @@ def _ytdlp_env(url=''):
     """Subprocess environment for yt-dlp, or None for plain inheritance.
 
     A configured proxy is injected as *proxy environment variables (which
-    yt-dlp honors) instead of a --proxy flag, keeping credentials out of
-    the process table. The proxy is chosen per host when ``url`` is
-    provided so per-service overrides land on the right connection.
+    yt-dlp honors) instead of a --proxy flag. That keeps credentials out
+    of argv (visible to every local user via `ps`), but note env vars
+    themselves are still listable via `ps e` — acceptable on a
+    single-user machine, and strictly better than argv. The proxy is
+    chosen per host when ``url`` is provided so per-service overrides
+    land on the right connection.
     """
     from urllib.parse import urlparse
     host = urlparse(url).hostname if url else ''
@@ -4140,59 +4316,6 @@ _PLAYABLE_CAP_FILES = 20
 _PLAYABLE_MAX_CONCURRENT = 3
 _playable_jobs = {}
 _playable_lock = threading.Lock()
-
-
-class _RateLimiter:
-    """In-process token-bucket per (route, identity) pair.
-
-    The window resets every `window_seconds`. `max_calls` requests per
-    identity per window; the 1 + max_calls'th returns False. Old buckets
-    are evicted opportunistically on each call so the dict stays bounded.
-    The limiter is local to one process — fine for a localhost server. A
-    future-proof network deploy would swap this for a Redis bucket.
-    """
-
-    def __init__(self, max_calls, window_seconds):
-        self.max_calls = max_calls
-        self.window_seconds = window_seconds
-        self._buckets = {}
-        self._lock = threading.Lock()
-
-    def allow(self, identity):
-        """True when this call fits in the window, False otherwise."""
-        now = time.monotonic()
-        cutoff = now - self.window_seconds
-        with self._lock:
-            bucket = self._buckets.get(identity)
-            if bucket is None or bucket['reset'] <= cutoff:
-                self._buckets[identity] = {'reset': now + self.window_seconds,
-                                            'count': 1}
-                # Evict old buckets whenever we create one.
-                stale = [k for k, v in self._buckets.items()
-                                  if v['reset'] <= cutoff and k != identity]
-                for k in stale:
-                    self._buckets.pop(k, None)
-                return True
-            if bucket['count'] >= self.max_calls:
-                return False
-            bucket['count'] += 1
-            return True
-
-    def remaining(self, identity):
-        """Calls left in the current window for `identity`."""
-        now = time.monotonic()
-        with self._lock:
-            bucket = self._buckets.get(identity)
-            if bucket is None or bucket['reset'] <= now - self.window_seconds:
-                return self.max_calls
-            return max(0, self.max_calls - bucket['count'])
-
-
-# Per-IP request budgets. The first caps anything that spins up ffmpeg
-# (a misbehaving tab should never reach this rate); the second is a
-# defense-in-depth ceiling on state-changing POSTs.
-_PLAYABLE_LIMIT = _RateLimiter(max_calls=12, window_seconds=60)
-_API_POST_LIMIT = _RateLimiter(max_calls=60, window_seconds=60)
 
 
 def _client_identity():
@@ -5816,7 +5939,9 @@ def api_health():
                     'app_update': app_update,
                     'resumed': resumed,
                     'secret_persisted': is_secret_persisted(),
-                    'signature': _bundle_signature()})
+                    'signature': _bundle_signature(),
+                    'downloader_broken': _downloader_broken.is_set(),
+                    'background_error': _background_error_snapshot()})
 
 
 @bp.route('/api/prune-missing', methods=['POST'])
@@ -6366,16 +6491,29 @@ def api_db_restore():
             check = sqlite3.connect(f'file:{tmp_path}?mode=ro', uri=True,
                                     timeout=10)
             try:
+                integrity = check.execute(
+                    'PRAGMA quick_check').fetchall()
+                if not integrity or str(integrity[0][0]).lower() != 'ok':
+                    return jsonify({'ok': False,
+                                    'message': 'That backup file is corrupt '
+                                    '(integrity check failed).'}), 400
                 tables = {row[0] for row in check.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
+                missing = {'conversion_history', 'user_settings',
+                           'subscription'} - tables
+                if missing:
+                    return jsonify({'ok': False,
+                                    'message': 'Not an app database backup '
+                                    f'(missing: {", ".join(sorted(missing))}).'}), 400
+                # Smoke-read the main table so a structurally-valid but
+                # unreadable file still gets rejected before the swap.
+                check.execute(
+                    'SELECT COUNT(*) FROM conversion_history').fetchone()
             finally:
                 check.close()
         except Exception:
             return jsonify({'ok': False,
                             'message': 'That file is not a database.'}), 400
-        if 'conversion_history' not in tables:
-            return jsonify({'ok': False,
-                            'message': 'Not an app database backup.'}), 400
         try:
             db.session.remove()
             db.engine.dispose()
@@ -6659,6 +6797,7 @@ def _serialize_subscription(sub):
         'title_include': getattr(sub, 'title_include', '') or '',
         'title_exclude': getattr(sub, 'title_exclude', '') or '',
         'last_checked': str(sub.last_checked) if sub.last_checked else '',
+        'fail_count': int(getattr(sub, 'fail_count', 0) or 0),
     }
 
 
@@ -6721,9 +6860,18 @@ def api_subscriptions():
 @bp.route('/api/subscriptions/<int:sub_id>/check', methods=['POST'])
 def api_subscription_check(sub_id):
     """Run a subscription check right now instead of waiting for schedule."""
+    from app.models import Subscription
     result = check_subscription(sub_id)
     if not result.get('ok'):
         return jsonify({**result, 'added': 0}), 400
+    try:
+        sub = db.session.get(Subscription, sub_id)
+        if sub is not None:
+            sub.fail_count = 0
+            sub.last_checked = utcnow()
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
     return jsonify(result)
 
 
@@ -6862,6 +7010,7 @@ def retry_misses(parent_id):
 
 
 @bp.route('/api/verify-files', methods=['POST'])
+@_rate_limited(_HEAVY_LIMIT, 'verify-files')
 def api_verify_files():
     """Start a background integrity scan of all downloaded files.
 
@@ -7988,6 +8137,7 @@ def api_inspect():
 
 
 @bp.route('/api/subs/backfill', methods=['POST'])
+@_rate_limited(_HEAVY_LIMIT, 'subs-backfill')
 def api_subs_backfill():
     """Fetch subtitles for videos that have none.
 
@@ -8779,12 +8929,15 @@ def _verify_in_background():
     except Exception as exc:
         with _verify_lock:
             _verify_state['message'] = f'Scan failed: {str(exc)}'
+        logger.exception('Background verify scan failed')
+        _record_background_error('verify', exc)
     finally:
         with _verify_lock:
             _verify_state.update({'running': False, 'done': True})
             if not _verify_state['message']:
                 _verify_state['message'] = 'Checked {checked} file(s), repaired {repaired}.'.format(
                     **_verify_state)
+                _clear_background_error('verify')
 
 
 @bp.route('/api/verify-status')

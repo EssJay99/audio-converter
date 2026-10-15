@@ -459,11 +459,13 @@
                     {% if tidal_connected %}
                         <span class="badge bg-success">Tidal connected</span>
                         <a href="/api/tidal/logout" class="btn btn-sm btn-outline-secondary">Disconnect</a>
-                    {% elif tidal_client_id %}
-                        <a href="/api/tidal/login" class="btn btn-sm btn-primary">Connect Tidal</a>
-                        <small class="text-muted">Save first if you just edited the ID or secret.</small>
                     {% else %}
-                        <small class="text-muted">Add your client ID and secret above, save, then connect.</small>
+                        <a href="/api/tidal/login" class="btn btn-sm btn-primary" id="tidalLogin">Connect Tidal</a>
+                        {% if tidal_client_id %}
+                        <small class="text-muted">Save first if you just edited the ID or secret.</small>
+                        {% else %}
+                        <small class="text-muted">Add your client ID above and save, then connect.</small>
+                        {% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -578,10 +580,10 @@
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     <script src="{{ url_for('static', filename='js/player.js') }}"></script>
     <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         window.pathBrowserHome = {{ output_path|tojson }};
     </script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         // Keep the speed presets and the exact worker count in sync.
         document.addEventListener('DOMContentLoaded', function () {
             const number = document.getElementById('worker_count');

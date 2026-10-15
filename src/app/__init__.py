@@ -1,5 +1,6 @@
-from flask import Flask, render_template
+from flask import Flask, render_template, g
 import os
+import secrets
 import sys
 import logging
 
@@ -128,12 +129,59 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 
+def csp_nonce():
+    """Per-request CSP nonce, stable for the whole request.
+
+    Inline <script> blocks carry nonce="{{ csp_nonce }}" so the
+    Content-Security-Policy script-src allows exactly this app's own
+    inline code — and nothing an attacker manages to inject.
+    """
+    try:
+        nonce = g.get('csp_nonce')
+    except Exception:
+        nonce = None
+    if not nonce:
+        nonce = secrets.token_urlsafe(16)
+        try:
+            g.csp_nonce = nonce
+        except Exception:
+            pass
+    return nonce
+
+
+@app.context_processor
+def _inject_csp_nonce():
+    return {'csp_nonce': csp_nonce()}
+
+
 @app.after_request
 def _security_headers(response):
     """Defense-in-depth headers for a local-only app opened in a browser."""
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
     response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
     response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    # Content Security Policy: scripts run only from this origin or from
+    # inline blocks carrying the per-request nonce (see csp_nonce()).
+    # Inline styles stay allowed ('unsafe-inline') — Bootstrap and the
+    # player position elements that way, and style injection can't run
+    # code. data:/blob: are needed for the favicon, cover art, and
+    # media streams; object-src stays 'none' so nothing can plugin-load.
+    try:
+        nonce = csp_nonce()
+        response.headers.setdefault(
+            'Content-Security-Policy',
+            "default-src 'self'; "
+            "script-src 'self' 'nonce-" + nonce + "'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob: data:; "
+            "connect-src 'self'; "
+            "font-src 'self' data:; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'")
+    except Exception:
+        pass
     # HSTS only when the request was actually HTTPS. Behind the desktop
     # launcher's loopback HTTP this never fires; if a future deploy
     # front-ends the app with TLS (reverse proxy + forwarded-proto), the
@@ -221,6 +269,7 @@ _SCHEMA_MIGRATIONS = {
         ('skip_shorts', 'BOOLEAN DEFAULT 0'),
         ('title_include', 'VARCHAR(500) DEFAULT ""'),
         ('title_exclude', 'VARCHAR(500) DEFAULT ""'),
+        ('fail_count', 'INTEGER DEFAULT 0'),
     ],
     'user_settings': [
         ('skip_existing', 'BOOLEAN DEFAULT 1'),

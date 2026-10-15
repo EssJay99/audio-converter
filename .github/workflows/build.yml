@@ -125,10 +125,25 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUDIO_CONVERTER_SIGNING_KEY_B64: ${{ secrets.AUDIO_CONVERTER_SIGNING_KEY_B64 }}
         run: |
           cd installers
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          if [ -z "$AUDIO_CONVERTER_SIGNING_KEY_B64" ]; then
+            echo "ERROR: AUDIO_CONVERTER_SIGNING_KEY_B64 secret is not set." >&2
+            echo "The in-app updater refuses unsigned releases, so publishing" >&2
+            echo "without SHA256SUMS.txt.minisig would ship a release nobody" >&2
+            echo "can install. See SECURITY.md for key setup (one-time, free)." >&2
+            exit 1
+          fi
+          python3 -m pip install --quiet cryptography
+          KEYFILE="$(mktemp)"
+          trap 'shred -u "$KEYFILE" 2>/dev/null || rm -f "$KEYFILE"' EXIT
+          printf '%s' "$AUDIO_CONVERTER_SIGNING_KEY_B64" | base64 -d > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+          AUDIO_CONVERTER_SIGNING_KEY="$KEYFILE" python3 ../scripts/sign_release.py SHA256SUMS.txt "${{ github.ref_name }}"
+          cat SHA256SUMS.txt.minisig
           gh release create "${{ github.ref_name }}" * \
             --title "Audio Converter ${{ github.ref_name }}" \
             --notes "macOS (.dmg), Windows (Setup .exe), and Linux (.tar.gz) installers. No command line needed: open, install, double-click."

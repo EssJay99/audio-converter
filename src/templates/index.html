@@ -179,7 +179,7 @@
                     </div>
                 </div>
 
-                <script>
+                <script nonce="{{ csp_nonce }}">
                     document.addEventListener('DOMContentLoaded', function () {
                         const form = document.querySelector('#homeConvertForm');
                         const submit = form ? form.querySelector('button[type="submit"]') : null;
@@ -499,7 +499,7 @@
                                                         {% if item.format and item.format.endswith('Video') %}
                                                             <img class="file-thumb" alt="" loading="lazy"
                                                                  src="/api/cover/{{ item.id }}?size=thumb"
-                                                                 onerror="this.remove()">
+                                                                 data-cover-thumb>
                                                         {% endif %}
                                                         {% if item.output_path %}
                                                             <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
@@ -542,6 +542,8 @@
                                                                             data-reveal="{{ item.id }}" title="Show in file manager">Open folder</button>
                                                                 <button type="button" class="btn btn-sm btn-outline-secondary queue-btn"
                                                                         data-queue="{{ item.id }}" title="Add to player queue">+ Queue</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary queue-next-btn"
+                                                                        data-queue-next="{{ item.id }}" title="Play next (insert after current track)">Next &#8594;</button>
                                                                 <button type="button" class="btn btn-sm btn-outline-secondary rename-btn"
                                                                         data-rename="{{ item.id }}" data-name="{{ item.output_path|basename }}" title="Rename file">&#9998;</button>
                                                                 <button type="button" class="btn btn-sm btn-outline-secondary tags-btn"
@@ -560,7 +562,7 @@
                                                             {% if item.format and item.format.endswith('Video') %}
                                                                 <img class="file-thumb" alt="" loading="lazy"
                                                                      src="/api/cover/{{ item.id }}?size=thumb"
-                                                                     onerror="this.remove()">
+                                                                     data-cover-thumb>
                                                             {% endif %}
                                                             {% if item.output_path %}
                                                                 <div class="small text-muted file-path mt-1" title="{{ item.output_path }}">
@@ -639,10 +641,10 @@
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     <script src="{{ url_for('static', filename='js/player.js') }}"></script>
     <script src="{{ url_for('static', filename='js/path_browser.js') }}"></script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         window.pathBrowserHome = {{ default_output_path|tojson }};
     </script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         function refreshTable() {
             if (document.hidden) {
                 // Background tab: don't hammer the server; re-check rarely
