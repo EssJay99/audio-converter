@@ -22,7 +22,7 @@ except NameError:
     SPEC_DIR = os.getcwd()
 
 helper_binaries = []
-for name in ('yt-dlp', 'ffmpeg', 'ffprobe'):
+for name in ('yt-dlp', 'ffmpeg', 'ffprobe', 'ffmpeg-arm64', 'ffmpeg-x86_64'):
     candidate = os.path.join(SPEC_DIR, 'build_helpers', name)
     if os.path.isfile(candidate):
         helper_binaries.append((candidate, '.'))

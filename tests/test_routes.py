@@ -465,6 +465,9 @@ def test_api_directories_root(client, tmp_path):
 
 
 def test_api_directories_home_expands_tilde(client):
+    import os as _os
+    _os.makedirs(_os.path.join(_os.path.expanduser('~'), 'Music'),
+                 exist_ok=True)
     resp = client.get('/api/directories', query_string={'q': '~'})
     assert resp.status_code == 200
     data = resp.get_json()
@@ -8536,3 +8539,125 @@ def test_settings_layout_sections(client):
     form = page.split('<form method="POST" action="/settings"')[1]
     form = form.split('</form>')[0]
     assert 'name="auto_update_ytdlp"' in form
+
+
+def test_resub_rejects_missing_row(client):
+    assert client.post('/api/video/999999/resub',
+                       json={'lang': 'en'}).status_code == 404
+
+
+def test_resub_rejects_non_video(client, tmp_path):
+    from app.models import ConversionHistory
+    fake = tmp_path / 'song.flac'
+    fake.write_bytes(b'fLaC')
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://example.com/nv', format='FLAC',
+            output_path=str(fake), status='completed'))
+        db.session.commit()
+        row_id = ConversionHistory.query.filter_by(
+            url='https://example.com/nv').first().id
+    assert client.post(f'/api/video/{row_id}/resub',
+                       json={'lang': 'en'}).status_code == 400
+
+
+def test_resub_rejects_missing_file(client):
+    from app.models import ConversionHistory
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://example.com/gone', format='MP4 Video',
+            output_path='/tmp/definitely-not-here.mp4', status='completed'))
+        db.session.commit()
+        row_id = ConversionHistory.query.filter_by(
+            url='https://example.com/gone').first().id
+    assert client.post(f'/api/video/{row_id}/resub',
+                       json={'lang': 'en'}).status_code == 404
+
+
+def test_resub_happy_path_writes_sidecar(client, tmp_path, monkeypatch):
+    """Stubbed yt-dlp writes a sidecar; endpoint reports it."""
+    from app.models import ConversionHistory
+    video = tmp_path / 'clip.mp4'
+    video.write_bytes(b'\x00' * 64)
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://www.youtube.com/watch?v=x', format='MP4 Video',
+            output_path=str(video), status='completed'))
+        db.session.commit()
+        row_id = ConversionHistory.query.filter_by(
+            url='https://www.youtube.com/watch?v=x').first().id
+
+    def fake_run(cmd, **kwargs):
+        stem = os.path.splitext(str(video))[0]
+        with open(stem + '.en.vtt', 'w') as f:
+            f.write('WEBVTT\n')
+        class R:
+            returncode = 0
+        return R()
+
+    import app.routes.convert as cm
+    monkeypatch.setattr(cm.subprocess, 'run', fake_run)
+    body = client.post(f'/api/video/{row_id}/resub',
+                       json={'lang': 'en'}).get_json()
+    assert body['ok'] is True
+    assert body['subtitles'][0]['lang'] == 'en'
+    assert os.path.isfile(os.path.splitext(str(video))[0] + '.en.vtt')
+
+
+def test_ffmpeg_bin_dev_run_uses_path():
+    from app.routes import convert as cm
+    assert cm._ffmpeg_bin() == 'ffmpeg'
+
+
+def test_ffmpeg_bin_frozen_non_mac_uses_path(monkeypatch):
+    import sys as _sys
+    from app.routes import convert as cm
+    monkeypatch.setattr(_sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(_sys, 'platform', 'win32')
+    assert cm._ffmpeg_bin() == 'ffmpeg'
+
+
+def test_ffmpeg_bin_picks_arch_variant(tmp_path, monkeypatch):
+    import sys as _sys
+    import platform as _platform
+    from app.routes import convert as cm
+    arm = tmp_path / 'ffmpeg-arm64'
+    arm.write_bytes(b'\x7fELF')
+    arm.chmod(0o755)
+    x86 = tmp_path / 'ffmpeg-x86_64'
+    x86.write_bytes(b'\x7fELF')
+    x86.chmod(0o755)
+    monkeypatch.setattr(_sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(_sys, 'platform', 'darwin')
+    monkeypatch.setattr(_sys, 'executable', str(tmp_path / 'AudioConverter'))
+    monkeypatch.setattr(_platform, 'machine', lambda: 'arm64')
+    assert cm._ffmpeg_bin() == str(arm)
+    monkeypatch.setattr(_platform, 'machine', lambda: 'x86_64')
+    assert cm._ffmpeg_bin() == str(tmp_path / 'ffmpeg-x86_64')
+
+
+def test_ffmpeg_bin_falls_back_without_variant(tmp_path, monkeypatch):
+    import sys as _sys
+    import platform as _platform
+    from app.routes import convert as cm
+    monkeypatch.setattr(_sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(_sys, 'platform', 'darwin')
+    monkeypatch.setattr(_sys, 'executable', str(tmp_path / 'AudioConverter'))
+    monkeypatch.setattr(_platform, 'machine', lambda: 'arm64')
+    assert cm._ffmpeg_bin() == 'ffmpeg'
+
+
+def test_history_renders_resub_button_for_videos(client, tmp_path):
+    from app.models import ConversionHistory
+    with client.application.app_context():
+        db.session.add(ConversionHistory(
+            url='https://example.com/v', format='MP4 Video',
+            output_path=str(tmp_path / 'clip.mp4'), status='completed'))
+        db.session.add(ConversionHistory(
+            url='https://example.com/a', format='FLAC',
+            output_path=str(tmp_path / 'song.flac'), status='completed'))
+        db.session.commit()
+    page = client.get('/history').data.decode('utf-8')
+    assert page.count('data-resub=') == 1
+    assert 'id="resubModal"' in page
+    assert 'id="resubFetch"' in page

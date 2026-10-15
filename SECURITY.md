@@ -120,9 +120,11 @@ signing key you generate yourself, and GitHub Actions secrets are free.
 1. Generate a keypair (either tool works; they use the same format):
    - `minisign -G -p release-signing.pub -s release-signing.key`, or
    - `python scripts/sign_release.py --generate` (prints next steps).
-2. Put the **public** half in `src/release-signing-pubkey.txt`, replacing
-   the placeholder, and commit it. The app and `verify-release` check
-   signatures against exactly this file.
+2. Put the **public** half in `src/release-signing-pubkey.txt` and commit
+   it. Do this even though the file already contains a key: that key was
+   generated during development and its private half was never stored
+   anywhere retrievable, so it must be treated as untrusted. The app and
+   `verify-release` check signatures against exactly this file.
 3. Store the **private** half as a GitHub Actions secret named
    `AUDIO_CONVERTER_SIGNING_KEY_B64`, containing the base64 encoding of
    the raw 32-byte secret key:

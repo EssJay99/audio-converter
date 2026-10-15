@@ -1164,7 +1164,7 @@ def _ensure_folder_art(parent):
         if not os.path.isfile(child.output_path):
             return
         res = subprocess.run(
-            ['ffmpeg', '-y', '-v', 'error', '-i', child.output_path,
+            [_ffmpeg_bin(), '-y', '-v', 'error', '-i', child.output_path,
              '-an', '-vcodec', 'copy', target],
             capture_output=True, text=True, timeout=30)
         if res.returncode != 0 or not os.path.isfile(target):
@@ -2451,7 +2451,7 @@ def _write_tags(path, tags):
         suffix=os.path.splitext(path)[1] or '.tmp')
     os.close(fd)
     try:
-        args = ['ffmpeg', '-y', '-i', path, '-map', '0', '-c', 'copy']
+        args = [_ffmpeg_bin(), '-y', '-i', path, '-map', '0', '-c', 'copy']
         for key, value in clean.items():
             if value:
                 args += ['-metadata', f'{key}={value}']
@@ -2773,7 +2773,7 @@ def cover_art(conversion_id):
     except OSError:
         fresh = False
     if not fresh:
-        extract = ['ffmpeg', '-y', '-v', 'error', '-i', history.output_path, '-an']
+        extract = [_ffmpeg_bin(), '-y', '-v', 'error', '-i', history.output_path, '-an']
         if thumb:
             extract += ['-vf', 'scale=160:-1', '-vframes', '1']
         else:
@@ -2789,7 +2789,7 @@ def cover_art(conversion_id):
             if thumb:
                 scaled = os.path.join(cache_dir, f'{history.id}-thumb.jpg')
                 thumb_ok = subprocess.run(
-                    ['ffmpeg', '-y', '-v', 'error', '-i', sidecar,
+                    [_ffmpeg_bin(), '-y', '-v', 'error', '-i', sidecar,
                      '-vf', 'scale=160:-1', '-vframes', '1', scaled],
                     capture_output=True, text=True, timeout=30)
                 if thumb_ok.returncode == 0 and os.path.isfile(scaled):
@@ -2802,7 +2802,7 @@ def cover_art(conversion_id):
         if ext in BROWSER_VIDEO_EXTS + ('mkv', 'mov', 'avi'):
             frame = os.path.join(
                 cache_dir, f'{history.id}-frame{"-thumb" if thumb else ""}.jpg')
-            grab = ['ffmpeg', '-y', '-v', 'error', '-i', history.output_path]
+            grab = [_ffmpeg_bin(), '-y', '-v', 'error', '-i', history.output_path]
             if thumb:
                 grab += ['-vf', 'scale=160:-1']
             grab += ['-vframes', '1', frame]
@@ -3482,7 +3482,7 @@ def convert_audio_file(input_file, format_type, output_file, meta, cover_file,
         return convert_video_file(input_file, format_type, output_file, meta,
                                   job=job, subs=subs_here,
                                   cover_file=cover_file)
-    args = ['ffmpeg', '-y']
+    args = [_ffmpeg_bin(), '-y']
     if cover_file and format_type in COVER_FORMATS:
         args += ['-i', input_file, '-i', cover_file]
     else:
@@ -3548,7 +3548,7 @@ def convert_video_file(input_file, format_type, output_file, meta, job=None,
     """
     fmt = VALID_FORMATS[format_type]
     options = _job_options(job)
-    args = ['ffmpeg', '-y', '-i', input_file]
+    args = [_ffmpeg_bin(), '-y', '-i', input_file]
     # Extra inputs are numbered from 1; explicit -map keeps selection
     # deterministic (ffmpeg defaults would silently drop subtitles).
     extra_maps = []
@@ -3572,7 +3572,7 @@ def convert_video_file(input_file, format_type, output_file, meta, job=None,
         # the main file's video stream count (usually 1).
         try:
             probe = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-i', input_file],
+                [_ffmpeg_bin(), '-hide_banner', '-i', input_file],
                 capture_output=True, text=True, timeout=20)
             cover_vstream = len(re.findall(
                 r'(?im)^\s*Stream #\d+:\d+.*?:\s*Video\s*:',
@@ -4442,7 +4442,7 @@ def _prune_playables():
 def _remux_proxy(src, dest):
     """Fast container swap for already-compatible streams."""
     res = subprocess.run(
-        ['ffmpeg', '-y', '-v', 'error', '-i', src, '-c', 'copy',
+        [_ffmpeg_bin(), '-y', '-v', 'error', '-i', src, '-c', 'copy',
          '-movflags', '+faststart', dest],
         capture_output=True, text=True, timeout=300)
     return res.returncode == 0 and os.path.isfile(dest)
@@ -4458,7 +4458,7 @@ def _transcode_proxy(row_id, src, dest, duration):
         # muxer from the name and rejects unknown ones like `.part`.
         tmp = dest + '.tmp.mp4'
         proc = subprocess.Popen(
-            ['ffmpeg', '-y', '-v', 'error', '-i', src,
+            [_ffmpeg_bin(), '-y', '-v', 'error', '-i', src,
              '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
              '-c:a', 'aac', '-movflags', '+faststart',
              '-progress', 'pipe:1', '-nostats', tmp],
@@ -4594,7 +4594,7 @@ def _has_video_stream(path):
     """True when ffmpeg sees a video stream in the file."""
     try:
         res = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-i', path],
+            [_ffmpeg_bin(), '-hide_banner', '-i', path],
             capture_output=True, text=True, timeout=20)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -4680,15 +4680,39 @@ def _adopt_candidate(candidate, temp_audio):
 
 def check_ffmpeg():
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+        subprocess.run([_ffmpeg_bin(), '-version'], capture_output=True, timeout=5)
         return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
+def _ffmpeg_bin():
+    """ffmpeg executable, preferring the matching arch variant in bundles.
+
+    Universal macOS builds ship `ffmpeg-arm64` + `ffmpeg-x86_64` (a single
+    static build can't cover both arches). When frozen on macOS, pick the
+    variant matching this machine; otherwise fall back to PATH lookup
+    (dev runs, single-arch bundles, other platforms).
+    """
+    if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
+        import platform as _platform
+        wanted = {'arm64': 'ffmpeg-arm64',
+                  'x86_64': 'ffmpeg-x86_64'}.get(_platform.machine())
+        if wanted:
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            for base in (exe_dir, os.path.join(exe_dir, '_internal')):
+                candidate = os.path.join(base, wanted)
+                try:
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        return candidate
+                except OSError:
+                    continue
+    return 'ffmpeg'
+
+
 def _ffmpeg_version():
     try:
-        res = subprocess.run(['ffmpeg', '-version'], capture_output=True,
+        res = subprocess.run([_ffmpeg_bin(), '-version'], capture_output=True,
                              text=True, timeout=10)
         if res.returncode == 0 and res.stdout:
             return res.stdout.strip().split('\n')[0][:120]
@@ -5577,7 +5601,7 @@ def _has_embedded_art(path):
     os.close(fd)
     try:
         res = subprocess.run(
-            ['ffmpeg', '-y', '-v', 'error', '-i', path, '-an',
+            [_ffmpeg_bin(), '-y', '-v', 'error', '-i', path, '-an',
              '-vcodec', 'copy', tmp],
             capture_output=True, text=True, timeout=30)
         return (res.returncode == 0 and os.path.isfile(tmp)
@@ -5863,7 +5887,7 @@ def _measure_lufs(path):
     decode failure.
     """
     proc = subprocess.run(
-        ['ffmpeg', '-hide_banner', '-nostats', '-i', path,
+        [_ffmpeg_bin(), '-hide_banner', '-nostats', '-i', path,
          '-filter_complex', 'ebur128=peak=-1',
          '-f', 'null', '-'],
         capture_output=True, text=True, timeout=180,
@@ -5909,7 +5933,7 @@ def _apply_gain(path, gain_db):
     elif codec == 'aac':
         bitrate = '-b:a 256k'
     tmp = path + '.normalize.tmp' + out_ext
-    cmd = ['ffmpeg', '-y', '-hide_banner', '-nostats', '-i', path,
+    cmd = [_ffmpeg_bin(), '-y', '-hide_banner', '-nostats', '-i', path,
            '-vn', '-map', '0:a?', '-map', '0:v?', '-map', '0:s?',
            '-c:a', codec]
     if bitrate:
@@ -7756,7 +7780,7 @@ def _ffmpeg_file_info(path):
     """
     try:
         res = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-i', path],
+            [_ffmpeg_bin(), '-hide_banner', '-i', path],
             capture_output=True, text=True, timeout=20,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -7788,7 +7812,7 @@ def _file_chapters(path):
     """
     try:
         res = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-i', path],
+            [_ffmpeg_bin(), '-hide_banner', '-i', path],
             capture_output=True, text=True, timeout=20,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -8530,9 +8554,9 @@ def api_extract_audio(conversion_id):
         out = os.path.splitext(src)[0] + f' ({counter}).flac'
         counter += 1
     attempts = [
-        ['ffmpeg', '-y', '-v', 'error', '-i', src,
+        [_ffmpeg_bin(), '-y', '-v', 'error', '-i', src,
          '-map', '0:a:0', '-c:a', 'copy', '-f', 'flac', out],
-        ['ffmpeg', '-y', '-v', 'error', '-i', src,
+        [_ffmpeg_bin(), '-y', '-v', 'error', '-i', src,
          '-map', '0:a:0', '-c:a', 'flac', out],
     ]
     last_err = ''
@@ -8649,7 +8673,7 @@ def _stream_codecs(path):
     """First video/audio codec names in a file, via `ffmpeg -i`."""
     try:
         res = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-i', path],
+            [_ffmpeg_bin(), '-hide_banner', '-i', path],
             capture_output=True, text=True, timeout=20)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return {}, {}
@@ -8666,7 +8690,7 @@ def _source_audio(path):
     """(codec, kbps) of the first audio stream, for passthrough decisions."""
     try:
         res = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-i', path],
+            [_ffmpeg_bin(), '-hide_banner', '-i', path],
             capture_output=True, text=True, timeout=20)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return '', 0
@@ -8762,7 +8786,7 @@ def _is_valid_audio(path):
         if os.path.getsize(path) == 0:
             return False
         res = subprocess.run(
-            ['ffmpeg', '-v', 'error', '-i', path, '-t', '120', '-f', 'null', '-'],
+            [_ffmpeg_bin(), '-v', 'error', '-i', path, '-t', '120', '-f', 'null', '-'],
             capture_output=True, text=True, timeout=150,
         )
         return res.returncode == 0

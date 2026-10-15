@@ -554,6 +554,8 @@
                                                                 {% if item_ext in ['mp4', 'webm', 'mkv', 'mov', 'avi', 'm4v'] %}
                                                                 <button type="button" class="btn btn-sm btn-outline-secondary extract-btn"
                                                                         data-extract="{{ item.id }}" title="Save just the audio as a lossless FLAC next to this video">Audio</button>
+                                                                <button type="button" class="btn btn-sm btn-outline-secondary resub-btn"
+                                                                        data-resub="{{ item.id }}" title="Re-fetch subtitles for this video (clears old sidecars first)">Subs</button>
                                                                 {% endif %}
                                                                 <button type="button" class="btn btn-sm btn-outline-danger delete-btn"
                                                                         data-delete="{{ item.id }}" title="Delete file from disk and remove from history">Delete</button>
@@ -774,6 +776,42 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="modal fade" id="resubModal" tabindex="-1" aria-labelledby="resubModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="resubModalLabel">Fetch subtitles</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small">Existing subtitle files for this video are removed first, then fresh ones are fetched. Leave blank to use your preferred language.</p>
+                    <label for="resubLang" class="form-label">Language</label>
+                    <select class="form-select" id="resubLang">
+                        <option value="">Preferred language</option>
+                        <option value="en">English</option>
+                        <option value="de">Deutsch</option>
+                        <option value="es">Español</option>
+                        <option value="fr">Français</option>
+                        <option value="pt">Português</option>
+                        <option value="it">Italiano</option>
+                        <option value="nl">Nederlands</option>
+                        <option value="pl">Polski</option>
+                        <option value="ja">日本語</option>
+                        <option value="ko">한국어</option>
+                        <option value="zh-Hans">简体中文</option>
+                        <option value="ar">العربية</option>
+                        <option value="hi">हिन्दी</option>
+                        <option value="ru">Русский</option>
+                        <option value="tr">Türkçe</option>
+                    </select>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="resubFetch">Fetch</button>
                 </div>
             </div>
         </div>

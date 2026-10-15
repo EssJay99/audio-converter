@@ -41,6 +41,19 @@ GitHub Releases page for actual version tags.
   clobbering changes silently.
 - SECURITY.md now lives in the repo with a private disclosure channel
   and a 30-day response SLA.
+- Release CI now signs `SHA256SUMS.txt` (new `AUDIO_CONVERTER_SIGNING_KEY_B64`
+  secret) and refuses to publish unsigned; `verify-release` checks the
+  minisign signature too, and `sign_release.py` learned `--generate`.
+- Rate limits now cover the convert form (flash + redirect instead of a
+  raw JSON page), `/api/verify-files`, and `/api/subs/backfill`.
+- Content Security Policy with per-request nonces on all inline scripts;
+  the last two inline handlers were replaced with delegated listeners.
+- Scheduler, tag-backfill, and verify loops log failures instead of
+  swallowing them, and the freshest background failure surfaces in
+  `/api/health` and the home-page banner.
+- Proxy lookup fails closed: an unreadable proxy setting refuses the
+  connection instead of silently going direct. Also fixed a hostname
+  bug where `lstrip('www.')` mangled hosts like `wordpress.com`.
 
 ### Added
 
@@ -68,8 +81,55 @@ GitHub Releases page for actual version tags.
   visited.
 - **Migration banner**: appears once when the database is upgraded by
   this build.
+- **Faceted history search**: server-side text/status/format/source/age
+  filters with counts, deep-linkable URLs, and pagination that preserves
+  filters.
+- **Folder drops**: drag a whole folder (or use the folder picker) to
+  queue every audio/video file inside it, recursively.
+- **Bulk loudness normalize**: EBU R128 re-encode of selected tracks to
+  −16 LUFS behind a typed confirmation.
+- **Tag tidy**: whitespace cleanup, case-merge of artist/album names,
+  optional rename-to-tags, library-wide or per-selection.
+- **Per-service proxies**: optional per-host proxy map with subdomain
+  matching, falling back to the global proxy.
+- **Per-video subtitle re-fetch**: per-row "Subs" button with a language
+  picker; old sidecars are cleared first.
+- **Artist/album M3U export**: new endpoint plus an Export button on
+  library drill-downs (album-scoped when viewing an album).
+- **EQ presets**: named server-side presets saved from the sliders,
+  Alt-click to delete.
+- **Mute on start** and server-persisted **sleep fade length**.
+- **M3U import**: load an `.m3u` file into a new user playlist, matched
+  against the library by path then filename.
+- **Pinned playlists**, **lyrics pin**, **relative "played x ago"**
+  timestamps, **source badges** on library cards.
+- **Player hardening**: dead queue entries are skipped instead of
+  stalling; auto-pause on tab hide; `/` focuses search; theater speed
+  control synced both ways; sleep timer shows a live countdown.
+- **Per-artist M3U export** with relative paths and optional `.nfo`
+  sidecars.
+- **Bandwidth schedule**: weekly day/hour caps that override off-peak,
+  then the flat limit.
+- **Downloader health probe**: daily `--skip-download` resolve of a
+  stable video; failures raise a banner before your next real download.
+- **Subscription backoff**: failing feeds double their check interval
+  (capped at a week) with a "backing off" note in the UI; manual
+  "Check now" resets.
+- **Tidal login button** is always visible, with contextual hints per
+  state.
 
 ### Improved
+
+- **Settings reorganization**: sticky save bar with section pills, cards
+  regrouped (Library, Audio, Video, Downloads, Imports, Desktop, Tools).
+  Also fixed: the auto-update switch sat outside the form and could never
+  save, and the backup link was duplicated.
+- **Home/History split**: History holds only conversion history (plus an
+  empty state); Home keeps the convert forms, stats, and follows.
+- **Restore validation**: `PRAGMA quick_check`, required-tables check,
+  and a smoke read run before the database swap.
+- Cover art is content-hash deduplicated across tracks, with prune logic
+  that never evicts a hash still referenced.
 
 - yt-dlp auto-update falls back to PyPI when GitHub's API is rate-
   limited; SHA-256 verification runs on whichever source advertised the
@@ -82,6 +142,17 @@ GitHub Releases page for actual version tags.
 
 ### Fixed
 
+- Test suite can no longer write into the real `~/Audio-Converter/output`
+  folder: the suite now runs under a throwaway HOME, after an adopt
+  test was found dropping one stub file per run into the developer's
+  library.
+
+- `sign_release.py` no longer `.strip()`s raw key bytes (a trailing
+  `0x0a` byte used to corrupt generated keys).
+- Test isolation overhaul: workers stay paused suite-wide, pool threads
+  get their own app contexts (also fixing per-service proxies inside
+  parallel import searches in production), and secret-key tests run in
+  subprocesses instead of reimporting the app.
 - A user-submitted URL that 302's to a private address is now rejected
   *before* yt-dlp runs (SSRF defence).
 - The settings save no longer clobbers a newer tab's edits thanks to

@@ -1,79 +1,83 @@
 #!/bin/bash
-# Build a universal (arm64 + x86_64) macOS bundle.
+# Build a universal2 (arm64 + x86_64) macOS bundle in ONE PyInstaller pass.
 #
-# Cross-arch PyInstaller needs each arch's Python. On Apple Silicon we
-# use `arch -x86_64` to run an Intel Python under Rosetta; on Intel
-# hosts we use `arch -arm64` to invoke an arm64 Python (e.g. from
-# Homebrew at /opt/homebrew/opt/python@3.12/bin/python3).
+# This works only with a universal2 Python interpreter (e.g. a python.org
+# macOS installer, whose framework builds ship both arches): PyInstaller
+# cannot cross-compile from a single-arch interpreter. Both ffmpeg arches
+# are bundled beside the app and picked at runtime by platform.machine().
 #
-# Usage:  bash scripts/build_macos_universal.sh
-# Output: dist/AudioConverter.app  (universal Mach-O)
+# Usage:
+#   PYTHON_BIN=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+#       bash scripts/build_macos_universal.sh
+#   # or rely on ./.venv-universal (created below from that interpreter)
 #
-# Notes:
-# - Set HOMEBREW_PYTHON_X86 if your x86_64 Python lives outside
-#   /usr/local/bin/python3 or /Library/Frameworks/Python.framework.
-# - Set HOMEBREW_PYTHON_ARM64 if your arm64 Python lives outside
-#   /opt/homebrew/opt/python@3.12/bin/python3.
-# - Both Python interpreters need `pyinstaller` installed.
+# Output: dist/AudioConverter.app  (universal Mach-O, lipo-verified)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Detect host arch — we build the *other* arch under Rosetta/arch(1).
-HOST_ARCH="$(uname -m)"
-case "$HOST_ARCH" in
-    arm64)  ARM_BIN=""; X86_BIN="${HOMEBREW_PYTHON_X86:-/usr/local/bin/python3}" ;;
-    x86_64) ARM_BIN="${HOMEBREW_PYTHON_ARM64:-/opt/homebrew/opt/python@3.12/bin/python3}"; X86_BIN="" ;;
-    *)
-        echo "error: unsupported host arch: $HOST_ARCH" >&2
-        exit 1 ;;
-esac
-OTHER_ARCH="x86_64"
-[[ "$HOST_ARCH" == "x86_64" ]] && OTHER_ARCH="arm64"
-
-mkdir -p dist_universal build_universal
-rm -rf build_universal/* dist_universal/*
-
-build_one() {
-    local arch="$1"
-    local py="$2"
-    echo "==> building for $arch using $py"
-    if [ ! -x "$py" ]; then
-        echo "error: $py not found" >&2
-        exit 1
+PY_CANDIDATES=(
+    "${PYTHON_BIN:-}"
+    "$ROOT/.venv-universal/bin/python"
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+)
+PY=""
+for candidate in "${PY_CANDIDATES[@]}"; do
+    [ -n "$candidate" ] || continue
+    if [ -x "$candidate" ]; then
+        PY="$candidate"
+        break
     fi
-    local venv="build_universal/venv-$arch"
-    "$py" -m venv "$venv"
-    "$venv/bin/pip" install --quiet --upgrade pip
-    "$venv/bin/pip" install --quiet -r requirements.txt pyinstaller
-    bash scripts/build_macos.sh  # runs pytest + pyinstaller
-    # Move the built .app out of dist/ to a per-arch location.
-    rm -rf "dist_universal/AudioConverter-$arch.app"
-    cp -R dist/AudioConverter.app "dist_universal/AudioConverter-$arch.app"
-}
-
-if [ -n "$ARM_BIN" ]; then
-    build_one arm64 "$ARM_BIN"
-fi
-if [ -n "$X86_BIN" ]; then
-    build_one x86_64 "$X86_BIN"
-fi
-
-# Locate the Mach-O binaries inside each arch's .app.
-HOST_APP="$ROOT/dist_universal/AudioConverter-$HOST_ARCH.app"
-OTHER_APP="$ROOT/dist_universal/AudioConverter-$OTHER_ARCH.app"
-HOST_BIN="$HOST_APP/Contents/MacOS/AudioConverter"
-OTHER_BIN="$OTHER_APP/Contents/MacOS/AudioConverter"
-if [ ! -x "$HOST_BIN" ] || [ ! -x "$OTHER_BIN" ]; then
-    echo "error: one of the arch builds failed — see $HOST_APP / $OTHER_APP" >&2
+done
+if [ -z "$PY" ]; then
+    echo "error: no universal2-capable Python found." >&2
+    echo "Install a python.org macOS build (universal2) or set PYTHON_BIN." >&2
     exit 1
 fi
+REAL_PY="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$PY" 2>/dev/null || echo "$PY")"
+if ! lipo -archs "$REAL_PY" 2>/dev/null | grep -q "x86_64" || \
+   ! lipo -archs "$REAL_PY" 2>/dev/null | grep -q "arm64"; then
+    echo "error: $PY is not universal2 (lipo: $(lipo -archs "$REAL_PY" 2>/dev/null || echo unknown))." >&2
+    echo "PyInstaller --target-arch universal2 needs a universal2 interpreter" >&2
+    echo "(python.org macOS installers qualify; Homebrew Pythons do not)." >&2
+    exit 1
+fi
+echo "==> universal2 interpreter: $PY"
 
-# lipo the two binaries into one universal.
-echo "==> lipo -create $HOST_BIN $OTHER_BIN"
-lipo -create -arch "$HOST_ARCH" "$HOST_BIN" -arch "$OTHER_ARCH" "$OTHER_BIN" \
-    -output "$HOST_BIN"
-file "$HOST_BIN"
-echo "==> universal build ready at $HOST_APP"
-echo "    Run bash scripts/build_dmg.sh for the installer disk image."
+if [ ! -x "$ROOT/.venv-universal/bin/python" ]; then
+    echo "==> creating .venv-universal"
+    "$PY" -m venv "$ROOT/.venv-universal"
+    "$ROOT/.venv-universal/bin/pip" install --quiet --upgrade pip
+    "$ROOT/.venv-universal/bin/pip" install --quiet \
+        -r requirements.txt -r requirements-desktop.txt pyinstaller pytest
+fi
+
+# Upstream yt-dlp_macos must itself be fat, or Intel Macs get a broken helper.
+if [ -x build_helpers/yt-dlp ]; then
+    if ! lipo -archs build_helpers/yt-dlp 2>/dev/null | grep -q "x86_64" || \
+       ! lipo -archs build_helpers/yt-dlp 2>/dev/null | grep -q "arm64"; then
+        echo "==> cached yt-dlp is single-arch; re-downloading"
+        rm -f build_helpers/yt-dlp
+    fi
+fi
+
+PYTHON_BIN="$ROOT/.venv-universal/bin/python" UNIVERSAL=1 \
+    bash scripts/build_macos.sh
+
+APP_BIN="$ROOT/dist/AudioConverter.app/Contents/MacOS/AudioConverter"
+echo "==> verifying universal binary"
+ARCHS="$(lipo -archs "$APP_BIN")"
+echo "    $APP_BIN: $ARCHS"
+if [[ "$ARCHS" != *"x86_64"* || "$ARCHS" != *"arm64"* ]]; then
+    echo "error: bundle is not universal2 ($ARCHS)" >&2
+    exit 1
+fi
+for helper in ffmpeg-arm64 ffmpeg-x86_64; do
+    if [ ! -x "build_helpers/$helper" ]; then
+        echo "error: missing build_helpers/$helper" >&2
+        exit 1
+    fi
+done
+echo "==> universal build OK; run bash scripts/build_dmg.sh for the disk image."

@@ -582,6 +582,48 @@ document.addEventListener('click', (e) => {
         e.preventDefault();
         return;
     }
+    const resubBtn = e.target.closest('[data-resub]');
+    if (resubBtn) {
+        if (typeof bootstrap === 'undefined') {
+            toast('Subtitle fetch unavailable.', 'danger');
+            e.preventDefault();
+            return;
+        }
+        const modalEl = document.getElementById('resubModal');
+        if (!modalEl) {
+            e.preventDefault();
+            return;
+        }
+        document.getElementById('resubLang').value = '';
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        document.getElementById('resubFetch').onclick = () => {
+            const btn = document.getElementById('resubFetch');
+            btn.disabled = true;
+            fetch('/api/video/' + resubBtn.dataset.resub + '/resub', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
+                body: JSON.stringify({ lang: document.getElementById('resubLang').value }),
+            })
+                .then((r) => r.json())
+                .then((data) => {
+                    btn.disabled = false;
+                    if (!data.ok) {
+                        toast(data.message || 'Could not fetch subtitles.', 'danger');
+                        return;
+                    }
+                    modal.hide();
+                    const langs = (data.subtitles || []).map((s) => s.lang).join(', ');
+                    toast(langs ? ('Subtitles updated (' + langs + ').') : 'Subtitles updated.', 'success');
+                })
+                .catch(() => {
+                    btn.disabled = false;
+                    toast('Could not fetch subtitles.', 'danger');
+                });
+        };
+        modal.show();
+        e.preventDefault();
+        return;
+    }
     const missesBtn = e.target.closest('[data-retry-misses]');
     if (missesBtn) {
         missesBtn.disabled = true;

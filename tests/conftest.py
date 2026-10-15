@@ -11,6 +11,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 _test_db_dir = tempfile.mkdtemp(prefix='audio-converter-tests-')
 os.environ['AUDIO_CONVERTER_DB_PATH'] = os.path.join(_test_db_dir, 'test.db')
 os.environ['AUDIO_CONVERTER_SECRET_KEY'] = 'test-secret-key'
+# Redirect HOME for the same reason: default_output_path(), the path
+# browser's home root, autostart slots, and ~/Downloads all derive from
+# expanduser('~'). Without this, any test that omits an explicit
+# output path (e.g. an adopt/upload test with no settings row) writes
+# into the developer's REAL ~/Audio-Converter/output — one stray file
+# per suite run. Everything resolves under a throwaway dir instead.
+_test_home = tempfile.mkdtemp(prefix='audio-converter-test-home-')
+os.environ['HOME'] = _test_home
 
 from app import app, db  # noqa: E402
 from app.models import ConversionHistory  # noqa: E402

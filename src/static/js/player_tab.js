@@ -502,6 +502,26 @@
                     if (window.AudioPlayer) window.AudioPlayer.playItems(items, 0, name);
                 });
                 groups.appendChild(playAll);
+                var exportBtn = document.createElement('button');
+                exportBtn.type = 'button';
+                exportBtn.className = 'btn btn-sm btn-outline-secondary mb-2 ms-2';
+                exportBtn.textContent = 'Export .m3u';
+                exportBtn.title = 'Download this ' + by + ' as an .m3u playlist';
+                exportBtn.addEventListener('click', function () {
+                    // For the artist view the export covers the whole artist;
+                    // for an album drill-down it is scoped to that album.
+                    var artist = by === 'album'
+                        ? ((items[0] && items[0].tag_artist) || '')
+                        : name;
+                    if (!artist) {
+                        if (typeof toast === 'function') toast('No artist tag to export by.', 'info');
+                        return;
+                    }
+                    var url = '/api/export/artist?name=' + encodeURIComponent(artist);
+                    if (by === 'album') url += '&scope=' + encodeURIComponent('album:' + name);
+                    window.location.href = url;
+                });
+                groups.appendChild(exportBtn);
                 var list = document.createElement('ul');
                 list.className = 'list-group list-group-flush tab-queue';
                 items.forEach(function (it, idx) {

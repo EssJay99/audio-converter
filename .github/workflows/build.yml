@@ -74,7 +74,7 @@ jobs:
       - name: Test suite
         run: python -m pytest tests/ -q
 
-      - name: Build (macOS)
+      - name: Build (macOS, universal2)
         if: runner.os == 'macOS'
         env:
           # Absent until the repo owner adds a Developer ID: without them
@@ -83,10 +83,16 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          # setup-python/Homebrew Pythons are single-arch, but a
+          # universal2 bundle needs a universal2 interpreter, so install
+          # python.org's (universal2) build. Pinned patch: bump together
+          # with the setup-python version above.
+          PYTHON_MACOS_VERSION: '3.12.10'
         run: |
-          python -m venv .venv
-          .venv/bin/pip install -r requirements.txt pyinstaller
-          bash scripts/build_macos.sh
+          curl -sL --max-time 300 -o /tmp/python.pkg \
+            "https://www.python.org/ftp/python/${PYTHON_MACOS_VERSION}/python-${PYTHON_MACOS_VERSION}-macos11.pkg"
+          sudo installer -pkg /tmp/python.pkg -target /
+          bash scripts/build_macos_universal.sh
           bash scripts/build_dmg.sh
 
       - name: Build (Linux)

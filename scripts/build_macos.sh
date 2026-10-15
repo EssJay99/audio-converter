@@ -15,7 +15,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-PY="$ROOT/.venv/bin/python"
+# PYTHON_BIN overrides the interpreter (universal builds point at a
+# universal2 Python); UNIVERSAL=1 fetches both ffmpeg arches and tells
+# PyInstaller to emit a universal2 binary (requires that interpreter
+# to be universal2 itself — plain arm64/x86_64 Pythons can't do this).
+PY="${PYTHON_BIN:-$ROOT/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
     echo "error: $PY not found; create the venv first" >&2
     exit 1
@@ -35,7 +39,34 @@ fi
 
 # Static ffmpeg binary so users never touch the command line.
 # (ffprobe is not needed: the app parses `ffmpeg -i` output instead.)
-if [ ! -x build_helpers/ffmpeg ]; then
+# UNIVERSAL=1 fetches both arches as ffmpeg-arm64/ffmpeg-x86_64 (the app
+# picks at runtime); otherwise a single host-arch `ffmpeg` is fetched.
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+    if [ ! -x build_helpers/ffmpeg-arm64 ]; then
+        echo "==> downloading static ffmpeg (arm64)"
+        curl -sL --max-time 180 -o build_helpers/ffmpeg-arm64.zip \
+            "https://www.osxexperts.net/ffmpeg80arm.zip"
+        python3 -c "import zipfile; zipfile.ZipFile('build_helpers/ffmpeg-arm64.zip').extract('ffmpeg', 'build_helpers/tmp_ff_arm')"
+        mv build_helpers/tmp_ff_arm/ffmpeg build_helpers/ffmpeg-arm64
+        rm -rf build_helpers/tmp_ff_arm build_helpers/ffmpeg-arm64.zip
+        chmod +x build_helpers/ffmpeg-arm64
+        file build_helpers/ffmpeg-arm64
+    else
+        echo "==> ffmpeg arm64 helper already present"
+    fi
+    if [ ! -x build_helpers/ffmpeg-x86_64 ]; then
+        echo "==> downloading static ffmpeg (x86_64)"
+        curl -sL --max-time 180 -o build_helpers/ffmpeg-x86_64.zip \
+            "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip"
+        python3 -c "import zipfile; zipfile.ZipFile('build_helpers/ffmpeg-x86_64.zip').extract('ffmpeg', 'build_helpers/tmp_ff_x86')"
+        mv build_helpers/tmp_ff_x86/ffmpeg build_helpers/ffmpeg-x86_64
+        rm -rf build_helpers/tmp_ff_x86 build_helpers/ffmpeg-x86_64.zip
+        chmod +x build_helpers/ffmpeg-x86_64
+        file build_helpers/ffmpeg-x86_64
+    else
+        echo "==> ffmpeg x86_64 helper already present"
+    fi
+elif [ ! -x build_helpers/ffmpeg ]; then
     echo "==> downloading static ffmpeg for $(uname -m)"
     if [ "$(uname -m)" = "arm64" ]; then
         curl -sL --max-time 180 -o build_helpers/ffmpeg.zip \
@@ -57,8 +88,14 @@ echo "==> running test suite before packaging"
 "$PY" -m pytest tests/ -q
 
 echo "==> building with PyInstaller"
-"$PY" -m PyInstaller audio-converter.spec \
-    --noconfirm --clean --distpath "$ROOT/dist" --workpath "$ROOT/build"
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+    "$PY" -m PyInstaller audio-converter.spec \
+        --noconfirm --clean --target-arch universal2 \
+        --distpath "$ROOT/dist" --workpath "$ROOT/build"
+else
+    "$PY" -m PyInstaller audio-converter.spec \
+        --noconfirm --clean --distpath "$ROOT/dist" --workpath "$ROOT/build"
+fi
 
 BIN="$ROOT/dist/AudioConverter/AudioConverter"
 APP_BIN="$ROOT/dist/AudioConverter.app/Contents/MacOS/AudioConverter"
