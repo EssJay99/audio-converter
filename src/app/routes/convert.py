@@ -320,6 +320,12 @@ def _worker_loop():
                         _convert_local_job(job)
                         continue
 
+                    # Stagger remote starts so N workers don't open N
+                    # yt-dlp sessions in the same second (the pattern
+                    # that gets IPs throttled). Per-host buckets keep a
+                    # mixed queue flowing on both sites.
+                    _stagger_start(job.url)
+
                     fmt_key = LABEL_TO_KEY.get(job.format)
                     if os.path.isdir(job.output_path):
                         output_dir = job.output_path
@@ -4008,6 +4014,50 @@ _YTDLP_POLITENESS_FLAGS = [
     '--sleep-subtitles', '1',
     '--retry-sleep', 'exp=1:20',
 ]
+
+
+def _stagger_wait(last_start, now, base_seconds):
+    """Seconds to wait before starting a download, given the bucket's last
+    start time. Pure math (no sleeping) so tests can assert the spacing
+    without waiting out real delays."""
+    if base_seconds <= 0:
+        return 0.0
+    return max(0.0, (last_start + base_seconds) - now)
+
+
+_start_gate_lock = threading.Lock()
+_start_gate_last = {}
+
+
+def _stagger_start(url):
+    """Space out remote download starts per host, with jitter.
+
+    Each host bucket remembers its last start; a worker waits until at
+    least `stagger_seconds` (+ up to that much again, randomly) has
+    passed before beginning. 0 disables the gate entirely. Sleeps in
+    short bursts so pause/skip stay responsive mid-wait.
+    """
+    try:
+        settings = UserSettings.query.first()
+        base = int(getattr(settings, 'stagger_seconds', 0) or 0)
+    except Exception:
+        return
+    if base <= 0:
+        return
+    try:
+        host = (urlparse(url or '').hostname or '').lower()
+    except Exception:
+        host = ''
+    import random as _random
+    delay = base + _random.uniform(0, base)
+    while True:
+        with _start_gate_lock:
+            wait = _stagger_wait(
+                _start_gate_last.get(host, 0.0), time.monotonic(), delay)
+            if wait <= 0:
+                _start_gate_last[host] = time.monotonic()
+                return
+        time.sleep(min(wait, 0.5))
 
 
 def _ytdlp_net_args():

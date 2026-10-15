@@ -43,14 +43,29 @@
             {% endif %}
         {% endwith %}
 
-        <form method="POST" action="/settings">
+        <form method="POST" action="/settings" id="settingsForm">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="updated_at" value="{{ updated_at }}">
 
-            <div class="row">
+            <div class="settings-bar shadow-sm" role="navigation" aria-label="Settings sections">
+                <strong>Settings</strong>
+                <nav class="settings-nav" aria-label="Jump to section">
+                    <a href="#sec-library">Library</a>
+                    <a href="#sec-audio">Audio</a>
+                    <a href="#sec-video">Video</a>
+                    <a href="#sec-downloads">Downloads</a>
+                    <a href="#sec-imports">Imports</a>
+                    <a href="#sec-desktop">Desktop</a>
+                    <a href="#sec-tools">Tools</a>
+                </nav>
+                <button type="submit" class="btn btn-primary btn-sm">Save Settings</button>
+            </div>
+
+            <div class="row" id="sec-library">
                 <div class="col-md-12">
                     <div class="card p-4 shadow-sm border-0 rounded">
-                        <h3>Default Output Path</h3>
+                        <h3>Library</h3>
+                        <p class="text-muted small">Where finished files live, and how the library tidies itself.</p>
                         <div class="mb-3">
                             <label for="output_path" class="form-label">Output Path</label>
                             <input type="text" class="form-control form-control-lg" id="output_path" name="output_path"
@@ -59,12 +74,40 @@
                             <small class="form-text text-muted">Use "Browse..." to pick a folder, or type/paste a path.
                                 This will be used as the default location for all conversions.</small>
                         </div>
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="skip_existing" name="skip_existing" value="on"
+                                   {% if skip_existing %}checked{% endif %}>
+                            <label class="form-check-label" for="skip_existing">Skip tracks that already exist in the output folder</label>
+                        </div>
+                        <small class="form-text text-muted d-block mb-2">Before converting a track, the app checks whether a file with the same name already exists in the output folder. If it does, the track is skipped instead of being downloaded again.</small>
+<div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="numbered_filenames" name="numbered_filenames" value="on"
+                                   {% if numbered_filenames %}checked{% endif %}>
+                            <label class="form-check-label" for="numbered_filenames">Number playlist tracks (<code>01 - Title</code>)</label>
+                        </div><div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="nfo_files" name="nfo_files" value="on"
+                                   {% if nfo_files %}checked{% endif %}>
+                            <label class="form-check-label" for="nfo_files">Save .nfo metadata sidecars next to downloads</label>
+                        </div>                        <div class="row g-3 mt-1">
+                            <div class="col-md-6" style="max-width: 14rem;">
+                                <label for="prune_failed_days" class="form-label">Forget failed rows after (days)</label>
+                                <input type="number" class="form-control" id="prune_failed_days" name="prune_failed_days"
+                                       min="0" max="365" value="{{ prune_failed_days }}">
+                                <small class="form-text text-muted">0 = keep forever.</small>
+                            </div>
+                            <div class="col-md-6" style="max-width: 14rem;">
+                                <label for="storage_quota_gb" class="form-label">Library size cap (GB)</label>
+                                <input type="number" class="form-control" id="storage_quota_gb" name="storage_quota_gb"
+                                       min="0" max="10000" step="0.5" value="{{ storage_quota_gb }}">
+                                <small class="form-text text-muted">0 = unlimited. Oldest-played tracks go to Trash first.</small>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                <h3>Format Settings</h3>
+            <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-audio">
+                <h3>Audio Formats</h3>
                 <p class="text-muted small">These options apply to newly converted files.</p>
 
                 <div class="row g-3">
@@ -134,7 +177,20 @@
                         </select>
                         <small class="form-text text-muted">Opus stays transparent at low bitrates; 128 is plenty.</small>
                     </div>
+                    <div class="col-12">
+                        <div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="normalize_audio" name="normalize_audio" value="on"
+                                   {% if normalize_audio %}checked{% endif %}>
+                            <label class="form-check-label" for="normalize_audio">Normalize volume across tracks (EBU R128)</label>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
+            <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-video">
+                <h3>Video</h3>
+                <p class="text-muted small">Caps and defaults for full-video downloads, plus subtitles.</p>
+                <div class="row g-3">
                     <div class="col-md-6">
                         <label for="video_quality" class="form-label">Video quality cap</label>
                         <select class="form-select" id="video_quality" name="video_quality">
@@ -186,6 +242,37 @@
                             <option value="slow" {% if video_preset == 'slow' %}selected{% endif %}>Slow (smallest, slowest)</option>
                         </select>
                     </div>
+                    <div class="col-12 mt-3">
+<div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="subtitles" name="subtitles" value="on"
+                                   {% if subtitles %}checked{% endif %}>
+                            <label class="form-check-label" for="subtitles">Download subtitles for videos</label>
+                            <select class="form-select form-select-sm ms-2" id="pref_sub_lang" name="pref_sub_lang" style="width:auto;" title="Preferred subtitle language">
+                                <option value="en" {% if pref_sub_lang == 'en' %}selected{% endif %}>English</option>
+                                <option value="de" {% if pref_sub_lang == 'de' %}selected{% endif %}>Deutsch</option>
+                                <option value="es" {% if pref_sub_lang == 'es' %}selected{% endif %}>Español</option>
+                                <option value="fr" {% if pref_sub_lang == 'fr' %}selected{% endif %}>Français</option>
+                                <option value="pt" {% if pref_sub_lang == 'pt' %}selected{% endif %}>Português</option>
+                                <option value="it" {% if pref_sub_lang == 'it' %}selected{% endif %}>Italiano</option>
+                                <option value="nl" {% if pref_sub_lang == 'nl' %}selected{% endif %}>Nederlands</option>
+                                <option value="pl" {% if pref_sub_lang == 'pl' %}selected{% endif %}>Polski</option>
+                                <option value="ja" {% if pref_sub_lang == 'ja' %}selected{% endif %}>日本語</option>
+                                <option value="ko" {% if pref_sub_lang == 'ko' %}selected{% endif %}>한국어</option>
+                                <option value="zh-Hans" {% if pref_sub_lang == 'zh-Hans' %}selected{% endif %}>简体中文</option>
+                                <option value="ar" {% if pref_sub_lang == 'ar' %}selected{% endif %}>العربية</option>
+                                <option value="hi" {% if pref_sub_lang == 'hi' %}selected{% endif %}>हिन्दी</option>
+                                <option value="ru" {% if pref_sub_lang == 'ru' %}selected{% endif %}>Русский</option>
+                                <option value="tr" {% if pref_sub_lang == 'tr' %}selected{% endif %}>Türkçe</option>
+                            </select>
+                        </div><div class="form-check form-switch mb-1">
+                            <input class="form-check-input" type="checkbox" id="sponsorblock" name="sponsorblock" value="on"
+                                   {% if sponsorblock %}checked{% endif %}>
+                            <label class="form-check-label" for="sponsorblock">Skip sponsor, intro, and outro segments</label>
+                        </div>                        <div class="d-flex gap-2 align-items-center mt-2">
+                            <button type="button" id="subsBackfill" class="btn btn-sm btn-outline-secondary">Fetch missing subtitles</button>
+                            <small id="subsBackfillNote" class="text-muted">Fills in subtitles for finished videos that don't have any yet (one capped pass per click).</small>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -199,7 +286,7 @@
                 </div>
             </div>
 
-            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-desktop">
                 <h3>Desktop</h3>
                 <p class="text-muted small">How the app behaves on your computer.</p>
                 <div class="form-check form-switch mb-3">
@@ -231,24 +318,9 @@
                         <option value="quit" {% if close_behavior == 'quit' %}selected{% endif %}>Quit immediately</option>
                     </select>
                 </div>
-                <div class="mb-1">
-                    <span class="form-label d-block">Library backup</span>
-                    <a href="/api/backup" class="btn btn-sm btn-outline-secondary">Download database backup</a>
-                    <small class="form-text text-muted d-block mt-1">Your whole conversion history in one file. A backup is also saved automatically before any database upgrade (kept: last 5).</small>
-                </div>
             </div>
 
-            <div class="card p-4 shadow-sm border-0 rounded mt-3">
-                <h3>Duplicate Prevention</h3>
-                <p class="text-muted small">Before converting a track, the app checks whether a file with the same name already exists in the output folder. If it does, the track is skipped instead of being downloaded again.</p>
-                <div class="form-check form-switch mb-1">
-                    <input class="form-check-input" type="checkbox" id="skip_existing" name="skip_existing" value="on"
-                           {% if skip_existing %}checked{% endif %}>
-                    <label class="form-check-label" for="skip_existing">Skip tracks that already exist in the output folder</label>
-                </div>
-            </div>
-
-            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-downloads">
                 <h3>Downloads</h3>
                 <p class="text-muted small">How failed downloads are retried, how long a single track may take, and optional network routing.</p>
                 <div class="mb-3">
@@ -266,12 +338,23 @@
                     </div>
                     <small class="form-text text-muted d-block">Pick a preset, or set an exact number below (1–8). Applies instantly — no restart needed.</small>
                 </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="auto_update_ytdlp" name="auto_update_ytdlp" value="on"
+                           {% if auto_update_ytdlp %}checked{% endif %}>
+                    <label class="form-check-label" for="auto_update_ytdlp">Update yt-dlp automatically when a newer release appears</label>
+                </div>
                 <div class="row g-3">
                     <div class="col-md-4" style="max-width: 12rem;">
                         <label for="worker_count" class="form-label">Simultaneous tracks</label>
                         <input type="number" class="form-control" id="worker_count" name="worker_count"
                                min="1" max="8" value="{{ worker_count }}">
                         <small class="form-text text-muted">1–8. Matches the preset above when saved.</small>
+                    </div>
+                    <div class="col-md-4" style="max-width: 12rem;">
+                        <label for="stagger_seconds" class="form-label">Stagger starts (sec)</label>
+                        <input type="number" class="form-control" id="stagger_seconds" name="stagger_seconds"
+                               min="0" max="120" value="{{ stagger_seconds }}">
+                        <small class="form-text text-muted">0 = off. Spaces out download starts per site (+ random jitter) so bursts don't get your IP throttled.</small>
                     </div>
                     <div class="col-md-4" style="max-width: 12rem;">
                         <label for="retry_count" class="form-label">Retry attempts</label>
@@ -351,73 +434,11 @@
                                 <small class="form-text text-muted">JSON map of hostnames → proxy URLs. Hosts without an entry fall back to the field above. Subdomains match (<code>youtube.com</code> covers <code>music.youtube.com</code>).</small>
                             </div>
                         </details>
-                        <div class="mt-3 d-flex gap-2 align-items-center">
-                            <button type="button" id="subsBackfill" class="btn btn-sm btn-outline-secondary">Fetch missing subtitles</button>
-                            <small id="subsBackfillNote" class="text-muted">Fills in subtitles for finished videos that don't have any yet (one capped pass per click).</small>
-                        </div>
-                    </div>
-                    <div class="col-12">
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" id="subtitles" name="subtitles" value="on"
-                                   {% if subtitles %}checked{% endif %}>
-                            <label class="form-check-label" for="subtitles">Download subtitles for videos</label>
-                            <select class="form-select form-select-sm ms-2" id="pref_sub_lang" name="pref_sub_lang" style="width:auto;" title="Preferred subtitle language">
-                                <option value="en" {% if pref_sub_lang == 'en' %}selected{% endif %}>English</option>
-                                <option value="de" {% if pref_sub_lang == 'de' %}selected{% endif %}>Deutsch</option>
-                                <option value="es" {% if pref_sub_lang == 'es' %}selected{% endif %}>Español</option>
-                                <option value="fr" {% if pref_sub_lang == 'fr' %}selected{% endif %}>Français</option>
-                                <option value="pt" {% if pref_sub_lang == 'pt' %}selected{% endif %}>Português</option>
-                                <option value="it" {% if pref_sub_lang == 'it' %}selected{% endif %}>Italiano</option>
-                                <option value="nl" {% if pref_sub_lang == 'nl' %}selected{% endif %}>Nederlands</option>
-                                <option value="pl" {% if pref_sub_lang == 'pl' %}selected{% endif %}>Polski</option>
-                                <option value="ja" {% if pref_sub_lang == 'ja' %}selected{% endif %}>日本語</option>
-                                <option value="ko" {% if pref_sub_lang == 'ko' %}selected{% endif %}>한국어</option>
-                                <option value="zh-Hans" {% if pref_sub_lang == 'zh-Hans' %}selected{% endif %}>简体中文</option>
-                                <option value="ar" {% if pref_sub_lang == 'ar' %}selected{% endif %}>العربية</option>
-                                <option value="hi" {% if pref_sub_lang == 'hi' %}selected{% endif %}>हिन्दी</option>
-                                <option value="ru" {% if pref_sub_lang == 'ru' %}selected{% endif %}>Русский</option>
-                                <option value="tr" {% if pref_sub_lang == 'tr' %}selected{% endif %}>Türkçe</option>
-                            </select>
-                        </div>
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" id="sponsorblock" name="sponsorblock" value="on"
-                                   {% if sponsorblock %}checked{% endif %}>
-                            <label class="form-check-label" for="sponsorblock">Skip sponsor, intro, and outro segments</label>
-                        </div>
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" id="normalize_audio" name="normalize_audio" value="on"
-                                   {% if normalize_audio %}checked{% endif %}>
-                            <label class="form-check-label" for="normalize_audio">Normalize volume across tracks (EBU R128)</label>
-                        </div>
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" id="numbered_filenames" name="numbered_filenames" value="on"
-                                   {% if numbered_filenames %}checked{% endif %}>
-                            <label class="form-check-label" for="numbered_filenames">Number playlist tracks (<code>01 - Title</code>)</label>
-                        </div>
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" id="nfo_files" name="nfo_files" value="on"
-                                   {% if nfo_files %}checked{% endif %}>
-                            <label class="form-check-label" for="nfo_files">Save .nfo metadata sidecars next to downloads</label>
-                        </div>
-                        <div class="row g-3 mt-1">
-                            <div class="col-md-6" style="max-width: 14rem;">
-                                <label for="prune_failed_days" class="form-label">Forget failed rows after (days)</label>
-                                <input type="number" class="form-control" id="prune_failed_days" name="prune_failed_days"
-                                       min="0" max="365" value="{{ prune_failed_days }}">
-                                <small class="form-text text-muted">0 = keep forever.</small>
-                            </div>
-                            <div class="col-md-6" style="max-width: 14rem;">
-                                <label for="storage_quota_gb" class="form-label">Library size cap (GB)</label>
-                                <input type="number" class="form-control" id="storage_quota_gb" name="storage_quota_gb"
-                                       min="0" max="10000" step="0.5" value="{{ storage_quota_gb }}">
-                                <small class="form-text text-muted">0 = unlimited. Oldest-played tracks go to Trash first.</small>
-                            </div>
-                        </div>
                     </div>
                 </div>
             </div>
 
-            <div class="card p-4 shadow-sm border-0 rounded mt-3">
+            <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-imports">
                 <h3>Imports</h3>
                 <p class="text-muted small">How Spotify/Apple Music links are matched to playable tracks.</p>
                 <div class="row g-3">
@@ -476,9 +497,8 @@
                 <span class="text-muted small ms-auto">v{{ app_version }}</span>
                 <button type="button" id="updateCheck" class="btn btn-sm btn-outline-secondary">Check for updates</button>
             </div>
-        </form>
 
-        <div class="card p-4 shadow-sm border-0 rounded mt-3">
+        <div class="card p-4 shadow-sm border-0 rounded mt-3" id="sec-tools">
             <h3>Helpers</h3>
             <p class="text-muted small">External tools the app shells out to. yt-dlp goes stale every few months as sites change; updating it fixes most sudden download failures.</p>
             <ul class="list-group list-group-flush mb-2">
@@ -494,11 +514,6 @@
                 </li>
             </ul>
             <small id="helpersNote" class="text-muted"></small>
-            <div class="form-check form-switch mt-2">
-                <input class="form-check-input" type="checkbox" id="auto_update_ytdlp" name="auto_update_ytdlp" value="on"
-                       {% if auto_update_ytdlp %}checked{% endif %}>
-                <label class="form-check-label" for="auto_update_ytdlp">Update yt-dlp automatically when a newer release appears</label>
-            </div>
             <div class="mt-2 d-flex flex-wrap gap-2 align-items-center">
                 <a href="/api/diagnostics" class="btn btn-sm btn-outline-secondary">Download diagnostics</a>
                 <button type="button" id="viewLogs" class="btn btn-sm btn-outline-secondary">View logs</button>
@@ -574,6 +589,7 @@
                 <small class="text-muted">Replaces the live database (a backup is taken first).</small>
             </div>
         </div>
+        </form>
     </div>
 
     <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>

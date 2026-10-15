@@ -3079,8 +3079,14 @@ def test_settings_close_behavior_round_trip(client):
 def test_settings_shows_desktop_card(client):
     page = client.get('/settings')
     for marker in (b'desktop_notifications', b'close_behavior',
-                   b'api/backup', b'Library backup'):
+                   b'mute_on_start', b'sleep_fade_secs'):
         assert marker in page.data
+
+
+def test_settings_backup_lives_in_database_card(client):
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'api/backup' in page
+    assert 'Library backup' not in page
 
 
 # ------------------------------------------------------- tray ----
@@ -8437,3 +8443,96 @@ def test_db_restore_rejects_wrong_tables(client, tmp_path):
                        content_type='multipart/form-data')
     assert resp.status_code == 400
     assert 'missing' in resp.get_json()['message'].lower()
+
+
+def test_stagger_wait_math():
+    from app.routes.convert import _stagger_wait
+    assert _stagger_wait(100.0, 100.0, 0) == 0.0
+    assert _stagger_wait(100.0, 100.0, 5) == 5.0
+    assert _stagger_wait(100.0, 103.0, 5) == 2.0
+    assert _stagger_wait(100.0, 200.0, 5) == 0.0
+    assert _stagger_wait(0.0, 1000.0, 5) == 0.0
+
+
+def test_stagger_start_disabled_is_free(client):
+    """stagger_seconds=0 never sleeps."""
+    from app.models import UserSettings
+    import time as _time
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.stagger_seconds = 0
+        db.session.commit()
+        start = _time.monotonic()
+        convert_module._stagger_start('https://www.youtube.com/watch?v=x')
+        assert _time.monotonic() - start < 2.0
+
+
+def test_stagger_start_spaces_same_host(client):
+    """Two starts for one host with a 2s base take >= ~2s total."""
+    from app.models import UserSettings
+    import time as _time
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.stagger_seconds = 2
+        db.session.commit()
+        convert_module._start_gate_last.clear()
+        start = _time.monotonic()
+        convert_module._stagger_start('https://www.youtube.com/watch?v=a')
+        convert_module._stagger_start('https://www.youtube.com/watch?v=b')
+        elapsed = _time.monotonic() - start
+        assert elapsed >= 1.5
+
+
+def test_stagger_start_buckets_are_per_host(client):
+    """Different hosts don't block each other."""
+    from app.models import UserSettings
+    import time as _time
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.stagger_seconds = 60
+        db.session.commit()
+        convert_module._start_gate_last.clear()
+        start = _time.monotonic()
+        convert_module._stagger_start('https://www.youtube.com/watch?v=a')
+        convert_module._stagger_start('https://soundcloud.com/artist/track')
+        elapsed = _time.monotonic() - start
+        assert elapsed < 5.0
+        assert set(convert_module._start_gate_last) == {
+            'www.youtube.com', 'soundcloud.com'}
+
+
+def test_settings_stagger_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'stagger_seconds': '9',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        assert UserSettings.query.first().stagger_seconds == 9
+    page = client.get('/settings').data.decode('utf-8')
+    assert 'name="stagger_seconds"' in page
+    assert 'value="9"' in page
+
+
+def test_settings_layout_sections(client):
+    """Reorganized sections render once each, with working anchors."""
+    page = client.get('/settings').data.decode('utf-8')
+    for anchor in ('sec-library', 'sec-audio', 'sec-video', 'sec-downloads',
+                   'sec-imports', 'sec-desktop', 'sec-tools'):
+        assert f'id="{anchor}"' in page
+        assert f'href="#{anchor}"' in page
+    assert page.count('Duplicate Prevention') == 0
+    # auto_update switch now lives inside the settings form.
+    form = page.split('<form method="POST" action="/settings"')[1]
+    form = form.split('</form>')[0]
+    assert 'name="auto_update_ytdlp"' in form

@@ -88,6 +88,7 @@ def get_settings_dict():
         'proxy': '',
         'proxies_json': '{}',
         'worker_count': 3,
+        'stagger_seconds': 5,
         'subtitles': True,
         'sponsorblock': True,
         'normalize_audio': False,
@@ -163,6 +164,8 @@ def get_settings_dict():
         defaults['proxies_json'] = getattr(user_settings, 'proxies_json', None) or '{}'
         if getattr(user_settings, 'worker_count', None) is not None:
             defaults['worker_count'] = user_settings.worker_count
+        if getattr(user_settings, 'stagger_seconds', None) is not None:
+            defaults['stagger_seconds'] = user_settings.stagger_seconds
         defaults['tidal_client_id'] = getattr(user_settings, 'tidal_client_id', None) or ''
         defaults['tidal_client_secret'] = getattr(user_settings, 'tidal_client_secret', None) or ''
         defaults['tidal_connected'] = bool(getattr(user_settings, 'tidal_access_token', None))
@@ -218,6 +221,7 @@ def save_settings():
         data['proxies_json'] = '{}'
         flash(f'Per-service proxies JSON is malformed, so it was cleared: {e}', 'error')
     data['worker_count'] = _int_from_form(request, 'worker_count', 3, 1, 8)
+    data['stagger_seconds'] = _int_from_form(request, 'stagger_seconds', 5, 0, 120)
     data['tidal_client_id'] = request.form.get('tidal_client_id', '').strip()
     data['tidal_client_secret'] = request.form.get('tidal_client_secret', '').strip()
     data['close_behavior'] = request.form.get('close_behavior', 'ask').strip()
@@ -313,6 +317,7 @@ def save_settings():
         user_settings.proxy = data['proxy']
         user_settings.proxies_json = data['proxies_json']
         user_settings.worker_count = data['worker_count']
+        user_settings.stagger_seconds = data['stagger_seconds']
         # New Tidal credentials wipe stored tokens (they belong to the old app).
         if (user_settings.tidal_client_id != data['tidal_client_id']
                 or (data['tidal_client_secret'] and user_settings.tidal_client_secret != data['tidal_client_secret'])):

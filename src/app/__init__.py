@@ -283,6 +283,7 @@ _SCHEMA_MIGRATIONS = {
         ('offpeak_end', 'INTEGER DEFAULT 7'),
         ('bandwidth_schedule_json', 'TEXT DEFAULT "[]"'),
         ('worker_count', 'INTEGER DEFAULT 3'),
+        ('stagger_seconds', 'INTEGER DEFAULT 5'),
         ('subtitles', 'BOOLEAN DEFAULT 1'),
         ('sponsorblock', 'BOOLEAN DEFAULT 1'),
         ('normalize_audio', 'BOOLEAN DEFAULT 0'),

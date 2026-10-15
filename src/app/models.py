@@ -52,6 +52,9 @@ class UserSettings(db.Model):
     bandwidth_schedule_json = db.Column(db.Text, nullable=False, default='[]')
     # Parallel downloads; applied live when settings are saved.
     worker_count = db.Column(db.Integer, nullable=False, default=3)
+    # Minimum gap (seconds) between download starts per host, plus up to
+    # that much again in random jitter. 0 = no staggering.
+    stagger_seconds = db.Column(db.Integer, nullable=False, default=5)
     subtitles = db.Column(db.Boolean, nullable=False, default=True)
     sponsorblock = db.Column(db.Boolean, nullable=False, default=True)
     normalize_audio = db.Column(db.Boolean, nullable=False, default=False)
