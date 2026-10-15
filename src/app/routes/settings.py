@@ -12,7 +12,7 @@ SETTING_FIELDS = ('output_path', 'wav_sample_rate', 'wav_bit_depth', 'ogg_qualit
 BOOLEAN_FIELDS = ('skip_existing', 'privacy_mode', 'desktop_notifications',
                   'tray_icon', 'subtitles', 'sponsorblock', 'normalize_audio',
                   'auto_update_ytdlp', 'numbered_filenames', 'nfo_files',
-                  'import_strict', 'radio_mode',)
+                  'import_strict', 'radio_mode', 'mute_on_start',)
 
 
 def _int_from_form(request, name, default, minimum, maximum):
@@ -34,6 +34,43 @@ def _bool_from_form(request, name):
     return value not in ('0', 'false', 'False')
 
 
+def _parse_schedule_json(raw):
+    """Validate the weekly bandwidth schedule; return canonical JSON.
+
+    Blank input means "no schedule" ('[]'). Malformed entries are dropped
+    with a warning flash; a wholly-malformed payload clears the schedule
+    so a typo can't silently cap (or uncap) downloads.
+    """
+    import json as _json
+    text = (raw or '').strip() or '[]'
+    try:
+        parsed = _json.loads(text)
+    except (TypeError, ValueError) as e:
+        flash(f'Bandwidth schedule JSON is malformed, so it was cleared: {e}', 'error')
+        return '[]'
+    if not isinstance(parsed, list):
+        flash('Bandwidth schedule must be a JSON list; cleared.', 'warning')
+        return '[]'
+    cleaned = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            days = sorted({int(d) for d in (entry.get('days') or []) if 0 <= int(d) <= 6})
+            start = int(entry.get('start', 0))
+            end = int(entry.get('end', 0))
+            cap = int(entry.get('limit', 0))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= start <= 23 and 0 <= end <= 23) or cap < 0 or not days:
+            continue
+        cleaned.append({'days': days, 'start': start, 'end': end,
+                        'limit': min(cap, 100000)})
+    if len(cleaned) != len(parsed):
+        flash('Bandwidth schedule: skipped malformed entries.', 'warning')
+    return _json.dumps(cleaned)
+
+
 def get_settings_dict():
     """Current settings as a plain dict, with defaults if none are saved yet."""
     defaults = {
@@ -47,6 +84,7 @@ def get_settings_dict():
         'retry_count': 3,
         'job_timeout': 300,
         'bandwidth_limit': 0,
+        'bandwidth_schedule_json': '[]',
         'proxy': '',
         'proxies_json': '{}',
         'worker_count': 3,
@@ -76,6 +114,9 @@ def get_settings_dict():
         'import_strict': False,
         'pref_sub_lang': 'en',
         'radio_mode': False,
+        'mute_on_start': False,
+        'sleep_fade_secs': 8,
+        'eq_presets_json': '{}',
         'prune_failed_days': 0,
         'storage_quota_gb': 0,
         'finish_action': 'nothing',
@@ -96,6 +137,8 @@ def get_settings_dict():
             defaults['job_timeout'] = user_settings.job_timeout
         if getattr(user_settings, 'bandwidth_limit', None) is not None:
             defaults['bandwidth_limit'] = user_settings.bandwidth_limit
+        defaults['bandwidth_schedule_json'] = (
+            getattr(user_settings, 'bandwidth_schedule_json', None) or '[]')
         if getattr(user_settings, 'offpeak_limit', None) is not None:
             defaults['offpeak_limit'] = user_settings.offpeak_limit
         for _field in ('mp3_bitrate', 'm4a_bitrate', 'opus_bitrate'):
@@ -109,6 +152,9 @@ def get_settings_dict():
             defaults['offpeak_start'] = user_settings.offpeak_start
         if getattr(user_settings, 'offpeak_end', None) is not None:
             defaults['offpeak_end'] = user_settings.offpeak_end
+        if getattr(user_settings, 'sleep_fade_secs', None) is not None:
+            defaults['sleep_fade_secs'] = user_settings.sleep_fade_secs
+        defaults['eq_presets_json'] = getattr(user_settings, 'eq_presets_json', None) or '{}'
         if getattr(user_settings, 'video_crf', None) is not None:
             defaults['video_crf'] = user_settings.video_crf
         if getattr(user_settings, 'video_preset', None) is not None:
@@ -146,9 +192,12 @@ def save_settings():
     data['retry_count'] = _int_from_form(request, 'retry_count', 3, 0, 10)
     data['job_timeout'] = _int_from_form(request, 'job_timeout', 300, 30, 3600)
     data['bandwidth_limit'] = _int_from_form(request, 'bandwidth_limit', 0, 0, 100000)
+    data['bandwidth_schedule_json'] = _parse_schedule_json(
+        request.form.get('bandwidth_schedule_json', ''))
     data['offpeak_limit'] = _int_from_form(request, 'offpeak_limit', 0, 0, 100000)
     data['offpeak_start'] = _int_from_form(request, 'offpeak_start', 22, 0, 23)
     data['offpeak_end'] = _int_from_form(request, 'offpeak_end', 7, 0, 23)
+    data['sleep_fade_secs'] = _int_from_form(request, 'sleep_fade_secs', 8, 2, 30)
     data['proxy'] = request.form.get('proxy', '').strip()
     data['proxies_json'] = request.form.get('proxies_json', '').strip() or '{}'
     # Validate the JSON early so a typo surfaces as an error message
@@ -247,7 +296,9 @@ def save_settings():
         user_settings.retry_count = data['retry_count']
         user_settings.job_timeout = data['job_timeout']
         user_settings.bandwidth_limit = data['bandwidth_limit']
+        user_settings.bandwidth_schedule_json = data['bandwidth_schedule_json']
         user_settings.offpeak_limit = data['offpeak_limit']
+        user_settings.sleep_fade_secs = data['sleep_fade_secs']
         user_settings.mp3_bitrate = data['mp3_bitrate']
         user_settings.m4a_bitrate = data['m4a_bitrate']
         user_settings.opus_bitrate = data['opus_bitrate']
@@ -260,7 +311,6 @@ def save_settings():
         user_settings.video_crf = data['video_crf']
         user_settings.video_preset = data['video_preset']
         user_settings.proxy = data['proxy']
-        user_settings.proxies_json = data['proxies_json']
         user_settings.proxies_json = data['proxies_json']
         user_settings.worker_count = data['worker_count']
         # New Tidal credentials wipe stored tokens (they belong to the old app).

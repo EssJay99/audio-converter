@@ -142,6 +142,8 @@
             muteBtn.addEventListener('click', () => toggleMute());
             updateMuteIcon();
         }
+        const shareBtn = $('appPlayerShare');
+        if (shareBtn) shareBtn.addEventListener('click', shareCurrent);
         Player.ui.queueBtn.addEventListener('click', () => toggleQueueBox());
         initQueueDrag();
         Player.ui.queueClear.addEventListener('click', () => {
@@ -276,6 +278,7 @@
                 try {
                     localStorage.setItem('appPlayerFadeSecs', String(Player.fadeSecs));
                 } catch (err) { /* private mode */ }
+                postPrefs({ sleep_fade_secs: Player.fadeSecs });
             });
         }
         const autoLy = $('appAutoLyrics');
@@ -310,6 +313,9 @@
         }
         const lyricsClose = $('appLyricsClose');
         if (lyricsClose) lyricsClose.addEventListener('click', () => Lyrics.close());
+        const lyricsPin = $('appLyricsPin');
+        if (lyricsPin) lyricsPin.addEventListener('click', () => Lyrics.setPinned(!Lyrics.isPinned()));
+        Lyrics.restorePinned();
         const bell = $('appBellBtn');
         if (bell) bell.addEventListener('click', () => toggleNotices());
         const noticesClear = $('appNoticesClear');
@@ -624,7 +630,7 @@
                 Player.ui.context.classList.toggle('d-none', !Player.contextLabel);
                 show();
                 Player.expectResume = item.id;
-                if (data.item && !isVideoFormat(data.item.format) && Player.autoLyrics) {
+                if (data.item && !isVideoFormat(data.item.format) && (Player.autoLyrics || Lyrics.pinned)) {
                     Lyrics.open(item.id);
                 }
                 if (auto && startCrossfade(item)) return;
@@ -743,28 +749,139 @@
         if (box) box.checked = !!Player.autoLyrics;
     }
 
-    // Radio mode lives server-side so it survives restarts; the toggle
-    // flips the setting, and queue-end pulls the next similar track.
+    // Radio mode + mute-on-start + fade length live server-side so they
+    // survive restarts; the toggles flip the setting, and queue-end pulls
+    // the next similar track.
     function restoreRadioMode() {
         const box = $('appRadioMode');
+        const muteBox = $('appMuteOnStart');
         fetch('/api/prefs')
             .then((r) => r.json())
             .then((data) => {
                 if (!data || !data.ok) return;
                 Player.radioMode = !!data.radio_mode;
                 if (box) box.checked = Player.radioMode;
+                if (muteBox) muteBox.checked = !!data.mute_on_start;
+                if (data.mute_on_start) applyStartupMute();
+                if (data.sleep_fade_secs) {
+                    Player.fadeSecs = Math.max(2, Math.min(30, Number(data.sleep_fade_secs) || 8));
+                    const sel = $('appPlayerFadeSecs');
+                    if (sel) sel.value = String(Player.fadeSecs);
+                    try {
+                        localStorage.setItem('appPlayerFadeSecs', String(Player.fadeSecs));
+                    } catch (err) { /* private mode */ }
+                }
             })
             .catch(() => { /* offline: stay as-is */ });
         if (box) {
             box.addEventListener('change', () => {
                 Player.radioMode = box.checked;
-                fetch('/api/prefs', {
+                postPrefs({ radio_mode: Player.radioMode });
+            });
+        }
+        if (muteBox) {
+            muteBox.addEventListener('change', () => {
+                postPrefs({ mute_on_start: muteBox.checked });
+            });
+        }
+        loadUserPresets();
+    }
+
+    function postPrefs(body) {
+        fetch('/api/prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json',
+                       'X-CSRFToken': (typeof csrfToken === 'function'
+                           ? csrfToken() : '') },
+            body: JSON.stringify(body),
+        }).catch(() => { /* keep local state */ });
+    }
+
+    // Mute-on-startup: zero the element volumes and the slider so the
+    // first play of the session can't blast. Un-muting restores the
+    // remembered slider level via the existing toggle.
+    function applyStartupMute() {
+        try {
+            if (Player.audio) {
+                Player.mutedVol = (Player.ui.volume
+                    ? Number(Player.ui.volume.value) / 100 : 0.8) || 0.8;
+                Player.audio.volume = 0;
+                if (Player.audio2) Player.audio2.volume = 0;
+                if (Player.ui.volume) Player.ui.volume.value = 0;
+                updateMuteIcon();
+            }
+        } catch (err) { /* ignore */ }
+    }
+
+    // User EQ presets: buttons rendered server-side on load, saved from
+    // the current slider positions. Alt-click a saved preset to delete it.
+    function loadUserPresets() {
+        const box = $('appUserPresets');
+        if (!box) return;
+        fetch('/api/eq-presets')
+            .then((r) => r.json())
+            .then((data) => {
+                box.innerHTML = '';
+                Object.keys((data && data.presets) || {}).sort().forEach((name) => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'btn btn-sm btn-outline-primary';
+                    btn.textContent = name;
+                    btn.title = 'Apply preset (Alt-click to delete)';
+                    btn.addEventListener('click', (e) => {
+                        if (e.altKey) {
+                            if (!confirm('Delete preset "' + name + '"?')) return;
+                            fetch('/api/eq-presets/' + encodeURIComponent(name), {
+                                method: 'DELETE',
+                                headers: { 'X-CSRFToken': (typeof csrfToken === 'function'
+                                    ? csrfToken() : '') },
+                            })
+                                .then((r) => r.json())
+                                .then(() => loadUserPresets())
+                                .catch(() => {});
+                            return;
+                        }
+                        fetch('/api/eq-presets')
+                            .then((r) => r.json())
+                            .then((d) => {
+                                const gains = d && d.presets && d.presets[name];
+                                if (Array.isArray(gains)) applyEQGains(gains.slice());
+                            })
+                            .catch(() => {});
+                    });
+                    box.appendChild(btn);
+                });
+            })
+            .catch(() => {});
+        const save = $('appPresetSave');
+        if (save && !save.dataset.wired) {
+            save.dataset.wired = '1';
+            save.addEventListener('click', () => {
+                const input = $('appPresetName');
+                const name = input ? input.value.trim() : '';
+                if (!name) {
+                    if (typeof toast === 'function') toast('Name the preset first.', 'info');
+                    return;
+                }
+                fetch('/api/eq-presets', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json',
                                'X-CSRFToken': (typeof csrfToken === 'function'
                                    ? csrfToken() : '') },
-                    body: JSON.stringify({ radio_mode: Player.radioMode }),
-                }).catch(() => { /* keep local state */ });
+                    body: JSON.stringify({ name: name, gains: currentEQGains() }),
+                })
+                    .then((r) => r.json())
+                    .then((d) => {
+                        if (!d || !d.ok) {
+                            if (typeof toast === 'function') {
+                                toast((d && d.message) || 'Could not save preset.', 'danger');
+                            }
+                            return;
+                        }
+                        if (input) input.value = '';
+                        loadUserPresets();
+                    })
+                    .catch(() => {});
             });
         }
     }
@@ -1894,6 +2011,7 @@
     const Lyrics = {
         itemId: 0,
         lines: [],
+        pinned: false,
         cacheGet: function (itemId) {
             try {
                 const cache = JSON.parse(localStorage.getItem('appLyricsCache') || '{}');
@@ -1984,6 +2102,26 @@
             if (overlay) overlay.classList.add('d-none');
             Lyrics.itemId = 0;
             Lyrics.lines = [];
+            Lyrics.setPinned(false);
+        },
+        isPinned: function () { return !!Lyrics.pinned; },
+        setPinned: function (on) {
+            Lyrics.pinned = !!on;
+            try {
+                localStorage.setItem('appLyricsPinned', Lyrics.pinned ? '1' : '0');
+            } catch (err) { /* private mode */ }
+            const btn = $('appLyricsPin');
+            if (btn) {
+                btn.classList.toggle('btn-primary', Lyrics.pinned);
+                btn.setAttribute('aria-pressed', Lyrics.pinned ? 'true' : 'false');
+            }
+        },
+        restorePinned: function () {
+            try {
+                Lyrics.setPinned(localStorage.getItem('appLyricsPinned') === '1');
+            } catch (err) {
+                Lyrics.setPinned(false);
+            }
         },
         position: function () {
             const video = $('appTheaterVideo');
@@ -2117,6 +2255,42 @@
             if (Player.ui.volume) Player.ui.volume.value = Math.round(v * 100);
         }
         updateMuteIcon();
+    }
+
+    // Copy "Title — Artist (source URL)" for the current track so it can
+    // be pasted into a chat. A native URL scheme would need installer
+    // changes per OS; plain text works everywhere with no new trust.
+    function shareCurrent() {
+        const id = (typeof currentLyricId === 'function' && currentLyricId())
+            || (Player.queue && Player.queue[Player.index]) || 0;
+        if (!id) {
+            if (typeof toast === 'function') toast('Nothing playing.', 'info');
+            return;
+        }
+        fetch('/api/track/' + id)
+            .then((r) => r.json())
+            .then((data) => {
+                const item = (data && data.item) || {};
+                const title = item.tag_title || item.filename || 'Unknown track';
+                const artist = item.tag_artist || '';
+                const url = (item.url && String(item.url).indexOf('local:') !== 0)
+                    ? item.url : '';
+                const text = (artist ? artist + ' — ' : '') + title +
+                    (url ? ' (' + url + ')' : '');
+                const done = function () {
+                    if (typeof toast === 'function') toast('Share text copied.', 'success');
+                };
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(done, function () {
+                        window.prompt('Copy share text:', text);
+                    });
+                } else {
+                    window.prompt('Copy share text:', text);
+                }
+            })
+            .catch(() => {
+                if (typeof toast === 'function') toast('Could not load track.', 'danger');
+            });
     }
 
     function updateMuteIcon() {
@@ -2322,6 +2496,26 @@
         closeLyrics: function () {
             Lyrics.close();
         },
+        isPlaying: function () {
+            try {
+                if (isTheaterOpen()) {
+                    const video = $('appTheaterVideo');
+                    return !!(video && !video.paused && !video.ended);
+                }
+                return !!(Player.audio && !Player.audio.paused && !Player.audio.ended);
+            } catch (err) {
+                return false;
+            }
+        },
+        pause: function () {
+            try {
+                if (isTheaterOpen()) {
+                    const video = $('appTheaterVideo');
+                    if (video) video.pause();
+                }
+                if (Player.audio) Player.audio.pause();
+            } catch (err) { /* ignore */ }
+        },
         getAnalyser: function () {
             return (typeof eqNodes !== 'undefined' && eqNodes) ? eqNodes.analyser || null : null;
         },
@@ -2354,6 +2548,12 @@
         } else if (e.key === 'l' || e.key === 'L') {
             const id = currentLyricId();
             if (id) Lyrics.open(id);
+        } else if (e.key === '/') {
+            const box = $('tabSearch');
+            if (box) {
+                e.preventDefault();
+                box.focus();
+            }
         } else if (e.key === 'ArrowRight') {
             e.preventDefault();
             seekBy(5);

@@ -48,6 +48,7 @@
 
     <div class="app-player-side">
         <button type="button" id="appPlayerMute" class="app-player-btn" title="Mute (M)" aria-label="Mute">&#128266;</button>
+        <button type="button" id="appPlayerShare" class="app-player-btn" title="Copy share text (title, artist, source link)" aria-label="Share">&#10548;</button>
         <input type="range" id="appPlayerVolume" class="app-player-range app-player-volume" min="0" max="100" value="80"
                aria-label="Volume" title="Volume">
         <button type="button" id="appPlayerEQBtn" class="app-player-btn" title="Equalizer" aria-label="Equalizer">EQ</button>
@@ -166,6 +167,12 @@
         <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="jazz">Jazz</button>
         <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="vocal">Vocal</button>
         <button type="button" class="btn btn-sm btn-outline-secondary" data-eq-preset="bass">Bass</button>
+        <span id="appUserPresets" class="d-inline-flex flex-wrap gap-1" aria-label="Your saved presets"></span>
+    </div>
+    <div class="d-flex gap-2 align-items-center mt-1">
+        <input type="text" id="appPresetName" class="form-control form-control-sm" style="max-width: 12rem;" placeholder="Preset name…" maxlength="40" autocomplete="off" aria-label="Preset name">
+        <button type="button" id="appPresetSave" class="btn btn-sm btn-outline-secondary" title="Save current slider positions as a preset">Save</button>
+        <small class="text-muted">Alt-click a saved preset to delete it.</small>
     </div>
     <div class="app-player-eq-sliders">
         <label>60<input type="range" class="app-player-eq-slider" data-eq="0" min="-12" max="12" step="1" value="0" aria-label="60 hertz"></label>
@@ -185,6 +192,7 @@
                 <strong id="appLyricsTitle">Lyrics</strong>
                 <div id="appLyricsArtist" class="text-muted small"></div>
             </div>
+            <button type="button" id="appLyricsPin" class="app-player-btn" title="Pin: keep lyrics open and follow track changes" aria-label="Pin lyrics">📌</button>
             <button type="button" id="appLyricsClose" class="app-player-btn app-player-close" aria-label="Close lyrics">&times;</button>
         </div>
         <div id="appLyricsBody" class="app-lyrics-body"><span class="text-muted small">Loading…</span></div>

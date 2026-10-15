@@ -159,6 +159,15 @@
             var sub = document.createElement('div');
             sub.className = 'lib-sub text-muted small';
             sub.textContent = item.format + (item.play_count ? ' · ×' + item.play_count : '');
+            if (item.import_source) {
+                var src = document.createElement('span');
+                src.className = 'badge bg-info text-dark ms-1';
+                src.textContent = String(item.import_source).charAt(0).toUpperCase() +
+                    String(item.import_source).slice(1);
+                src.title = 'Imported from ' + item.import_source;
+                sub.appendChild(document.createTextNode(' '));
+                sub.appendChild(src);
+            }
             info.appendChild(sub);
             card.appendChild(info);
             var actions = document.createElement('div');
@@ -766,7 +775,15 @@
             box.innerHTML = '<span class="text-muted small">No playlists yet.</span>';
             return;
         }
-        userPlaylists.forEach(function (pl) {
+        var pinned = {};
+        try {
+            pinned = JSON.parse(localStorage.getItem('tabPinnedPlaylists') || '{}');
+        } catch (err) { pinned = {}; }
+        var ordered = userPlaylists.slice().sort(function (a, b) {
+            return ((pinned[b.id] ? 1 : 0) - (pinned[a.id] ? 1 : 0)) ||
+                String(a.name).localeCompare(String(b.name));
+        });
+        ordered.forEach(function (pl) {
             const wrap = document.createElement('div');
             wrap.className = 'user-pl';
             const head = document.createElement('div');
@@ -806,6 +823,15 @@
                 postJSON('/api/playlists/' + pl.id + '/delete', {})
                     .then(function () { loadUserPlaylists(); })
                     .catch(function () {});
+            });
+            mkBtn(pinned[pl.id] ? 'Unpin' : 'Pin', 'Pin to top of the list', function () {
+                try {
+                    var pins = JSON.parse(localStorage.getItem('tabPinnedPlaylists') || '{}');
+                    if (pins[pl.id]) delete pins[pl.id];
+                    else pins[pl.id] = true;
+                    localStorage.setItem('tabPinnedPlaylists', JSON.stringify(pins));
+                } catch (err) { /* private mode */ }
+                renderUserPlaylists();
             });
             wrap.appendChild(head);
             const list = document.createElement('ul');
@@ -960,6 +986,22 @@
 
     // ------------------------------------------------- recent + dupes ----
 
+    function relTime(iso) {
+        if (!iso) return '';
+        var then = new Date(String(iso).replace(' ', 'T')).getTime();
+        if (!then) return '';
+        var mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+        if (mins < 1) return 'just now';
+        if (mins < 60) return mins + 'm ago';
+        var hours = Math.round(mins / 60);
+        if (hours < 24) return hours + 'h ago';
+        var days = Math.round(hours / 24);
+        if (days < 7) return days + 'd ago';
+        if (days < 30) return Math.round(days / 7) + 'w ago';
+        if (days < 365) return Math.round(days / 30) + 'mo ago';
+        return Math.round(days / 365) + 'y ago';
+    }
+
     function loadRecent() {
         const list = document.getElementById('tabRecent');
         if (!list) return;
@@ -976,6 +1018,13 @@
                     const li = document.createElement('li');
                     li.className = 'list-group-item tab-queue-item';
                     li.textContent = (i + 1) + '. ' + trackTitle(item);
+                    const when = relTime(item.last_played_at);
+                    if (when) {
+                        const small = document.createElement('small');
+                        small.className = 'text-muted ms-2';
+                        small.textContent = when;
+                        li.appendChild(small);
+                    }
                     li.title = 'Play';
                     li.addEventListener('click', function () {
                         if (window.AudioPlayer) {
@@ -1167,6 +1216,45 @@
                     .catch(function () {
                         if (typeof toast === 'function') toast('Could not create.', 'danger');
                     });
+            });
+        }
+        const importBtn = document.getElementById('tabPlaylistImport');
+        const importFile = document.getElementById('tabPlaylistImportFile');
+        if (importBtn && importFile) {
+            importBtn.addEventListener('click', function () { importFile.click(); });
+            importFile.addEventListener('change', function () {
+                const f = importFile.files && importFile.files[0];
+                importFile.value = '';
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = function () {
+                    const entries = String(reader.result || '').split(/\r?\n/)
+                        .map(function (l) { return l.trim(); })
+                        .filter(function (l) { return l && l.charAt(0) !== '#'; });
+                    if (!entries.length) {
+                        if (typeof toast === 'function') toast('No tracks found in that file.', 'info');
+                        return;
+                    }
+                    const base = f.name.replace(/\.[^.]+$/, '');
+                    const name = window.prompt('Playlist name:', base) || base;
+                    postJSON('/api/playlists/import', { name: name, entries: entries })
+                        .then(function (res) {
+                            if (!res.ok) {
+                                if (typeof toast === 'function') toast(res.message || 'Could not import.', 'danger');
+                                return;
+                            }
+                            if (typeof toast === 'function') {
+                                toast('Imported ' + res.matched + ' track(s)' +
+                                    (res.unmatched && res.unmatched.length ? ', ' + res.unmatched.length + ' unmatched.' : '.'),
+                                    res.matched ? 'success' : 'info');
+                            }
+                            loadUserPlaylists();
+                        })
+                        .catch(function () {
+                            if (typeof toast === 'function') toast('Could not import.', 'danger');
+                        });
+                };
+                reader.readAsText(f);
             });
         }
         document.querySelectorAll('[data-ptab]').forEach(function (btn) {

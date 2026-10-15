@@ -46,6 +46,10 @@ class UserSettings(db.Model):
     offpeak_limit = db.Column(db.Integer, nullable=False, default=0)
     offpeak_start = db.Column(db.Integer, nullable=False, default=22)
     offpeak_end = db.Column(db.Integer, nullable=False, default=7)
+    # Weekly schedule: JSON list of {"days": [0..6 Mon..Sun],
+    # "start": h, "end": h, "limit": KB/s}. First matching entry wins;
+    # falls back to the off-peak override, then the flat limit.
+    bandwidth_schedule_json = db.Column(db.Text, nullable=False, default='[]')
     # Parallel downloads; applied live when settings are saved.
     worker_count = db.Column(db.Integer, nullable=False, default=3)
     subtitles = db.Column(db.Boolean, nullable=False, default=True)
@@ -65,8 +69,14 @@ class UserSettings(db.Model):
     import_strict = db.Column(db.Boolean, nullable=False, default=False)
     # Preferred subtitle language for theater auto-select + download order.
     pref_sub_lang = db.Column(db.String(10), nullable=False, default='en')
-    # Auto-queue similar tracks when the play queue runs dry.
     radio_mode = db.Column(db.Boolean, nullable=False, default=False)
+    # Named EQ presets: {"name": [g0..g4]} in dB, 5 bands. Server-side so
+    # presets follow the library, not the browser.
+    eq_presets_json = db.Column(db.Text, nullable=False, default='{}')
+    # Start the player muted (2 AM speaker protection).
+    mute_on_start = db.Column(db.Boolean, nullable=False, default=False)
+    # Sleep-timer fade length in seconds (server copy; clients may cache).
+    sleep_fade_secs = db.Column(db.Integer, nullable=False, default=8)
     # Delete failed rows older than N days (0 = keep).
     prune_failed_days = db.Column(db.Integer, nullable=False, default=0)
     # Keep the library under N GB, oldest-played first (0 = unlimited).

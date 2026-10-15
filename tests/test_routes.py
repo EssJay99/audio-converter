@@ -5073,26 +5073,82 @@ def test_bandwidth_offpeak_window(client):
             datetime(2026, 1, 1, 23, 0)) == 500
 
 
+def test_bandwidth_schedule_beats_offpeak_and_flat(client):
+    from datetime import datetime
+    from app.models import UserSettings
+    import json as _json
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        if not settings:
+            settings = UserSettings(output_path='/tmp/x')
+            db.session.add(settings)
+        settings.bandwidth_limit = 500
+        settings.offpeak_limit = 100
+        settings.offpeak_start = 22
+        settings.offpeak_end = 7
+        # 2026-01-05 is a Monday. Weeknights 22-07 cap at 50.
+        settings.bandwidth_schedule_json = _json.dumps([
+            {'days': [0, 1, 2, 3, 4], 'start': 22, 'end': 7, 'limit': 50}])
+        db.session.commit()
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 5, 23, 0)) == 50
+        # Saturday night: schedule silent, off-peak still applies.
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 10, 23, 0)) == 100
+        # Monday noon: nothing applies, flat limit wins.
+        assert convert_module._active_bandwidth_limit(
+            datetime(2026, 1, 5, 12, 0)) == 500
+
+
+def test_bandwidth_schedule_skips_malformed_entries():
+    from datetime import datetime
+    assert convert_module._matching_schedule_limit(
+        'not json', datetime(2026, 1, 5, 23, 0)) is None
+    assert convert_module._matching_schedule_limit(
+        [{'days': [0], 'start': 99, 'end': 7, 'limit': 50}],
+        datetime(2026, 1, 5, 23, 0)) is None
+    assert convert_module._matching_schedule_limit(
+        [{'days': [0], 'start': 22, 'end': 7, 'limit': 50}],
+        datetime(2026, 1, 5, 23, 0)) == 50
+
+
 def test_settings_new_fields_round_trip(client):
     resp = client.post('/settings', data={
         'output_path': '/tmp/x',
         'offpeak_limit': '250',
         'offpeak_start': '21',
         'offpeak_end': '6',
+        'bandwidth_schedule_json': '[{"days": [5, 6], "start": 0, "end": 23, "limit": 300}]',
         'auto_update_ytdlp': 'on',
     })
     assert resp.status_code == 302
     from app.models import UserSettings
+    import json as _json
     with client.application.app_context():
         settings = UserSettings.query.first()
         assert settings.offpeak_limit == 250
         assert settings.offpeak_start == 21
         assert settings.offpeak_end == 6
         assert settings.auto_update_ytdlp is True
+        assert _json.loads(settings.bandwidth_schedule_json) == [
+            {'days': [5, 6], 'start': 0, 'end': 23, 'limit': 300}]
     page = client.get('/settings').data.decode('utf-8')
     for marker in ('name="offpeak_limit"', 'name="offpeak_start"',
-                   'name="offpeak_end"', 'name="auto_update_ytdlp"'):
+                   'name="offpeak_end"',
+                   'name="bandwidth_schedule_json"',
+                   'name="auto_update_ytdlp"'):
         assert marker in page
+
+
+def test_settings_schedule_malformed_clears(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'bandwidth_schedule_json': '[{"days": "oops"}',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        assert UserSettings.query.first().bandwidth_schedule_json == '[]'
 
 
 def test_quality_line_parsing():
@@ -6994,6 +7050,66 @@ def test_prefs_round_trip(client):
     assert data['radio_mode'] is False
 
 
+def test_prefs_mute_and_fade_round_trip(client):
+    resp = client.post('/api/prefs',
+                       json={'mute_on_start': True, 'sleep_fade_secs': 15})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['mute_on_start'] is True
+    assert body['sleep_fade_secs'] == 15
+    data = client.get('/api/prefs').get_json()
+    assert data['mute_on_start'] is True
+    assert data['sleep_fade_secs'] == 15
+    # Clamped, and garbage ignored.
+    client.post('/api/prefs', json={'sleep_fade_secs': 99})
+    assert client.get('/api/prefs').get_json()['sleep_fade_secs'] == 30
+    client.post('/api/prefs', json={'sleep_fade_secs': 'nope'})
+    assert client.get('/api/prefs').get_json()['sleep_fade_secs'] == 30
+
+
+def test_eq_presets_crud(client):
+    assert client.get('/api/eq-presets').get_json() == {
+        'ok': True, 'presets': {}}
+    # Bad payloads rejected.
+    assert client.post('/api/eq-presets', json={}).status_code == 400
+    assert client.post(
+        '/api/eq-presets',
+        json={'name': 'mine', 'gains': [1, 2]}).status_code == 400
+    # Built-in names are protected.
+    assert client.post(
+        '/api/eq-presets',
+        json={'name': 'Rock', 'gains': [0, 0, 0, 0, 0]}).status_code == 400
+    resp = client.post('/api/eq-presets',
+                       json={'name': 'mine', 'gains': [1, 2, 3, 4, 5]})
+    assert resp.status_code == 200
+    assert resp.get_json()['presets'] == {'mine': [1, 2, 3, 4, 5]}
+    # Gains are rounded + clamped server-side.
+    resp = client.post('/api/eq-presets',
+                       json={'name': 'hot', 'gains': [99, -99, 1.6, 0, 0]})
+    assert resp.get_json()['presets']['hot'] == [12, -12, 2, 0, 0]
+    assert client.delete('/api/eq-presets/nope').status_code == 404
+    assert client.delete('/api/eq-presets/mine').status_code == 200
+    assert client.get('/api/eq-presets').get_json()['presets'] == {
+        'hot': [12, -12, 2, 0, 0]}
+
+
+def test_settings_playback_fields_round_trip(client):
+    resp = client.post('/settings', data={
+        'output_path': '/tmp/x',
+        'mute_on_start': 'on',
+        'sleep_fade_secs': '12',
+    })
+    assert resp.status_code == 302
+    from app.models import UserSettings
+    with client.application.app_context():
+        settings = UserSettings.query.first()
+        assert settings.mute_on_start is True
+        assert settings.sleep_fade_secs == 12
+    page = client.get('/settings').data.decode('utf-8')
+    for marker in ('name="mute_on_start"', 'name="sleep_fade_secs"'):
+        assert marker in page
+
+
 def test_subs_backfill_reports_counts(client, tmp_path, monkeypatch):
     video = tmp_path / 'v.mp4'
     video.write_bytes(b'\x00' * 32)
@@ -8005,3 +8121,58 @@ def test_strip_www_keeps_w_prefixed_hosts():
     assert _strip_www('wordpress.com') == 'wordpress.com'
     assert _strip_www('WWW.Example.com') == 'example.com'
     assert _strip_www('') == ''
+
+
+def test_dedup_cover_links_identical_art(tmp_path, monkeypatch):
+    from app.routes import convert as cm
+    monkeypatch.setattr(cm.tempfile, 'gettempdir', lambda: str(tmp_path))
+    cache = tmp_path / 'audio-converter-covers'
+    cache.mkdir()
+    a = cache / '11.jpg'
+    b = cache / '22.jpg'
+    a.write_bytes(b'\xff\xd8fakejpegbytes')
+    b.write_bytes(b'\xff\xd8fakejpegbytes')
+    out_a = cm._dedup_cover(str(a))
+    out_b = cm._dedup_cover(str(b))
+    assert os.path.isfile(out_a) and os.path.isfile(out_b)
+    assert open(out_a, 'rb').read() == b'\xff\xd8fakejpegbytes'
+    assert open(out_b, 'rb').read() == b'\xff\xd8fakejpegbytes'
+    # Exactly one canonical copy plus two links/copies.
+    import hashlib
+    digest = hashlib.sha1(b'\xff\xd8fakejpegbytes').hexdigest()
+    assert (cache / (digest + '.jpg')).is_file()
+    assert len([p for p in cache.iterdir()]) == 3
+
+
+def test_dedup_cover_keeps_distinct_art(tmp_path, monkeypatch):
+    from app.routes import convert as cm
+    monkeypatch.setattr(cm.tempfile, 'gettempdir', lambda: str(tmp_path))
+    cache = tmp_path / 'audio-converter-covers'
+    cache.mkdir()
+    a = cache / '11.jpg'
+    b = cache / '22.jpg'
+    a.write_bytes(b'\xff\xd8art-one')
+    b.write_bytes(b'\xff\xd8art-two')
+    cm._dedup_cover(str(a))
+    cm._dedup_cover(str(b))
+    assert len([p for p in cache.iterdir()]) == 4
+
+
+def test_prune_cover_cache_keeps_linked_hashes(tmp_path, monkeypatch):
+    from app.routes import convert as cm
+    monkeypatch.setattr(cm.tempfile, 'gettempdir', lambda: str(tmp_path))
+    monkeypatch.setattr(cm, '_COVER_CACHE_CAP', 2)
+    cache = tmp_path / 'audio-converter-covers'
+    cache.mkdir()
+    canonical = cache / ('a' * 40 + '.jpg')
+    canonical.write_bytes(b'\xff\xd8shared')
+    link = cache / '11.jpg'
+    try:
+        os.symlink(canonical.name, link)
+    except OSError:
+        pytest.skip('symlinks unavailable')
+    (cache / '22.jpg').write_bytes(b'\xff\xd8other')
+    removed = cm._prune_cover_cache()
+    # The linked hash must survive even though the cache is over cap.
+    assert canonical.is_file()
+    assert removed >= 0

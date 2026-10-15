@@ -56,6 +56,8 @@
                     <form id="tabPlaylistCreate" class="d-flex gap-2 mb-2">
                         <input type="text" id="tabPlaylistName" class="form-control" placeholder="New playlist name" maxlength="200" autocomplete="off">
                         <button type="submit" class="btn btn-outline-primary">Create</button>
+                        <button type="button" id="tabPlaylistImport" class="btn btn-outline-secondary" title="Import an .m3u file as a playlist (matched against your library)">Import .m3u</button>
+                        <input type="file" id="tabPlaylistImportFile" class="d-none" accept=".m3u,.m3u8,audio/x-mpegurl">
                     </form>
                     <div id="tabPlaylists"></div>
                 </div>
@@ -143,6 +145,10 @@
                                 <div class="form-check ms-2">
                                     <input class="form-check-input" type="checkbox" id="appRadioMode">
                                     <label class="form-check-label small" for="appRadioMode" title="Keep playing similar tracks when the queue runs out">Radio mode</label>
+                                </div>
+                                <div class="form-check ms-2">
+                                    <input class="form-check-input" type="checkbox" id="appMuteOnStart">
+                                    <label class="form-check-label small" for="appMuteOnStart" title="Start the player muted">Mute on start</label>
                                 </div>
                             </div>
                             <form id="tabSaveQueue" class="d-flex gap-2">

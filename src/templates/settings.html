@@ -213,6 +213,17 @@
                            {% if tray_icon %}checked{% endif %}>
                     <label class="form-check-label" for="tray_icon">Show system tray icon (takes effect on restart)</label>
                 </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" id="mute_on_start" name="mute_on_start" value="on"
+                           {% if mute_on_start %}checked{% endif %}>
+                    <label class="form-check-label" for="mute_on_start">Start the player muted (2 AM speaker protection)</label>
+                </div>
+                <div class="mb-3" style="max-width: 20rem;">
+                    <label for="sleep_fade_secs" class="form-label">Sleep-timer fade length (seconds)</label>
+                    <input type="number" class="form-control" id="sleep_fade_secs" name="sleep_fade_secs"
+                           min="2" max="30" value="{{ sleep_fade_secs }}">
+                    <small class="form-text text-muted d-block mt-1">How long the volume takes to fade out. The player remembers this across restarts.</small>
+                </div>
                 <div class="mb-3" style="max-width: 20rem;">
                     <label for="close_behavior" class="form-label">When closing the app window</label>
                     <select class="form-select" id="close_behavior" name="close_behavior">
@@ -305,6 +316,19 @@
                         <input type="number" class="form-control" id="offpeak_end" name="offpeak_end"
                                min="0" max="23" value="{{ offpeak_end }}">
                         <small class="form-text text-muted">Hours 0–23, may wrap midnight.</small>
+                    </div>
+                    <div class="col-12">
+                        <details>
+                            <summary class="small text-muted">Weekly schedule (optional)</summary>
+                            <div class="mt-1">
+                                <label for="bandwidthScheduleJson" class="form-label small">Cap downloads by weekday and hour</label>
+                                <textarea class="form-control form-control-sm font-monospace" id="bandwidthScheduleJson"
+                                          name="bandwidth_schedule_json" rows="3"
+                                          placeholder='[{"days": [0,1,2,3,4], "start": 22, "end": 7, "limit": 500}]'
+                                          autocomplete="off" spellcheck="false">{{ bandwidth_schedule_json }}</textarea>
+                                <small class="form-text text-muted">JSON list. Days are 0=Mon … 6=Sun, hours 0–23 (may wrap midnight), limit in KB/s. First match wins; otherwise the off-peak, then flat limits apply.</small>
+                            </div>
+                        </details>
                     </div>
                     <div class="col-12">
                         <label for="proxy" class="form-label">Proxy (optional)</label>

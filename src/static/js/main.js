@@ -1928,6 +1928,30 @@ function initHistoryToolbar() {
 
 document.addEventListener('DOMContentLoaded', initHistoryToolbar);
 
+// Press `/` anywhere (outside a field) to jump to history search, and
+// auto-pause playback when the tab is hidden so music doesn't keep
+// playing after you've switched away.
+document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = e.target || {};
+    const tag = target.tagName || '';
+    if (/INPUT|TEXTAREA|SELECT/.test(tag) || target.isContentEditable) return;
+    const box = document.getElementById('historySearch');
+    if (box) {
+        e.preventDefault();
+        box.focus();
+    }
+});
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) return;
+    try {
+        if (window.AudioPlayer && window.AudioPlayer.isPlaying
+            && window.AudioPlayer.isPlaying()) {
+            window.AudioPlayer.pause();
+        }
+    } catch (err) { /* player absent on this page */ }
+});
+
 // --- Command palette: Ctrl/⌘K ------------------------------------------------
 // One bar for everything: paste a link to convert it, fuzzy-find library
 // tracks to play/queue, or run app actions. Built on DOM the script

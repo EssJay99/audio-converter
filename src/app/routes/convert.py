@@ -2063,6 +2063,54 @@ def api_playlist_create():
     return jsonify({'ok': True, 'playlist': _serialize_user_playlist(pl)})
 
 
+@bp.route('/api/playlists/import', methods=['POST'])
+def api_playlist_import():
+    """Create a user playlist from .m3u entries matched to the library.
+
+    The client parses the .m3u and posts its non-comment lines. Each line
+    is matched against finished rows by exact path first, then basename
+    (covers playlists exported from another machine where only file
+    names line up). Unmatched lines are reported, never fail the import.
+    """
+    from app.models import PlayerPlaylist, PlayerPlaylistItem
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get('name') or '').strip()[:200]
+    entries = payload.get('entries') or []
+    if not name:
+        return jsonify({'ok': False, 'message': 'Name the playlist'}), 400
+    if not isinstance(entries, list) or not entries:
+        return jsonify({'ok': False, 'message': 'No entries to import'}), 400
+    rows = db.session.query(ConversionHistory).filter(
+        ConversionHistory.status.in_(['completed', 'skipped'])).all()
+    by_path, by_base = {}, {}
+    for row in rows:
+        if row.output_path:
+            by_path[os.path.normpath(row.output_path)] = row
+            by_base.setdefault(os.path.basename(row.output_path), row)
+    matched, unmatched, seen = [], [], set()
+    for line in entries[:500]:
+        cand = str(line or '').strip()
+        if not cand or cand.startswith('#'):
+            continue
+        row = by_path.get(os.path.normpath(cand))
+        if row is None:
+            row = by_base.get(os.path.basename(cand))
+        if row is None or row.id in seen:
+            unmatched.append(cand)
+            continue
+        seen.add(row.id)
+        matched.append(row)
+    pl = PlayerPlaylist(name=name)
+    db.session.add(pl)
+    db.session.commit()
+    for pos, row in enumerate(matched):
+        db.session.add(PlayerPlaylistItem(
+            playlist_id=pl.id, conversion_id=row.id, position=pos))
+    db.session.commit()
+    return jsonify({'ok': True, 'playlist': _serialize_user_playlist(pl),
+                    'matched': len(matched), 'unmatched': unmatched[:50]})
+
+
 @bp.route('/api/playlists/<int:playlist_id>')
 def api_user_playlist_items(playlist_id):
     """A user playlist's tracks in order, playable ones first-class."""
@@ -2435,17 +2483,38 @@ def _rename_to_tags(row):
 _COVER_CACHE_CAP = 500
 
 
+def _cover_cache_dir():
+    return os.path.join(tempfile.gettempdir(), 'audio-converter-covers')
+
+
 def _prune_cover_cache():
     """Bound the thumbnail cache (LRU by mtime): it otherwise grows forever
-    in system temp, one pair of JPEGs per track played."""
+    in system temp, one pair of JPEGs per track played.
+
+    Content-hash files (`<sha1>.jpg`) are shared by every track with
+    identical art, so they're evicted only when no `{id}.jpg` link still
+    points at them; otherwise pruning one track's cover would blank
+    another's.
+    """
     try:
-        cache_dir = os.path.join(tempfile.gettempdir(),
-                                 'audio-converter-covers')
+        cache_dir = _cover_cache_dir()
         names = os.listdir(cache_dir)
     except OSError:
         return 0
     if len(names) <= _COVER_CACHE_CAP:
         return 0
+    import re as _re
+    hash_names = {n for n in names
+                  if _re.fullmatch(r'[0-9a-f]{40}(-thumb)?\.jpg', n)}
+    linked = set()
+    for n in names:
+        if n in hash_names:
+            continue
+        try:
+            target = os.readlink(os.path.join(cache_dir, n))
+            linked.add(os.path.basename(target))
+        except OSError:
+            pass
     try:
         ranked = sorted(
             ((os.path.getmtime(os.path.join(cache_dir, n)), n) for n in names
@@ -2454,12 +2523,49 @@ def _prune_cover_cache():
         return 0
     removed = 0
     for _mtime, name in ranked[:len(ranked) - _COVER_CACHE_CAP]:
+        if name in hash_names and name in linked:
+            continue
         try:
             os.remove(os.path.join(cache_dir, name))
             removed += 1
         except OSError:
             pass
     return removed
+
+
+def _dedup_cover(cached):
+    """Replace a freshly-extracted cover with a link to identical art.
+
+    Returns the path to serve (the link, the original, or the canonical
+    file). Two albums sharing one image then cost one JPEG on disk.
+    Symlinks keep `send_file` working unchanged; on platforms where
+    linking fails we silently keep the duplicate copy.
+    """
+    try:
+        if os.path.islink(cached):
+            return cached
+        import hashlib as _hl
+        with open(cached, 'rb') as f:
+            digest = _hl.sha1(f.read()).hexdigest()
+    except OSError:
+        return cached
+    cache_dir = os.path.dirname(cached)
+    base = os.path.basename(cached)
+    suffix = '-thumb.jpg' if base.endswith('-thumb.jpg') else '.jpg'
+    canonical = os.path.join(cache_dir, digest + suffix)
+    try:
+        if not os.path.isfile(canonical):
+            os.replace(cached, canonical)
+        else:
+            os.remove(cached)
+        try:
+            os.symlink(os.path.basename(canonical), cached)
+        except OSError:
+            import shutil as _sh
+            _sh.copyfile(canonical, cached)
+    except OSError:
+        pass
+    return cached if os.path.exists(cached) else canonical
 
 
 @bp.route('/api/cover/<int:conversion_id>')
@@ -2508,6 +2614,7 @@ def cover_art(conversion_id):
                      '-vf', 'scale=160:-1', '-vframes', '1', scaled],
                     capture_output=True, text=True, timeout=30)
                 if thumb_ok.returncode == 0 and os.path.isfile(scaled):
+                    scaled = _dedup_cover(scaled)
                     return send_file(scaled, mimetype='image/jpeg')
             else:
                 return send_file(sidecar, mimetype='image/jpeg')
@@ -2524,8 +2631,10 @@ def cover_art(conversion_id):
                 grab, capture_output=True, text=True, timeout=30)
             if frame_ok.returncode == 0 and os.path.isfile(frame):
                 _prune_cover_cache()
+                frame = _dedup_cover(frame)
                 return send_file(frame, mimetype='image/jpeg')
         abort(404)
+    cached = _dedup_cover(cached)
     _prune_cover_cache()
     return send_file(cached, mimetype='image/jpeg')
 
@@ -3657,24 +3766,63 @@ def _http_proxies(url=''):
 
 
 def _active_bandwidth_limit(now=None):
-    """Effective download cap in KB/s: the off-peak override wins inside
-    its window ([start, end), wrapping past midnight), else the flat limit.
-    `now` is injectable for tests."""
+    """Effective download cap in KB/s: weekly schedule wins, then the
+    off-peak override inside its window ([start, end), wrapping past
+    midnight), else the flat limit. `now` is injectable for tests."""
     try:
         settings = UserSettings.query.first()
         limit = int(getattr(settings, 'bandwidth_limit', 0) or 0)
         off = int(getattr(settings, 'offpeak_limit', 0) or 0)
         start = int(getattr(settings, 'offpeak_start', 22) or 0)
         end = int(getattr(settings, 'offpeak_end', 7) or 0)
+        sched_raw = getattr(settings, 'bandwidth_schedule_json', '[]') or '[]'
     except Exception:
         return 0
+    from datetime import datetime as _dt
+    current = now or _dt.now()
+    scheduled = _matching_schedule_limit(sched_raw, current)
+    if scheduled is not None:
+        return scheduled
     if off > 0:
-        from datetime import datetime as _dt
-        hour = (now or _dt.now()).hour
+        hour = current.hour
         in_window = (start <= hour < end) if start <= end else (hour >= start or hour < end)
         if in_window:
             return off
     return limit
+
+
+def _matching_schedule_limit(raw, current):
+    """First weekly-schedule entry matching `current`, or None.
+
+    Entries look like {"days": [0..6] (Mon..Sun), "start": h, "end": h,
+    "limit": KB/s}. Malformed entries are skipped so one typo can't
+    disable the whole schedule.
+    """
+    try:
+        entries = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    weekday, hour = current.weekday(), current.hour
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            days = entry.get('days', [])
+            if not isinstance(days, list) or weekday not in [int(d) for d in days]:
+                continue
+            start = int(entry.get('start', 0))
+            end = int(entry.get('end', 0))
+            cap = int(entry.get('limit', 0))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= start <= 23 and 0 <= end <= 23) or cap < 0:
+            continue
+        in_window = (start <= hour < end) if start <= end else (hour >= start or hour < end)
+        if in_window:
+            return cap
+    return None
 
 
 # Request pacing: YouTube throttles bursts (HTTP 429), most famously the
@@ -5455,6 +5603,7 @@ def _serialize(item):
         'tag_album': getattr(item, 'tag_album', '') or '',
         'error': item.error or '',
         'created_at': str(item.created_at) if item.created_at else '',
+        'last_played_at': str(item.last_played_at) if item.last_played_at else '',
     }
 
 
@@ -7997,7 +8146,7 @@ def api_video_resub(conversion_id):
 
 @bp.route('/api/prefs', methods=['POST'])
 def api_prefs_set():
-    """Flip player preferences (currently: radio mode)."""
+    """Flip player preferences (radio mode, mute-on-start, sleep fade)."""
     payload = request.get_json(silent=True) or {}
     try:
         settings = UserSettings.query.first()
@@ -8006,23 +8155,109 @@ def api_prefs_set():
             db.session.add(settings)
         if 'radio_mode' in payload:
             settings.radio_mode = bool(payload.get('radio_mode'))
+        if 'mute_on_start' in payload:
+            settings.mute_on_start = bool(payload.get('mute_on_start'))
+        if 'sleep_fade_secs' in payload:
+            try:
+                settings.sleep_fade_secs = max(
+                    2, min(30, int(payload.get('sleep_fade_secs'))))
+            except (TypeError, ValueError):
+                pass
         db.session.commit()
     except Exception:
         db.session.rollback()
         return jsonify({'ok': False}), 500
-    return jsonify({'ok': True, 'radio_mode': bool(settings.radio_mode)})
+    return jsonify({'ok': True, 'radio_mode': bool(settings.radio_mode),
+                    'mute_on_start': bool(settings.mute_on_start),
+                    'sleep_fade_secs': int(settings.sleep_fade_secs or 8)})
 
 
 @bp.route('/api/prefs')
 def api_prefs():
-    """Player-relevant preferences (subtitle language, radio mode)."""
+    """Player-relevant preferences (subtitle language, radio mode,
+    mute-on-start, sleep fade length)."""
     try:
         settings = UserSettings.query.first()
         pref = (getattr(settings, 'pref_sub_lang', 'en') or 'en').strip() or 'en'
         radio = bool(getattr(settings, 'radio_mode', False))
+        mute = bool(getattr(settings, 'mute_on_start', False))
+        fade = int(getattr(settings, 'sleep_fade_secs', 8) or 8)
     except Exception:
-        pref, radio = 'en', False
-    return jsonify({'ok': True, 'pref_sub_lang': pref, 'radio_mode': radio})
+        pref, radio, mute, fade = 'en', False, False, 8
+    return jsonify({'ok': True, 'pref_sub_lang': pref, 'radio_mode': radio,
+                    'mute_on_start': mute, 'sleep_fade_secs': fade})
+
+
+@bp.route('/api/eq-presets')
+def api_eq_presets():
+    """Named EQ presets stored server-side: {"name": [g0..g4]}."""
+    try:
+        settings = UserSettings.query.first()
+        raw = getattr(settings, 'eq_presets_json', '{}') or '{}'
+        presets = json.loads(raw)
+        if not isinstance(presets, dict):
+            presets = {}
+    except Exception:
+        presets = {}
+    return jsonify({'ok': True, 'presets': presets})
+
+
+@bp.route('/api/eq-presets', methods=['POST'])
+def api_eq_preset_save():
+    """Save current slider gains under a name (5 bands, -12..+12 dB)."""
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get('name') or '').strip()[:40]
+    gains = payload.get('gains')
+    if not name:
+        return jsonify({'ok': False, 'message': 'Name the preset'}), 400
+    try:
+        gains = [max(-12, min(12, int(round(float(g))))) for g in gains]
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'message': 'Gains must be 5 numbers'}), 400
+    if len(gains) != 5:
+        return jsonify({'ok': False, 'message': 'Gains must be 5 numbers'}), 400
+    if name.lower() in ('flat', 'rock', 'pop', 'jazz', 'vocal', 'bass'):
+        return jsonify({'ok': False,
+                        'message': 'That name is taken by a built-in preset'}), 400
+    try:
+        settings = UserSettings.query.first()
+        if settings is None:
+            settings = UserSettings(output_path=effective_output_path())
+            db.session.add(settings)
+        try:
+            presets = json.loads(settings.eq_presets_json or '{}')
+        except (TypeError, ValueError):
+            presets = {}
+        if not isinstance(presets, dict):
+            presets = {}
+        presets[name] = gains
+        settings.eq_presets_json = json.dumps(presets, sort_keys=True)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False}), 500
+    return jsonify({'ok': True, 'presets': presets})
+
+
+@bp.route('/api/eq-presets/<name>', methods=['DELETE'])
+def api_eq_preset_delete(name):
+    """Delete a user EQ preset (built-ins can't be deleted)."""
+    try:
+        settings = UserSettings.query.first()
+        try:
+            presets = json.loads(
+                getattr(settings, 'eq_presets_json', '{}') or '{}')
+        except (TypeError, ValueError):
+            presets = {}
+        if not isinstance(presets, dict) or name not in presets:
+            return jsonify({'ok': False, 'message': 'No such preset'}), 404
+        del presets[name]
+        settings.eq_presets_json = json.dumps(presets, sort_keys=True)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({'ok': False}), 500
+    return jsonify({'ok': True, 'presets': presets})
 
 
 @bp.route('/api/details/<int:conversion_id>')
