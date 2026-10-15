@@ -7319,15 +7319,27 @@ def resolve_import_urls(url, max_tracks=IMPORT_MAX_TRACKS):
         return resolved
 
     def _resolve_one(track):
-        expected_title = (f"{track['artist']} - {track['title']}"
-                          if track.get('artist') else track['title'])
-        try:
-            expected_duration = float(track.get('duration') or 0)
-        except (TypeError, ValueError):
-            expected_duration = 0.0
-        found = search_track_url(expected_title,
-                                 expected_duration=expected_duration or None)
-        return track, expected_title, expected_duration, found
+        # Each pool thread pushes its own app context: Flask contexts are
+        # thread-local, so without this every DB-touching helper called
+        # from a search (proxy lookup, privacy flags, bandwidth limit)
+        # raises "Working outside of application context" here. The
+        # scoped session is likewise thread-local; remove it when done
+        # so pooled connections don't leak across tasks.
+        from app import app as flask_app
+        from app.models import db as _db
+        with flask_app.app_context():
+            try:
+                expected_title = (f"{track['artist']} - {track['title']}"
+                                  if track.get('artist') else track['title'])
+                try:
+                    expected_duration = float(track.get('duration') or 0)
+                except (TypeError, ValueError):
+                    expected_duration = 0.0
+                found = search_track_url(expected_title,
+                                         expected_duration=expected_duration or None)
+                return track, expected_title, expected_duration, found
+            finally:
+                _db.session.remove()
 
     # Searches are network-bound and independent: run a handful at once so a
     # 50-track import resolves in seconds, not minutes. map() preserves

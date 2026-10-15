@@ -15,10 +15,25 @@ os.environ['AUDIO_CONVERTER_SECRET_KEY'] = 'test-secret-key'
 from app import app, db  # noqa: E402
 from app.models import ConversionHistory  # noqa: E402
 
+# Workers must never consume jobs during tests. Daemon worker threads
+# outlive the test that started them, and row ids restart at 1 for every
+# test (fresh tables), so a stale worker dequeuing a leftover id would
+# operate on the NEXT test's rows. Pausing the queue process-wide makes
+# consumption impossible; this codifies the convention already stated in
+# test_pool_resize_grows_and_shrinks ("no test needs live workers").
+# Queue contents remain fully assertable - only consumption is blocked.
+import app.routes.convert as _convert_module  # noqa: E402
+_convert_module._queue_paused.set()
+
 
 @pytest.fixture(autouse=True)
 def fresh_db():
     """Create the schema once; wipe tables between tests."""
+    # Re-assert the suite-wide paused invariant on every test: a test
+    # that unpauses the queue must restore it (see
+    # test_queue_pause_resume_status), but belt-and-braces here keeps
+    # one forgetful test from reintroducing cross-test consumption.
+    _convert_module._queue_paused.set()
     with app.app_context():
         db.drop_all()
         db.create_all()

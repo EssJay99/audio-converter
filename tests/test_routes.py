@@ -1496,6 +1496,9 @@ def test_stylesheet_uses_wide_layout(client):
 # ------------------------------------------- queue/net/library ----
 
 def test_queue_pause_resume_status(client):
+    # Normalize first: the suite pauses the worker queue process-wide
+    # (see conftest), so don't assume the initial state.
+    assert client.get('/api/queue/resume').get_json()['paused'] is False
     data = client.get('/api/queue/status').get_json()
     assert data['ok'] is True
     assert data['paused'] is False
@@ -1503,6 +1506,9 @@ def test_queue_pause_resume_status(client):
     assert client.get('/api/queue/pause').get_json()['paused'] is True
     assert client.get('/api/queue/status').get_json()['paused'] is True
     assert client.get('/api/queue/resume').get_json()['paused'] is False
+    # Restore the suite-wide invariant (see conftest): workers stay paused.
+    from app.routes import convert as _cm
+    _cm._queue_paused.set()
 
 
 def test_download_skipped_when_disk_full(client, tmp_path, monkeypatch):
@@ -7093,51 +7099,76 @@ def test_submit_already_queued_rejects(client):
     assert len(pending2) == 1
 
 
-def test_secret_key_ignores_weak_env(tmp_path, monkeypatch):
-    """A weak or empty AUDIO_CONVERTER_SECRET_KEY must be rejected."""
-    monkeypatch.setenv('AUDIO_CONVERTER_SECRET_KEY', 'changeme')
-    import importlib, sys
-    for m in [m for m in sys.modules if m.startswith('app')]:
-        del sys.modules[m]
-    from app import app as flask_app, is_secret_persisted
-    assert flask_app.secret_key != 'changeme'
-    assert len(flask_app.secret_key) >= 32
-    assert is_secret_persisted() is True
-
-
-def test_secret_key_accepts_strong_env(tmp_path, monkeypatch):
-    strong = '0' * 64
-    monkeypatch.setenv('AUDIO_CONVERTER_SECRET_KEY', strong)
-    for m in [m for m in sys.modules if m.startswith('app')]:
-        del sys.modules[m]
-    from app import app as flask_app, is_secret_persisted
-    assert flask_app.secret_key == strong
-    assert is_secret_persisted() is True
-
-
-def test_secret_key_strips_short_disk_value(tmp_path, monkeypatch):
-    """A too-short file value must be discarded and a new one written.
-
-    Removes any leftover project-root secret first so the resolver has to
-    fall through to the data-dir candidate (the read loop otherwise finds
-    a valid sibling value and short-circuits).
+def _run_secret_probe(env, tmp_path):
+    """Import the app in a CLEAN interpreter with `env` set, then report
+    the resolved secret key. Spawning a subprocess (instead of deleting
+    sys.modules and reimporting) keeps this process's Flask app and
+    SQLAlchemy bindings intact for every other test.
     """
-    for stale in (Path('/Users/ted/Youtube-soundcloud-audio-converter/audio-converter/.secret_key'),
-                  Path('/Users/ted/Youtube-soundcloud-audio-converter/audio-converter/src/.secret_key')):
-        try:
-            stale.unlink()
-        except FileNotFoundError:
-            pass
+    probe = (
+        "import os, sys; "
+        "sys.path.insert(0, 'src'); "
+        "from app import app as flask_app, is_secret_persisted; "
+        "print(repr(flask_app.secret_key)); "
+        "print(repr(is_secret_persisted()))"
+    )
+    import subprocess
+    child_env = dict(os.environ)
+    child_env['AUDIO_CONVERTER_DB_PATH'] = os.path.join(str(tmp_path), 'probe.db')
+    child_env.update(env)
+    res = subprocess.run(
+        [sys.executable, '-c', probe],
+        capture_output=True, text=True, timeout=120, env=child_env,
+        cwd=os.path.join(os.path.dirname(__file__), '..'))
+    assert res.returncode == 0, res.stderr[-2000:]
+    secret, persisted = res.stdout.strip().splitlines()
+    import ast
+    return ast.literal_eval(secret), ast.literal_eval(persisted)
+
+
+def test_secret_key_ignores_weak_env(tmp_path):
+    """A weak or empty AUDIO_CONVERTER_SECRET_KEY must be rejected."""
+    secret, persisted = _run_secret_probe(
+        {'AUDIO_CONVERTER_SECRET_KEY': 'changeme',
+         'AUDIO_CONVERTER_DATA_DIR': str(tmp_path)}, tmp_path)
+    assert secret != 'changeme'
+    assert len(secret) >= 32
+    assert persisted is True
+
+
+def test_secret_key_accepts_strong_env(tmp_path):
+    strong = '0' * 64
+    secret, persisted = _run_secret_probe(
+        {'AUDIO_CONVERTER_SECRET_KEY': strong,
+         'AUDIO_CONVERTER_DATA_DIR': str(tmp_path)}, tmp_path)
+    assert secret == strong
+    assert persisted is True
+
+
+def test_secret_key_strips_short_disk_value(tmp_path):
+    """A too-short file value must be discarded and a new one written."""
+    import shutil
     target = tmp_path / '.secret_key'
     target.write_text('short')
-    monkeypatch.setenv('AUDIO_CONVERTER_DATA_DIR', str(tmp_path))
-    for m in [m for m in sys.modules if m.startswith('app')]:
-        del sys.modules[m]
-    from app import app as flask_app, is_secret_persisted
-    assert flask_app.secret_key != 'short'
-    assert len(flask_app.secret_key) >= 32
-    assert is_secret_persisted() is True
-    assert target.read_text() == flask_app.secret_key
+    # The resolver falls back to a project-root .secret_key when the
+    # data-dir value is discarded; move any such local artifact aside
+    # so this test exercises the data-dir write path, then restore it.
+    root_key = Path(__file__).resolve().parent.parent / '.secret_key'
+    backup = None
+    try:
+        if root_key.exists():
+            backup = tmp_path / '.secret_key.root-backup'
+            shutil.move(str(root_key), str(backup))
+        secret, persisted = _run_secret_probe(
+            {'AUDIO_CONVERTER_SECRET_KEY': 'changeme',
+             'AUDIO_CONVERTER_DATA_DIR': str(tmp_path)}, tmp_path)
+        assert secret != 'short'
+        assert len(secret) >= 32
+        assert persisted is True
+        assert target.read_text() == secret
+    finally:
+        if backup is not None and backup.exists():
+            shutil.move(str(backup), str(root_key))
 
 
 def test_health_includes_secret_persisted_flag(client):
@@ -7479,8 +7510,6 @@ def test_first_run_seen_also_acks_schema(client):
     assert client.get('/api/migration-info').get_json()['upgrade'] is False
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction; '
-                            'production path verified via api_upload_convert')
 def test_local_upload_skips_undecodable_file(client, tmp_path, monkeypatch):
     """Files that ffmpeg can't decode should not get a history row."""
     from app.models import ConversionHistory
@@ -7497,8 +7526,6 @@ def test_local_upload_skips_undecodable_file(client, tmp_path, monkeypatch):
         assert ConversionHistory.query.count() == 0
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction; '
-                            'production path verified via api_upload_convert')
 def test_local_upload_accepts_decodable_file(client, tmp_path, monkeypatch):
     from app.models import ConversionHistory
     real = tmp_path / 'good.flac'
@@ -7557,8 +7584,6 @@ def test_janitor_keeps_permanent_failures(client, tmp_path):
         assert db.session.get(ConversionHistory, failed.id) is not None
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction; '
-                            'production path verified via api_upload_convert')
 def test_job_finish_marks_permanent_after_retries_exhausted(client, tmp_path):
     from datetime import datetime
     audio = tmp_path / 'r.flac'
@@ -7656,8 +7681,6 @@ def test_history_pagination_preserves_filters(client):
         'days=7' in page)
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction; '
-                            'production path verified manually')
 def test_folder_upload_flattens_files(client, tmp_path, monkeypatch):
     """A multipart upload with several files (as a browser would
     send from a `webkitdirectory` picker or a recursive folder drop)
@@ -7778,7 +7801,6 @@ def test_measure_lufs_parses_european_format(monkeypatch):
     assert convert_module._measure_lufs('/tmp/anything') == -18.7
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction')
 def test_normalize_tags_cleans_whitespace(client):
     """Tags with extra whitespace + punctuation get trimmed."""
     from app.models import ConversionHistory
@@ -7801,7 +7823,6 @@ def test_normalize_tags_cleans_whitespace(client):
     assert row.tag_album == 'Abbey Road'
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction')
 def test_normalize_tags_merges_case_duplicates(client):
     """Same artist in different casings collapses to the most-common form."""
     from app.models import ConversionHistory
@@ -7824,7 +7845,6 @@ def test_normalize_tags_merges_case_duplicates(client):
     assert artists == ['The Beatles']
 
 
-@pytest.mark.skip(reason='order-sensitive app-context interaction')
 def test_normalize_tags_renames_files_when_requested(client, tmp_path):
     """With rename_files=true, completed tracks move to artist/album/title."""
     from app.models import ConversionHistory
@@ -7945,7 +7965,6 @@ def test_export_artist_unknown_404(client):
     assert resp.status_code == 404
 
 
-@pytest.mark.skip(reason='order-sensitive shared UserSettings row; verified passing in isolation')
 def test_get_proxy_per_service_override(client):
     from app.models import UserSettings
     from app.routes.convert import _get_proxy
@@ -7969,7 +7988,6 @@ def test_proxies_json_rejects_bad_json(client):
     assert resp.status_code == 302
 
 
-@pytest.mark.skip(reason='order-sensitive shared UserSettings row; verified passing in isolation')
 def test_proxy_json_malformed_is_cleared_on_save(client):
     from app.models import UserSettings
     resp = client.post('/settings', data={
